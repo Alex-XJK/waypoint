@@ -12,7 +12,7 @@ import (
 	"github.com/Alex-XJK/checkpoint-lite/pkg/checkpoint"
 )
 
-var Version = "v0.4.0"
+var Version = "v0.4.1-dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -22,6 +22,7 @@ func main() {
 		fmt.Println("  create <session> <pid | -1> <checkpoint-id>  - Create checkpoint")
 		fmt.Println("  restore <session> <checkpoint-id>            - Restore checkpoint")
 		fmt.Println("  exec <session> <command> [args...]           - Execute command in environment")
+		fmt.Println("  inject <session> <shell-pid> <command>       - Inject command into stateful shell")
 		fmt.Println("  list <session>                               - List checkpoints")
 		fmt.Println("  cleanup <session> [--force]                  - Clean up session")
 		fmt.Println("  version                                      - Show version")
@@ -126,6 +127,45 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Checkpoint '%s' restored, new PID: %d\n", checkpointID, newPID)
+
+	case "inject":
+		if len(os.Args) != 5 {
+			fmt.Println("Usage: inject <session> <shell-pid> <command>")
+			fmt.Println("  Inject command into a stateful shell session")
+			fmt.Println("  Use this to maintain shell state (env vars, etc.) across checkpoints")
+			fmt.Println()
+			fmt.Println("Example workflow:")
+			fmt.Println("  1. Start a stateful shell: script -q -c \"bash --norc --noprofile\" /dev/null")
+			fmt.Println("  2. Get shell PID: pgrep -n bash")
+			fmt.Println("  3. Inject commands: checkpoint-lite inject <session> <pid> 'export VAR=value'")
+			fmt.Println("  4. Create checkpoint: checkpoint-lite create <session> <pid> <checkpoint-id>")
+			os.Exit(1)
+		}
+		sessionID := os.Args[2]
+		shellPID, err := strconv.Atoi(os.Args[3])
+		if err != nil {
+			fmt.Printf("Invalid shell PID: %s\n", os.Args[3])
+			os.Exit(1)
+		}
+		command := os.Args[4]
+
+		manager, err := checkpoint.LoadManager(sessionID)
+		if err != nil {
+			fmt.Printf("Error loading session: %v\n", err)
+			os.Exit(1)
+		}
+
+		output, err := manager.InjectCommand(shellPID, command)
+		if err != nil {
+			fmt.Printf("Error injecting command: %v\n", err)
+			if output != "" {
+				fmt.Printf("Output:\n%s\n", output)
+			}
+			os.Exit(1)
+		}
+
+		// Print the captured output
+		fmt.Print(output)
 
 	case "exec":
 		if len(os.Args) < 4 {
