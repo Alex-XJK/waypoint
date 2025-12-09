@@ -209,71 +209,65 @@ rmdir "$OLDROOT" 2>/dev/null || true
 	return sandboxedCmd, nil
 }
 
-// ExecuteInSandbox creates a command that runs an arbitrary command in the sandboxed environment.
-// This uses the same sandbox setup as RestoreInSandbox but executes the provided command instead of CRIU restore.
-// originalDir is the original directory that was checkpointed - commands will start in this directory's location.
+// copyNetworkConfig copies /etc/resolv.conf and /etc/hosts from host to workDir
+// This is needed because buildah images don't include these files (Docker injects them at runtime)
+func copyNetworkConfig(workDir string) error {
+	etcDir := filepath.Join(workDir, "etc")
+	if err := os.MkdirAll(etcDir, 0755); err != nil {
+		return fmt.Errorf("failed to create /etc in sandbox: %w", err)
+	}
+
+	// Files to copy from host
+	filesToCopy := []string{"resolv.conf", "hosts"}
+
+	for _, filename := range filesToCopy {
+		srcPath := filepath.Join("/etc", filename)
+		dstPath := filepath.Join(etcDir, filename)
+
+		// Read source file
+		content, err := os.ReadFile(srcPath)
+		if err != nil {
+			// Skip if file doesn't exist on host
+			continue
+		}
+
+		// Write to destination (overwrite if exists)
+		if err := os.WriteFile(dstPath, content, 0644); err != nil {
+			return fmt.Errorf("failed to copy %s to sandbox: %w", filename, err)
+		}
+	}
+
+	return nil
+}
+
+// ExecuteInSandbox creates a command that runs an arbitrary command in a fully isolated sandbox.
+// The sandbox is Docker-like: workDir becomes the root filesystem (/), and no host directories are mounted.
+// This assumes workDir already contains a complete filesystem (copied from Docker) with /bin, /usr, etc.
+// originalDir is ignored - the command always starts in / (the root of workDir).
 func ExecuteInSandbox(workDir, originalDir string, command string, args ...string) (*exec.Cmd, error) {
-	// Get absolute paths
+	// Get absolute path for workDir
 	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
-	absOriginalDir, err := filepath.Abs(originalDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get absolute path for original directory: %w", err)
-	}
-
-	// Create a new root structure outside workDir (in baseDir) to avoid OverlayFS issues
-	// We need to get baseDir from workDir path: workDir is baseDir/work
-	baseDir := filepath.Dir(absWorkDir)
-	newRoot := filepath.Join(baseDir, ".sandbox-root")
-	os.RemoveAll(newRoot)
-	if err := os.MkdirAll(newRoot, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create new root: %w", err)
-	}
-
-	// Create system directories in new root
-	requiredDirs := []string{"bin", "lib", "lib64", "usr/lib", "usr/lib64", "usr/bin", "sbin", "usr/sbin", "dev", "proc", "sys", "tmp", "run"}
+	// Ensure essential directories exist in workDir
+	// These should already exist if copied from Docker, but we create them just in case
+	requiredDirs := []string{"dev", "proc", "sys", "tmp", "run"}
 	for _, dir := range requiredDirs {
-		target := filepath.Join(newRoot, dir)
+		target := filepath.Join(absWorkDir, dir)
 		if err := os.MkdirAll(target, 0755); err != nil {
 			return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
 	}
 
-	// Create the original directory path structure in new root
-	// e.g., if originalDir is /users/gliargko/checkpoint-lite, create /users/gliargko/checkpoint-lite in newRoot
-	originalPathInRoot := filepath.Join(newRoot, absOriginalDir)
-	if err := os.MkdirAll(filepath.Dir(originalPathInRoot), 0755); err != nil {
-		return nil, fmt.Errorf("failed to create original directory path: %w", err)
+	// Copy network configuration (DNS) from host to sandbox
+	// This is needed because buildah images don't include /etc/resolv.conf
+	if err := copyNetworkConfig(absWorkDir); err != nil {
+		// Log warning but continue - network may not be needed
+		fmt.Fprintf(os.Stderr, "Warning: failed to copy network config to sandbox: %v\n", err)
 	}
 
-	// Build mount setup commands
-	var mountCmds strings.Builder
-	mountCmds.WriteString("mount --make-rprivate /\n") // Privatize mount propagation
-	
-	// Mount newRoot as tmpfs first to make it a proper mount point for pivot_root
-	mountCmds.WriteString(fmt.Sprintf("mount -t tmpfs tmpfs '%s' 2>/dev/null || true\n", newRoot))
-	
-	// Recreate directories in the tmpfs mount
-	for _, dir := range requiredDirs {
-		mountCmds.WriteString(fmt.Sprintf("mkdir -p '%s/%s' 2>/dev/null || true\n", newRoot, dir))
-	}
-	// Recreate original directory path structure (including the target directory itself)
-	mountCmds.WriteString(fmt.Sprintf("mkdir -p '%s' 2>/dev/null || true\n", originalPathInRoot))
-	
-	// Bind mount host directories (read-only for safety) to new root
-	hostDirs := []string{"/lib", "/lib64", "/usr/lib", "/usr/lib64", "/bin", "/usr/bin", "/sbin", "/usr/sbin"}
-	mountCmds.WriteString(buildHostDirMountCommands(hostDirs, newRoot))
-	
-	// Bind mount the overlay (workDir) to the original directory path in new root
-	// This makes the original directory accessible at its original path
-	mountCmds.WriteString(fmt.Sprintf("mount --bind '%s' '%s' 2>/dev/null || true\n", absWorkDir, originalPathInRoot))
-	
-	// Setup minimal /dev filesystem in new root
-	mountCmds.WriteString(buildDevSetupCommands(newRoot))
-	
 	// Build command with escaped arguments
 	cmdParts := make([]string, 0, len(args)+1)
 	cmdParts = append(cmdParts, command)
@@ -283,38 +277,47 @@ func ExecuteInSandbox(workDir, originalDir string, command string, args ...strin
 	}
 	execCmd := strings.Join(cmdParts, " ")
 	
-	// Build the final command that runs inside the sandbox
-	// Get conflicting system directories to avoid mounting over our bind mounts
-	conflictDirs := getConflictingSystemDirs(absOriginalDir)
-	finalMounts := buildFinalMountCommands(conflictDirs)
-	
 	// Build the complete setup script
-	// We create a new root structure where:
-	// - System directories are at /bin, /lib, etc.
-	// - Original directory is at its original path (e.g., /users/gliargko/checkpoint-lite)
-	// - Commands start in the original directory
+	// Docker-like isolation: workDir becomes / and nothing from host is visible
 	setupScript := fmt.Sprintf(`#!/bin/sh
-# Set up bind mounts from host filesystem and overlay
-%s
-# Use pivot_root to make newRoot the root filesystem
+# Privatize mount propagation to isolate from host
+mount --make-rprivate / 2>/dev/null || true
+
+# Setup minimal /dev filesystem
+mount -t tmpfs -o nosuid,noexec,mode=755 tmpfs '%s/dev' 2>/dev/null || true
+mkdir -p '%s/dev/pts' '%s/dev/shm' 2>/dev/null || true
+mount -t devpts -o newinstance,ptmxmode=0666,mode=0620,gid=5 devpts '%s/dev/pts' 2>/dev/null || true
+mknod -m 666 '%s/dev/null' c 1 3 2>/dev/null || true
+mknod -m 666 '%s/dev/zero' c 1 5 2>/dev/null || true
+mknod -m 666 '%s/dev/tty' c 5 0 2>/dev/null || true
+mknod -m 666 '%s/dev/random' c 1 8 2>/dev/null || true
+mknod -m 666 '%s/dev/urandom' c 1 9 2>/dev/null || true
+
+# Use pivot_root to make workDir the new root filesystem
 # Create a temporary directory for the old root
 OLDROOT=$(mktemp -d -p '%s' .oldroot.XXXXXX) || exit 1
-# Pivot to make newRoot the new root
-pivot_root '%s' "$OLDROOT" || exit 1
-# Move old root out of the way and unmount it
-cd /
-umount "$OLDROOT" 2>/dev/null || true
-rmdir "$OLDROOT" 2>/dev/null || true
-# Mount /proc with hidepid=2 to prevent non-root from seeing host processes
-# Mount /sys, /tmp, /run as tmpfs
-%s
-# Change to the original directory (where the checkpointed content is)
-cd '%s' || cd /
-# Execute the command
-exec %s
-`, mountCmds.String(), newRoot, newRoot, finalMounts, absOriginalDir, execCmd)
 
-	// Use unshare to create mount and PID namespaces, then run setup script
+# Pivot to make workDir the new root
+pivot_root '%s' "$OLDROOT" || exit 1
+
+# Move to new root and clean up old root
+cd /
+umount -l "$OLDROOT" 2>/dev/null || true
+rmdir "$OLDROOT" 2>/dev/null || true
+
+# Mount virtual filesystems (these should be in the new root now)
+mount -t proc proc -o nosuid,nodev,noexec,hidepid=2 /proc 2>/dev/null || true
+mount -t sysfs sysfs /sys 2>/dev/null || true
+mount -t tmpfs tmpfs /tmp 2>/dev/null || true
+mount -t tmpfs tmpfs /run 2>/dev/null || true
+
+# Execute the command in / (which is the workDir content)
+cd /
+exec %s
+`, absWorkDir, absWorkDir, absWorkDir, absWorkDir, absWorkDir, absWorkDir, absWorkDir, absWorkDir, absWorkDir, absWorkDir, absWorkDir, execCmd)
+
+	// Use unshare to create isolated namespaces (mount, PID, network, IPC, UTS)
+	// This creates a Docker-like container environment
 	sandboxedCmd := exec.Command("unshare",
 		"--mount",
 		"--fork",
