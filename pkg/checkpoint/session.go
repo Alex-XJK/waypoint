@@ -13,10 +13,11 @@ import (
 )
 
 // NewManagerWithSession creates a new manager with a random session ID
-func NewManagerWithSession() (*Manager, string, error) {
+// Uses default branch ID for new session
+func NewManagerWithSession() (*Manager, string, string, error) {
 	sessionID, err := generateSessionID()
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to generate session ID: %w", err)
+		return nil, "", "", fmt.Errorf("failed to generate session ID: %w", err)
 	}
 
 	loadConfig()
@@ -24,27 +25,31 @@ func NewManagerWithSession() (*Manager, string, error) {
 	baseDir := filepath.Join(DefaultSessionsDir, sessionID)
 	manager := NewManager(baseDir)
 	manager.sessionID = sessionID
+	manager.branchID = DefaultBranchID
+	manager.currDir = filepath.Join(baseDir, manager.branchID)
 	manager.currentParent = []string{}
 	manager.shellPid = ShellNotEnabled
 	manager.shellSocket = ""
 
 	// Save session info globally
-	if err := saveSessionInfo(sessionID, manager); err != nil {
+	if err := saveSessionInfo(sessionID, branchID, manager); err != nil { // why pass in sessionID? need to pass in branchID?
 		return nil, "", fmt.Errorf("failed to save session info: %w", err)
 	}
 
-	return manager, sessionID, nil
+	return manager, sessionID, DefaultBranchID, nil
 }
 
-// LoadManager loads an existing manager by session ID
-func LoadManager(sessionID string) (*Manager, error) {
-	sessionInfo, err := loadSessionInfo(sessionID)
+// LoadManager loads an existing manager by session ID and branch ID
+func LoadManager(sessionID string, branchID string) (*Manager, error) {
+	sessionInfo, err := loadSessionInfo(sessionID, branchID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load session: %w", err)
 	}
 
 	manager := NewManager(sessionInfo.BaseDir)
 	manager.sessionID = sessionID
+	manager.branchID = sessionInfo.BranchID
+	manager.currDir = sessionInfo.CurrDir
 	manager.originalDir = sessionInfo.OriginalDir
 	manager.workOverlay = sessionInfo.WorkOverlay
 	manager.shellPid = sessionInfo.ShellPid
@@ -64,11 +69,13 @@ func generateSessionID() (string, error) {
 }
 
 // Convert Manager to SessionInfo and save to the fixed-path global store
-func saveSessionInfo(sessionID string, manager *Manager) error {
+func saveSessionInfo(sessionID string, branchID string, manager *Manager) error {
 	os.MkdirAll(SessionInfoDir, 0755)
 
 	sessionInfo := SessionInfo{
-		SessionID:     sessionID,
+		SessionID:     sessionID, // why is sessionID passed in as an arg instead of using manager.sessionID?
+		BranchID:      branchID, // not sure if should pass in as arg or just use from manager
+		CurrDir:       manager.currDir,
 		BaseDir:       manager.baseDir,
 		OriginalDir:   manager.originalDir,
 		WorkOverlay:   manager.workOverlay,
@@ -83,13 +90,13 @@ func saveSessionInfo(sessionID string, manager *Manager) error {
 		return err
 	}
 
-	sessionFile := filepath.Join(SessionInfoDir, sessionID+".json")
+	sessionFile := filepath.Join(SessionInfoDir, sessionID, branchID+".json")
 	return os.WriteFile(sessionFile, data, 0644)
 }
 
 // Load SessionInfo from the fixed-path global store
-func loadSessionInfo(sessionID string) (*SessionInfo, error) {
-	sessionFile := filepath.Join(SessionInfoDir, sessionID+".json")
+func loadSessionInfo(sessionID string, branchID string) (*SessionInfo, error) {
+	sessionFile := filepath.Join(SessionInfoDir, sessionID, branchID +".json")
 
 	data, err := os.ReadFile(sessionFile)
 	if err != nil {
@@ -101,8 +108,9 @@ func loadSessionInfo(sessionID string) (*SessionInfo, error) {
 	return &sessionInfo, err
 }
 
-// Remove SessionInfo JSON file from the fixed-path global store
+// Remove all SessionInfo JSON files for a given session ID from the fixed-path global store
+// add way to remove just a specific branch's session info?
 func removeSessionInfo(sessionID string) error {
-	sessionFile := filepath.Join(SessionInfoDir, sessionID+".json")
-	return os.Remove(sessionFile)
+	sessionIDDir := filepath.Join(SessionInfoDir, sessionID)
+	return os.RemoveAll(sessionIDDir)
 }

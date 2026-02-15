@@ -83,7 +83,7 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 	} else if !m.processExists(pid) {
 		return fmt.Errorf("process %d does not exist", pid)
 	} else {
-		currentCriuDir := filepath.Join(m.baseDir, "current", "criu")
+		currentCriuDir := filepath.Join(m.currDir, "criu")
 		os.RemoveAll(currentCriuDir)
 		os.MkdirAll(currentCriuDir, 0755)
 		memoryErr := m.createMemoryCheckpoint(pid, currentCriuDir)
@@ -96,16 +96,16 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 	exec.Command("umount", m.workOverlay).Run()
 
 	// Rename "~/current/" to "~/<checkpointID>/"
-	currentDir := filepath.Join(m.baseDir, "current")
+	// currentDir := filepath.Join(m.baseDir, "current")
 	ckptDir := filepath.Join(m.baseDir, checkpointID)
-	if err := os.Rename(currentDir, ckptDir); err != nil {
+	if err := os.Rename(m.currDir, ckptDir); err != nil {
 		return fmt.Errorf("failed to rename current directory: %w", err)
 	}
 
 	// Recreate a new empty "current" overlay for continued use
-	os.MkdirAll(currentDir, 0755)
-	upperDir := filepath.Join(m.baseDir, "current", "upper")
-	workDir := filepath.Join(m.baseDir, "current", "work")
+	os.MkdirAll(m.currDir, 0755)
+	upperDir := filepath.Join(m.currDir, "upper")
+	workDir := filepath.Join(m.currDir, "work")
 	os.MkdirAll(upperDir, 0755)
 	os.MkdirAll(workDir, 0755)
 
@@ -164,8 +164,8 @@ func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
 	exec.Command("umount", m.workOverlay).Run()
 
 	// Clear current upper and work directories
-	upperDir := filepath.Join(m.baseDir, "current", "upper")
-	workDir := filepath.Join(m.baseDir, "current", "work")
+	upperDir := filepath.Join(m.currDir, "upper")
+	workDir := filepath.Join(m.currDir, "work")
 	os.RemoveAll(upperDir)
 	os.RemoveAll(workDir)
 

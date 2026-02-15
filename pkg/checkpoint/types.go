@@ -14,7 +14,9 @@ type Manager struct {
 	metadataDir   string   // Directory for metadata files, e.g., /tmp/checkpoint-sessions/a1b2c3d4e5f6g7h8/metadata
 	workOverlay   string   // Current working overlay mount point, e.g., /tmp/checkpoint-sessions/a1b2c3d4e5f6g7h8/work
 	originalDir   string   // Original directory being managed, e.g., /home/user/app-data
+	currDir       string
 	sessionID     string   // Unique session identifier, e.g., a1b2c3d4e5f6g7h8
+	branchID      string   // Unique branch identifier 
 	shellPid      int      // PID of the shell process if a shell is enabled, ShellNotEnabled(=0) otherwise
 	shellSocket   string   // Path to the shell socket if enabled, empty otherwise
 	currentParent []string // Current parent checkpoints
@@ -22,6 +24,7 @@ type Manager struct {
 
 // Metadata represents the metadata stored for each checkpoint.
 // It is serialized to JSON and stored in the per-session metadata directory for snapshot tracking.
+// Add branchID? Not sure if necessary
 type Metadata struct {
 	ID          string   `json:"id"`
 	PID         int      `json:"pid"`
@@ -35,9 +38,11 @@ type Metadata struct {
 // It is serialized to JSON and stored in a globally known location for session tracking.
 type SessionInfo struct {
 	SessionID     string   `json:"session_id"`
+	BranchID      string   `json:"branch_id"`
 	BaseDir       string   `json:"base_dir"`
 	OriginalDir   string   `json:"original_dir"`
 	WorkOverlay   string   `json:"work_overlay"`
+	CurrDir       string   `json:"curr_dir"`
 	CreatedAt     int64    `json:"created_at"`
 	CurrentParent []string `json:"current_parent"`
 	ShellPid      int      `json:"shell_pid"`
@@ -51,6 +56,8 @@ const ShellNotEnabled = 0       // Shell is not enabled for this session
 const PidNotProvided = -2       // PID not provided for checkpointing
 
 const SessionInfoDir = "/tmp/checkpoint-sessions-info"
+
+const DefaultBranchID = "init_branch"
 
 // The below section handles configuration loading.
 // Those variables can be overridden by configuration.
