@@ -27,8 +27,8 @@ func (m *Manager) InitEnvironment(originalDir string) (string, error) {
 	m.originalDir = absDir
 
 	// Create overlay structure
-	upperDir := filepath.Join(m.baseDir, "current", "upper")
-	workDir := filepath.Join(m.baseDir, "current", "work")
+	upperDir := filepath.Join(m.currDir, "upper")
+	workDir := filepath.Join(m.currDir, "work")
 
 	os.MkdirAll(upperDir, 0755)
 	os.MkdirAll(workDir, 0755)
@@ -40,7 +40,7 @@ func (m *Manager) InitEnvironment(originalDir string) (string, error) {
 	}
 
 	// Update session info with environment details
-	if err := updateSessionEnvironment(m.sessionID, absDir, m.workOverlay); err != nil {
+	if err := updateSessionEnvironment(m.sessionID, m.branchID, absDir, m.workOverlay); err != nil {
 		return "", fmt.Errorf("failed to update session info: %w", err)
 	}
 

@@ -95,6 +95,9 @@ func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool) error {
 
 // StartShell launches a new chroot-embedded bash_init process at the given workDir.
 // On success, it updates the session info with the shell PID and socket path for later use.
+// TODO ASK ALEX: should socket be branch specific? Should temp folder in general be branch specific?
+// ALSO ASK: Why doing m.baseDir join "temp", vs using m.temporaryDir?
+
 func (m *Manager) StartShell(workDir string) (int, string, error) {
 	// Locate bash_init binary
 	bashInitSrc := DefaultBashInitSrc
@@ -102,7 +105,7 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 		return ShellNotEnabled, "", fmt.Errorf("bash_init binary not found at %s", bashInitSrc)
 	}
 
-	socketPath := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.sock", m.sessionID))
+	socketPath := filepath.Join(m.baseDir, m.branchID + "_temp", fmt.Sprintf("shell_%s.sock", m.sessionID)) //TODO not sure if should be branch spec.
 
 	// Judge /bin/bash pre-requisite for bash_init
 	bashPath := filepath.Join(workDir, "bin/bash")
@@ -123,7 +126,7 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	cmd.Stdin = devNull
 
 	// stdout/stderr -> log file
-	logPath := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.log", m.sessionID))
+	logPath := filepath.Join(m.baseDir, m.branchID + "_temp", fmt.Sprintf("shell_%s.log", m.sessionID)) //TODO ASK
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return ShellNotEnabled, "", fmt.Errorf("failed to open log file: %w", err)
@@ -141,7 +144,7 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	m.shellSocket = socketPath
 
 	// Save updated session info
-	if err := saveSessionInfo(m.sessionID, m); err != nil {
+	if err := saveSessionInfo(m.sessionID, m.branchID, m); err != nil {
 		return m.shellPid, m.shellSocket, fmt.Errorf("failed to save session info: %w", err)
 	}
 
@@ -181,7 +184,7 @@ func (m *Manager) BuildEnvironment(dockerfileDir string, quiet bool) (string, in
 	}
 
 	// Update session info with originalDir, workOverlay, shell PID, and socket path
-	if err := updateSessionEnvironment(m.sessionID, m.originalDir, m.workOverlay); err != nil {
+	if err := updateSessionEnvironment(m.sessionID, m.branchID, m.originalDir, m.workOverlay); err != nil {
 		return workDir, pid, fmt.Errorf("failed to update session info: %w", err)
 	}
 

@@ -22,10 +22,11 @@ func NewManagerWithSession() (*Manager, string, string, error) {
 
 	loadConfig()
 
+	branchID := DefaultBranchID
 	baseDir := filepath.Join(DefaultSessionsDir, sessionID)
-	manager := NewManager(baseDir)
+	manager := NewManager(baseDir, branchID)
 	manager.sessionID = sessionID
-	manager.branchID = DefaultBranchID
+	manager.branchID = branchID
 	manager.currDir = filepath.Join(baseDir, manager.branchID)
 	manager.currentParent = []string{}
 	manager.shellPid = ShellNotEnabled
@@ -33,7 +34,7 @@ func NewManagerWithSession() (*Manager, string, string, error) {
 
 	// Save session info globally
 	if err := saveSessionInfo(sessionID, branchID, manager); err != nil { // why pass in sessionID? need to pass in branchID?
-		return nil, "", fmt.Errorf("failed to save session info: %w", err)
+		return nil, "", "", fmt.Errorf("failed to save session info: %w", err)
 	}
 
 	return manager, sessionID, DefaultBranchID, nil
@@ -46,7 +47,7 @@ func LoadManager(sessionID string, branchID string) (*Manager, error) {
 		return nil, fmt.Errorf("failed to load session: %w", err)
 	}
 
-	manager := NewManager(sessionInfo.BaseDir)
+	manager := NewManager(sessionInfo.BaseDir, branchID)
 	manager.sessionID = sessionID
 	manager.branchID = sessionInfo.BranchID
 	manager.currDir = sessionInfo.CurrDir
@@ -70,7 +71,7 @@ func generateSessionID() (string, error) {
 
 // Convert Manager to SessionInfo and save to the fixed-path global store
 func saveSessionInfo(sessionID string, branchID string, manager *Manager) error {
-	os.MkdirAll(SessionInfoDir, 0755)
+	os.MkdirAll(filepath.Join(SessionInfoDir, sessionID), 0755)
 
 	sessionInfo := SessionInfo{
 		SessionID:     sessionID, // why is sessionID passed in as an arg instead of using manager.sessionID?

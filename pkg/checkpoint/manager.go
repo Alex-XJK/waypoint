@@ -12,10 +12,10 @@ import (
 	"time"
 )
 
-func NewManager(baseDir string) *Manager {
+func NewManager(baseDir string, branchID string) *Manager {
 	metadataDir := filepath.Join(baseDir, "metadata")
-	workOverlay := filepath.Join(baseDir, "work")
-	temporaryDir := filepath.Join(baseDir, "temp")
+	workOverlay := filepath.Join(baseDir, branchID + "_work")
+	temporaryDir := filepath.Join(baseDir, branchID + "_temp") // Not sure if should be branch specific?
 
 	// Create directories
 	os.MkdirAll(metadataDir, 0755)
@@ -199,6 +199,7 @@ func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
 }
 
 // ListCheckpoints returns a list of available checkpoints
+// TODO ASK: do we want to be able to identify checkpoints by their original branch? maybe not?
 func (m *Manager) ListCheckpoints() ([]string, error) {
 	files, err := os.ReadDir(m.metadataDir)
 	if err != nil {

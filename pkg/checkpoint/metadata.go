@@ -32,15 +32,16 @@ func (m *Manager) loadMetadata(checkpointID string) (*Metadata, error) {
 
 // syncManagerToSession updates the session info file with the current manager state
 func (m *Manager) syncManagerToSession() error {
-	err := saveSessionInfo(m.sessionID, m)
+	err := saveSessionInfo(m.sessionID, m.branchID, m)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func updateSessionEnvironment(sessionID, originalDir, workOverlay string) error {
-	sessionInfo, err := loadSessionInfo(sessionID)
+// since only called on init, could use DefaultBranchID rather than passing in?
+func updateSessionEnvironment(sessionID, branchID, originalDir, workOverlay string) error {
+	sessionInfo, err := loadSessionInfo(sessionID, branchID)
 	if err != nil {
 		return err
 	}
@@ -53,6 +54,6 @@ func updateSessionEnvironment(sessionID, originalDir, workOverlay string) error 
 		return err
 	}
 
-	sessionFile := filepath.Join(SessionInfoDir, sessionID+".json")
+	sessionFile := filepath.Join(SessionInfoDir, sessionID, branchID+".json")
 	return os.WriteFile(sessionFile, data, 0644)
 }
