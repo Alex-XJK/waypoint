@@ -198,6 +198,69 @@ func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
 	return newPID, nil
 }
 
+func (m *Manager) RestoreCheckpointNewBranch(checkpointID string) (int, error) {
+	// Load checkpointMetadata
+	checkpointMetadata, err := m.loadMetadata(checkpointID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to load checkpoint metadata: %w", err)
+	}
+
+	upperDir := filepath.Join(m.currDir, "upper")
+	workDir := filepath.Join(m.currDir, "work")
+
+	// Figure out memory later...
+	/*
+	// If the previous checkpoint contains process, we need to first kill it, so that mountpoint can be released.
+	if checkpointMetadata.PID != SkipMemoryCheckpoint {
+		if err := m.killProcess(checkpointMetadata.PID); err != nil {
+			return 0, fmt.Errorf("failed to kill original process %d: %w", checkpointMetadata.PID, err)
+		}
+	}
+	*/
+
+	// Shouldn't need to umount or clear - do it just in case? (ASK)
+	/* 
+	// Unmount current overlay for future remount
+	exec.Command("umount", m.workOverlay).Run()
+
+	// Clear current upper and work directories
+	os.RemoveAll(upperDir)
+	os.RemoveAll(workDir)
+	*/
+
+	// Set original dir from metadata -- ok? not sure why buildOverlay uses from manager vs from metadata (ASK)
+	m.originalDir = checkpointMetadata.OriginalDir
+
+	// Rebuild lowerdirs list from checkpointMetadata.ParentList
+	lowerDirs := m.buildOverlayLayers(checkpointMetadata.ParentList)
+
+	// Update current parent list to checkpoint's parent list
+	m.currentParent = checkpointMetadata.ParentList
+	m.syncManagerToSession()
+
+	// Remount overlay with the checkpoint's upper layer on top of the parent lowerdirs
+	os.MkdirAll(upperDir, 0755)
+	os.MkdirAll(workDir, 0755)
+	errFs := m.mountOverlay(lowerDirs, upperDir, workDir, m.workOverlay)
+	if errFs != nil {
+		return 0, fmt.Errorf("filesystem restore failed: %w", errFs)
+	}
+
+	// Restore memory state using CRIU
+	/*
+	if checkpointMetadata.PID == SkipMemoryCheckpoint {
+		fmt.Println("Skipping memory restore as per user request")
+		return SkipMemoryCheckpoint, nil
+	}
+	previousCriuPath := filepath.Join(m.baseDir, checkpointID, "criu")
+	newPID, errMem := m.restoreMemoryState(checkpointMetadata.PID, previousCriuPath)
+	if errMem != nil {
+		return 0, fmt.Errorf("memory restore failed: %w", errMem)
+	}
+	*/
+	newPID := 0 // placeholder
+	return newPID, nil
+}
 // ListCheckpoints returns a list of available checkpoints
 // TODO ASK: do we want to be able to identify checkpoints by their original branch? maybe not?
 func (m *Manager) ListCheckpoints() ([]string, error) {
@@ -217,8 +280,11 @@ func (m *Manager) ListCheckpoints() ([]string, error) {
 	return checkpoints, nil
 }
 
+
+// refactor logic? manager is branch-level, want to clean whole session. esp for memory?
 // Cleanup removes all files and unmounts the overlay for this session
 func (m *Manager) Cleanup() error {
+	// TODO MEMORY SIDE
 	// Cleanup shell related resources if shell enabled
 	if m.shellPid != ShellNotEnabled {
 		if err := m.killProcess(m.shellPid); err != nil {
@@ -232,12 +298,26 @@ func (m *Manager) Cleanup() error {
 		}
 	}
 
+	// Need to unmount all overlays
+	workOverlays, err := findBranchWorkOverlays(m.sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to find branch work overlays: %w", err)
+	}
+
+	for _, workOverlay := range workOverlays {
+		if workOverlay != "" {
+			cmd := exec.Command("umount", workOverlay)
+			cmd.Run() // Ignore errors - might already be unmounted
+		}
+	}
+
+	/*
 	// Unmount overlay
 	if m.workOverlay != "" {
 		cmd := exec.Command("umount", m.workOverlay)
 		cmd.Run() // Ignore errors - might already be unmounted
 	}
-
+	*/
 	// Remove session directory
 	if err := os.RemoveAll(m.baseDir); err != nil {
 		return fmt.Errorf("failed to remove session directory: %w", err)
@@ -247,6 +327,7 @@ func (m *Manager) Cleanup() error {
 	return removeSessionInfo(m.sessionID)
 }
 
+// TODO OTHER CLEANUPS NOT UPDATED FOR FORK YET
 // CleanupForce removes all files and unmounts the overlay for this session
 func (m *Manager) CleanupForce() error {
 	fmt.Printf("Starting forceful cleanup for session %s...\n", m.sessionID)

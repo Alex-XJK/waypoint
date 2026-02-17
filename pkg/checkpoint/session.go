@@ -12,6 +12,34 @@ import (
 	"time"
 )
 
+// New ManagerWithBranch creates a new manager with a random branch ID for an existing session
+func NewManagerWithBranch(sessionID string) (*Manager, string, string, error) {
+	branchID, err := generateSessionID()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to generate branch ID: %w", err)
+	}
+
+	baseDir := filepath.Join(DefaultSessionsDir, sessionID)
+
+	manager := NewManager(baseDir, branchID)
+	manager.sessionID = sessionID
+	manager.branchID = branchID
+	manager.currDir = filepath.Join(baseDir, manager.branchID)
+	manager.currentParent = []string{}
+
+	// original dir NOT set: will be set on RestoreNewBranch
+
+	// figure out memory parts later
+	manager.shellPid = ShellNotEnabled
+	manager.shellSocket = ""
+
+	if err := saveSessionInfo(sessionID, branchID, manager); err != nil {
+		return nil, "", "", fmt.Errorf("failed to save session info: %w", err)
+	}
+
+	return manager, branchID, manager.workOverlay, nil
+}
+
 // NewManagerWithSession creates a new manager with a random session ID
 // Uses default branch ID for new session
 func NewManagerWithSession() (*Manager, string, string, error) {
@@ -52,7 +80,7 @@ func LoadManager(sessionID string, branchID string) (*Manager, error) {
 	manager.branchID = sessionInfo.BranchID
 	manager.currDir = sessionInfo.CurrDir
 	manager.originalDir = sessionInfo.OriginalDir
-	manager.workOverlay = sessionInfo.WorkOverlay
+	manager.workOverlay = sessionInfo.WorkOverlay // ASK: redundant to NewManager?
 	manager.shellPid = sessionInfo.ShellPid
 	manager.shellSocket = sessionInfo.ShellSocket
 	manager.currentParent = sessionInfo.CurrentParent
@@ -107,6 +135,19 @@ func loadSessionInfo(sessionID string, branchID string) (*SessionInfo, error) {
 	var sessionInfo SessionInfo
 	err = json.Unmarshal(data, &sessionInfo)
 	return &sessionInfo, err
+}
+
+func loadSessionInfoJSON(jsonFilePath string) (*SessionInfo, error) {
+	data, err := os.ReadFile(jsonFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("session branch not found: %w", err)
+	}
+	var sessionInfo SessionInfo
+	err = json.Unmarshal(data, &sessionInfo)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal session info: %w", err)
+	}
+	return &sessionInfo, nil
 }
 
 // Remove all SessionInfo JSON files for a given session ID from the fixed-path global store

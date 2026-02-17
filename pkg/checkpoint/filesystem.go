@@ -112,6 +112,28 @@ func (m *Manager) forceUnmount(mountPoint string) error {
 	return cmd.Run()
 }
 
+
+// Finds all branch work overlays for a given session by reading session info files
+func findBranchWorkOverlays(sessionID string) ([]string, error) {
+
+	entries, err := os.ReadDir(filepath.Join(SessionInfoDir, sessionID))
+	if err != nil {
+		return nil, err
+	}
+
+	var workOverlays []string
+	for _, branchID := range entries {
+		branchSessionFile := filepath.Join(SessionInfoDir, sessionID, branchID.Name())
+		sessionFile, err := loadSessionInfoJSON(branchSessionFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load session info for branch %s: %w", branchID.Name(), err)
+		}
+		workOverlays = append(workOverlays, sessionFile.WorkOverlay)
+	}
+
+	return workOverlays, nil
+}
+
 // findMountsInDirectory finds all mount points within our session directory
 // Returns mounts sorted by depth (deepest first) for safe unmounting
 func (m *Manager) findMountsInDirectory() ([]string, error) {

@@ -24,6 +24,7 @@ func main() {
 		fmt.Println("  build <dockerfile-directory> [--quiet]      					   - Build environment from Dockerfile")
 		fmt.Println("  create <session> [--branch <branch>] <checkpoint-id> [pid | -1] - Create checkpoint")
 		fmt.Println("  restore <session> [--branch <branch>] <checkpoint-id> 		   - Restore checkpoint")
+		fmt.Println("  fork <session> <checkpoint-id>  		   		   		   	       - Fork new branch from a checkpoint")
 		fmt.Println("  exec <session> [--branch <branch>] <command> [args...]		   - Execute command in environment")
 		fmt.Println("  list <session>                            					   - List checkpoints")
 		fmt.Println("  cleanup <session> [--force]              				       - Clean up session")
@@ -209,6 +210,32 @@ func main() {
 			fmt.Printf("Error restoring checkpoint: %v\n", err)
 			os.Exit(1)
 		}
+		fmt.Printf("Checkpoint '%s' restored, new PID: %d\n", checkpointID, newPID)
+
+	case "fork":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: fork <session> <checkpoint-id>")
+			os.Exit(1)
+		}
+		sessionID := os.Args[2]
+		checkpointID := os.Args[3]
+
+		// set up a new manager for the new branch
+		manager, branchID, workOverlay, err := checkpoint.NewManagerWithBranch(sessionID)
+		if err != nil {
+			fmt.Printf("Error creating new branch: %v\n", err)
+			os.Exit(1)
+		}
+
+		// restore checkpoint into new branch
+		newPID, err := manager.RestoreCheckpointNewBranch(checkpointID)
+		if err != nil {
+			fmt.Printf("Error restoring checkpoint: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("New branch!\n")
+		fmt.Printf("Branch ID: %s\n", branchID)
+		fmt.Printf("Work directory: %s\n", workOverlay)
 		fmt.Printf("Checkpoint '%s' restored, new PID: %d\n", checkpointID, newPID)
 
 	case "exec":
