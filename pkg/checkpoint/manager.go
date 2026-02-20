@@ -327,7 +327,7 @@ func (m *Manager) Cleanup() error {
 	return removeSessionInfo(m.sessionID)
 }
 
-// TODO OTHER CLEANUPS NOT UPDATED FOR FORK YET
+// TODO OTHER CLEANUPS NOT FULLY UPDATED FOR FORK YET
 // CleanupForce removes all files and unmounts the overlay for this session
 func (m *Manager) CleanupForce() error {
 	fmt.Printf("Starting forceful cleanup for session %s...\n", m.sessionID)

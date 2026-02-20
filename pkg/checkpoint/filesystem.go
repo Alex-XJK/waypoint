@@ -71,11 +71,25 @@ func (m *Manager) mountOverlay(lowerDir []string, upperDir, workDir, mountPoint 
 // forceUnmountOverlays unmounts all overlay filesystems in the session
 func (m *Manager) forceUnmountOverlays() error {
 	// Unmount the main work overlay
-	if m.workOverlay != "" {
-		if err := m.forceUnmount(m.workOverlay); err != nil {
-			return fmt.Errorf("failed to unmount work overlay: %w", err)
+	// update: unmount work overlays for ALL branches
+	workOverlays, err := findBranchWorkOverlays(m.sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to find branch work overlays: %w", err)
+	}
+
+	for _, workOverlay := range workOverlays {
+		if workOverlay != "" {
+			if err := m.forceUnmount(workOverlay); err != nil {
+				return fmt.Errorf("failed to unmount work overlay: %w", err)
+			}
 		}
 	}
+
+	// if m.workOverlay != "" {
+	// 	if err := m.forceUnmount(m.workOverlay); err != nil {
+	// 		return fmt.Errorf("failed to unmount work overlay: %w", err)
+	// 	}
+	// }
 
 	// Find and unmount any other overlay mounts in our directory
 	mounts, err := m.findMountsInDirectory()
