@@ -190,7 +190,7 @@ func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
 		return SkipMemoryCheckpoint, nil
 	}
 	previousCriuPath := filepath.Join(m.baseDir, checkpointID, "criu")
-	newPID, errMem := m.restoreMemoryState(checkpointMetadata.PID, previousCriuPath)
+	newPID, errMem := m.restoreMemoryState(checkpointMetadata.PID, previousCriuPath) // dif PID with criu-ns TODO
 	if errMem != nil {
 		return 0, fmt.Errorf("memory restore failed: %w", errMem)
 	}
@@ -208,7 +208,7 @@ func (m *Manager) RestoreCheckpointNewBranch(checkpointID string) (int, error) {
 	upperDir := filepath.Join(m.currDir, "upper")
 	workDir := filepath.Join(m.currDir, "work")
 
-	// Figure out memory later...
+	// TODO figure out memory...
 	/*
 	// If the previous checkpoint contains process, we need to first kill it, so that mountpoint can be released.
 	if checkpointMetadata.PID != SkipMemoryCheckpoint {
@@ -246,19 +246,17 @@ func (m *Manager) RestoreCheckpointNewBranch(checkpointID string) (int, error) {
 		return 0, fmt.Errorf("filesystem restore failed: %w", errFs)
 	}
 
-	// Restore memory state using CRIU
-	/*
+	// TODO Restore memory state using CRIU
 	if checkpointMetadata.PID == SkipMemoryCheckpoint {
 		fmt.Println("Skipping memory restore as per user request")
 		return SkipMemoryCheckpoint, nil
 	}
 	previousCriuPath := filepath.Join(m.baseDir, checkpointID, "criu")
-	newPID, errMem := m.restoreMemoryState(checkpointMetadata.PID, previousCriuPath)
+	newPID, errMem := m.restoreMemoryState(checkpointMetadata.PID, previousCriuPath) // dif PID with criu-ns TODO
 	if errMem != nil {
 		return 0, fmt.Errorf("memory restore failed: %w", errMem)
 	}
-	*/
-	newPID := 0 // placeholder
+	//newPID := 0 // placeholder
 	return newPID, nil
 }
 // ListCheckpoints returns a list of available checkpoints
