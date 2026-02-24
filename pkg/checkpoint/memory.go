@@ -50,7 +50,7 @@ func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
 	cmd := exec.Command(
 		"criu-ns", "restore",
 		"--images-dir", criuPath,
-		"-vv", "-o", "restore.log",
+		"-vv", "-o", "restore.log", "--pidfile", "restore.pid", //RESTORE.PID HAS THE HOST PID, use after RestoreMemoryState
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true,
