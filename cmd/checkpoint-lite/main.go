@@ -210,7 +210,7 @@ func main() {
 			fmt.Printf("Error restoring checkpoint: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Checkpoint '%s' restored, new PID: %d\n", checkpointID, newPID)
+		fmt.Printf("Checkpoint '%s' restored, new Host PID: %d\n", checkpointID, newPID) // ASK: want ns pid too?
 
 	case "fork":
 		if len(os.Args) < 4 {
@@ -236,7 +236,7 @@ func main() {
 		fmt.Printf("New branch!\n")
 		fmt.Printf("Branch ID: %s\n", branchID)
 		fmt.Printf("Work directory: %s\n", workOverlay)
-		fmt.Printf("Checkpoint '%s' restored, new PID: %d\n", checkpointID, newPID)
+		fmt.Printf("Checkpoint '%s' restored, new Host PID: %d\n", checkpointID, newPID) // ASK: wans ns pid too?
 
 	case "exec":
 		if len(os.Args) < 4 {
