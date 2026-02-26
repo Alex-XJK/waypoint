@@ -125,12 +125,17 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 	// (so that the process can continue running in the new overlay)
 	if pid != SkipMemoryCheckpoint {
 		currentCriuDir := filepath.Join(m.baseDir, checkpointID, "criu")
-		nsPID, errMem := m.restoreMemoryState(pid, currentCriuDir) // ASK: restoreMemoryState does not modify pid before returning it back. Do we need to get it?
+		pidFilename, err := generateSessionID()
+		if err != nil {
+			return fmt.Errorf("failed to generate pid filename ID: %w", err)
+		}
+		pidFilename += ".pid"
+		nsPID, errMem := m.restoreMemoryState(pid, currentCriuDir, pidFilename) // ASK: restoreMemoryState does not modify pid before returning it back. Do we need to get it?
 		if errMem != nil {
 			return fmt.Errorf("memory restore into new overlay failed: %w", errMem)
 		}
 
-		hostPID, err := getHostPID(filepath.Join(currentCriuDir, "restore.pid"))
+		hostPID, err := getHostPID(filepath.Join(currentCriuDir, pidFilename))
 		if err != nil {
 			return fmt.Errorf("get host pid failed: %w", err)
 		}
@@ -193,14 +198,19 @@ func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
 		fmt.Println("Skipping memory restore as per user request")
 		return SkipMemoryCheckpoint, nil
 	}
+	pidFilename, err := generateSessionID()
+	if err != nil {
+		return 0, fmt.Errorf("failed to generate pid filename ID: %w", err)
+	}
+	pidFilename += ".pid"
 	previousCriuPath := filepath.Join(m.baseDir, checkpointID, "criu")
-	_, errMem := m.restoreMemoryState(checkpointMetadata.PID, previousCriuPath) // Should we return the nsPID?
+	_, errMem := m.restoreMemoryState(checkpointMetadata.PID, previousCriuPath, pidFilename) // Should we return the nsPID?
 	if errMem != nil {
 		return 0, fmt.Errorf("memory restore failed: %w", errMem)
 	}
 
 	// get the new hostPID
-	hostPID, err := getHostPID(filepath.Join(previousCriuPath, "restore.pid"))
+	hostPID, err := getHostPID(filepath.Join(previousCriuPath, pidFilename))
 	if err != nil {
 		return 0, fmt.Errorf("get host pid failed: %w", err)
 	}
@@ -257,14 +267,20 @@ func (m *Manager) RestoreCheckpointNewBranch(checkpointID string) (int, error) {
 		fmt.Println("Skipping memory restore as per user request")
 		return SkipMemoryCheckpoint, nil
 	}
+
 	previousCriuPath := filepath.Join(m.baseDir, checkpointID, "criu")
-	_, errMem := m.restoreMemoryState(checkpointMetadata.PID, previousCriuPath) // Should we use the returned PID?
+	pidFilename, err := generateSessionID() // hacky but better than even hackier race condition before
+	if err != nil {
+		return 0, fmt.Errorf("failed to generate pid filename ID: %w", err)
+	}
+	pidFilename += ".pid"
+	_, errMem := m.restoreMemoryState(checkpointMetadata.PID, previousCriuPath, pidFilename) // Should we use the returned PID?
 	if errMem != nil {
 		return 0, fmt.Errorf("memory restore failed: %w", errMem)
 	}
 
 	// get the new hostPID
-	hostPID, err := getHostPID(filepath.Join(previousCriuPath, "restore.pid"))
+	hostPID, err := getHostPID(filepath.Join(previousCriuPath, pidFilename))
 	if err != nil {
 		return 0, fmt.Errorf("get host pid failed: %w", err)
 	}
@@ -284,9 +300,7 @@ func getHostPID(pidFile string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("Failed to read pid file: %w", err)
 	}
-	//Hacky: Introducing a race condition, but since same directory is used on multiple restores, remove file immediately after reading it
-	//need to figure out better strategy
-	os.Remove(pidFile)
+	os.Remove(pidFile) // Don't NEED to remove file anymore, better to remove it or leave it?
 	hostPID, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
 		return 0, fmt.Errorf("Failed to parse pid file: %w", err)

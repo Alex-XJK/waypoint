@@ -38,7 +38,7 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 	return nil
 }
 
-func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
+func (m *Manager) restoreMemoryState(pid int, criuPath string, pidFilename string) (int, error) {
 	// Kill the original process if it exists
 	err := m.killProcess(pid)
 	if err != nil {
@@ -50,7 +50,7 @@ func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
 	cmd := exec.Command(
 		"criu-ns", "restore",
 		"--images-dir", criuPath,
-		"-vv", "-o", "restore.log", "--pidfile", "restore.pid", //RESTORE.PID HAS THE HOST PID, use after RestoreMemoryState
+		"-vv", "-o", "restore.log", "--pidfile", pidFilename,
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true,
