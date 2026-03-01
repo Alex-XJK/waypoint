@@ -93,7 +93,11 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 	}
 
 	// Unmount current overlay to ensure filesystem consistency
-	exec.Command("umount", m.workOverlay).Run()
+	// THIS CAN FAIL IF PROC USING MOUNT, AND DON'T CHECKPOINT THAT PROC
+	mErr := exec.Command("umount", m.workOverlay).Run()
+	if mErr != nil {
+		fmt.Println("%w", mErr)
+	}
 
 	// Rename "~/current/" to "~/<checkpointID>/"
 	ckptDir := filepath.Join(m.baseDir, checkpointID)
@@ -125,20 +129,11 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 	// (so that the process can continue running in the new overlay)
 	if pid != SkipMemoryCheckpoint {
 		currentCriuDir := filepath.Join(m.baseDir, checkpointID, "criu")
-		pidFilename, err := generateSessionID()
+		hostPID, nsPID, err := m.restoreCheckpointCRIU(checkpointID, pid, currentCriuDir)
 		if err != nil {
-			return fmt.Errorf("failed to generate pid filename ID: %w", err)
-		}
-		pidFilename += ".pid"
-		nsPID, errMem := m.restoreMemoryState(pid, currentCriuDir, pidFilename) // ASK: restoreMemoryState does not modify pid before returning it back. Do we need to get it?
-		if errMem != nil {
-			return fmt.Errorf("memory restore into new overlay failed: %w", errMem)
+			return fmt.Errorf("failed to restore into new pid: %w", err)
 		}
 
-		hostPID, err := getHostPID(filepath.Join(currentCriuDir, pidFilename))
-		if err != nil {
-			return fmt.Errorf("get host pid failed: %w", err)
-		}
 		fmt.Printf("Process %d restored into new overlay with host PID %d, ns PID %d\n", pid, hostPID, nsPID)
 	}
 
@@ -172,47 +167,21 @@ func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
 	// Unmount current overlay for future remount
 	exec.Command("umount", m.workOverlay).Run()
 
-	// Clear current upper and work directories
-	upperDir := filepath.Join(m.currDir, "upper")
-	workDir := filepath.Join(m.currDir, "work")
-	os.RemoveAll(upperDir)
-	os.RemoveAll(workDir)
-
-	// Rebuild lowerdirs list from checkpointMetadata.ParentList
-	lowerDirs := m.buildOverlayLayers(checkpointMetadata.ParentList)
-
-	// Update current parent list to checkpoint's parent list
-	m.currentParent = checkpointMetadata.ParentList
-	m.syncManagerToSession()
-
-	// Remount overlay with the checkpoint's upper layer on top of the parent lowerdirs
-	os.MkdirAll(upperDir, 0755)
-	os.MkdirAll(workDir, 0755)
-	errFs := m.mountOverlay(lowerDirs, upperDir, workDir, m.workOverlay)
-	if errFs != nil {
-		return 0, fmt.Errorf("filesystem restore failed: %w", errFs)
+	// Restore and remount file system
+	if err := m.restoreCheckpointFS(checkpointMetadata.ParentList); err != nil {
+		return 0, fmt.Errorf("failed to restore checkpoint fs: %w", err)
 	}
 
-	// Restore memory state using CRIU
+	// Restore memory state into a new pid namespace using CRIU-ns
 	if checkpointMetadata.PID == SkipMemoryCheckpoint {
 		fmt.Println("Skipping memory restore as per user request")
 		return SkipMemoryCheckpoint, nil
 	}
-	pidFilename, err := generateSessionID()
-	if err != nil {
-		return 0, fmt.Errorf("failed to generate pid filename ID: %w", err)
-	}
-	pidFilename += ".pid"
-	previousCriuPath := filepath.Join(m.baseDir, checkpointID, "criu")
-	_, errMem := m.restoreMemoryState(checkpointMetadata.PID, previousCriuPath, pidFilename) // Should we return the nsPID?
-	if errMem != nil {
-		return 0, fmt.Errorf("memory restore failed: %w", errMem)
-	}
 
-	// get the new hostPID
-	hostPID, err := getHostPID(filepath.Join(previousCriuPath, pidFilename))
+	criuPath := filepath.Join(m.baseDir, checkpointID, "criu")
+	hostPID, _, err := m.restoreCheckpointCRIU(checkpointID, checkpointMetadata.PID, criuPath) //use ns pid?
 	if err != nil {
-		return 0, fmt.Errorf("get host pid failed: %w", err)
+		return 0, fmt.Errorf("failed to restore into new pid: %w", err)
 	}
 
 	return hostPID, nil
@@ -225,9 +194,6 @@ func (m *Manager) RestoreCheckpointNewBranch(checkpointID string) (int, error) {
 		return 0, fmt.Errorf("failed to load checkpoint metadata: %w", err)
 	}
 
-	upperDir := filepath.Join(m.currDir, "upper")
-	workDir := filepath.Join(m.currDir, "work")
-
 	// TODO pretty sure don't need this? figure out memory...
 	/*
 	// If the previous checkpoint contains process, we need to first kill it, so that mountpoint can be released.
@@ -239,19 +205,42 @@ func (m *Manager) RestoreCheckpointNewBranch(checkpointID string) (int, error) {
 	*/
 
 	// Don't need to umount bc we are mounting a *new* fs
-	/* Shouldn't need to clear current upper and work directories
-	os.RemoveAll(upperDir)
-	os.RemoveAll(workDir)
-	*/
 
-	// Set original dir from metadata -- ok? not sure why buildOverlay uses from manager vs from metadata (ASK)
+	// Set original dir from checkpoint metadata
 	m.originalDir = checkpointMetadata.OriginalDir
 
+	// Restore and mount file system
+	if err := m.restoreCheckpointFS(checkpointMetadata.ParentList); err != nil {
+		return 0, fmt.Errorf("failed to restore checkpoint fs: %w", err)
+	}
+
+	// Restore memory state into a new pid namespace using CRIU
+	if checkpointMetadata.PID == SkipMemoryCheckpoint {
+		fmt.Println("Skipping memory restore as per user request")
+		return SkipMemoryCheckpoint, nil
+	}
+
+	criuPath := filepath.Join(m.baseDir, checkpointID, "criu")
+	hostPID, _, err := m.restoreCheckpointCRIU(checkpointID, checkpointMetadata.PID, criuPath) //use ns pid?
+	if err != nil {
+		return 0, fmt.Errorf("failed to restore into new pid: %w", err)
+	}
+
+	return hostPID, nil
+}
+
+func (m *Manager) restoreCheckpointFS(parentList []string) error {
+	// Clear current upper and work directories
+	upperDir := filepath.Join(m.currDir, "upper")
+	workDir := filepath.Join(m.currDir, "work")
+	os.RemoveAll(upperDir)
+	os.RemoveAll(workDir)
+
 	// Rebuild lowerdirs list from checkpointMetadata.ParentList
-	lowerDirs := m.buildOverlayLayers(checkpointMetadata.ParentList)
+	lowerDirs := m.buildOverlayLayers(parentList)
 
 	// Update current parent list to checkpoint's parent list
-	m.currentParent = checkpointMetadata.ParentList
+	m.currentParent = parentList
 	m.syncManagerToSession()
 
 	// Remount overlay with the checkpoint's upper layer on top of the parent lowerdirs
@@ -259,37 +248,36 @@ func (m *Manager) RestoreCheckpointNewBranch(checkpointID string) (int, error) {
 	os.MkdirAll(workDir, 0755)
 	errFs := m.mountOverlay(lowerDirs, upperDir, workDir, m.workOverlay)
 	if errFs != nil {
-		return 0, fmt.Errorf("filesystem restore failed: %w", errFs)
+		return fmt.Errorf("filesystem restore failed: %w", errFs)
 	}
 
-	// Restore memory state using CRIU
-	if checkpointMetadata.PID == SkipMemoryCheckpoint {
-		fmt.Println("Skipping memory restore as per user request")
-		return SkipMemoryCheckpoint, nil
-	}
+	return nil
+}
 
-	previousCriuPath := filepath.Join(m.baseDir, checkpointID, "criu")
-	pidFilename, err := generateSessionID() // hacky but better than even hackier race condition before
+func (m *Manager) restoreCheckpointCRIU(checkpointID string, checkpointPID int, criuPath string) (int, int, error) {
+	pidFilename, err := generateID()
 	if err != nil {
-		return 0, fmt.Errorf("failed to generate pid filename ID: %w", err)
+		return 0, 0, fmt.Errorf("failed to generate pid filename ID: %w", err)
 	}
+
 	pidFilename += ".pid"
-	_, errMem := m.restoreMemoryState(checkpointMetadata.PID, previousCriuPath, pidFilename) // Should we use the returned PID?
+
+	nsPID, errMem := m.restoreMemoryState(checkpointPID, criuPath, pidFilename)
 	if errMem != nil {
-		return 0, fmt.Errorf("memory restore failed: %w", errMem)
+		return 0, 0, fmt.Errorf("CRIU memory restore failed: %w", errMem)
 	}
 
 	// get the new hostPID
-	hostPID, err := getHostPID(filepath.Join(previousCriuPath, pidFilename))
+	hostPID, err := getHostPID(filepath.Join(criuPath, pidFilename))
 	if err != nil {
-		return 0, fmt.Errorf("get host pid failed: %w", err)
+		return 0, 0, fmt.Errorf("get host pid failed: %w", err)
 	}
 
-	return hostPID, nil
+	return hostPID, nsPID, nil
 }
 
 func getHostPID(pidFile string) (int, error) {
-	// Hacky: Need to wait for restore.pid to be created
+	// Hacky: Need to wait for pid file to be created
 	for {
 		if _, err := os.Stat(pidFile); err == nil {
 			break
@@ -300,7 +288,6 @@ func getHostPID(pidFile string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("Failed to read pid file: %w", err)
 	}
-	os.Remove(pidFile) // Don't NEED to remove file anymore, better to remove it or leave it?
 	hostPID, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
 		return 0, fmt.Errorf("Failed to parse pid file: %w", err)

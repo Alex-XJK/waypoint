@@ -14,7 +14,7 @@ import (
 
 // New ManagerWithBranch creates a new manager with a random branch ID for an existing session
 func NewManagerWithBranch(sessionID string) (*Manager, string, string, error) {
-	branchID, err := generateSessionID()
+	branchID, err := generateID()
 	if err != nil {
 		return nil, "", "", fmt.Errorf("failed to generate branch ID: %w", err)
 	}
@@ -43,7 +43,7 @@ func NewManagerWithBranch(sessionID string) (*Manager, string, string, error) {
 // NewManagerWithSession creates a new manager with a random session ID
 // Uses default branch ID for new session
 func NewManagerWithSession() (*Manager, string, string, error) {
-	sessionID, err := generateSessionID()
+	sessionID, err := generateID()
 	if err != nil {
 		return nil, "", "", fmt.Errorf("failed to generate session ID: %w", err)
 	}
@@ -88,8 +88,8 @@ func LoadManager(sessionID string, branchID string) (*Manager, error) {
 	return manager, nil
 }
 
-// Generate a random session ID
-func generateSessionID() (string, error) {
+// Generate a random ID
+func generateID() (string, error) {
 	bytes := make([]byte, 8)
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err

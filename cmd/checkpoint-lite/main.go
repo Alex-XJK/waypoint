@@ -236,7 +236,7 @@ func main() {
 		fmt.Printf("New branch!\n")
 		fmt.Printf("Branch ID: %s\n", branchID)
 		fmt.Printf("Work directory: %s\n", workOverlay)
-		fmt.Printf("Checkpoint '%s' restored into new branch, new Host PID: %d\n", checkpointID, newPID) // ASK: wans ns pid too?
+		fmt.Printf("Checkpoint '%s' restored into new branch, restored checkpointed process has new Host PID: %d\n", checkpointID, newPID) // ASK: wans ns pid too?
 
 	case "exec":
 		if len(os.Args) < 4 {
