@@ -12,20 +12,31 @@ import (
 	"time"
 )
 
-func NewManager(baseDir string, branchID string) *Manager {
+func NewManager(sessionID string, branchID string) *Manager {
+	baseDir := filepath.Join(DefaultSessionsDir, sessionID)
+
 	metadataDir := filepath.Join(baseDir, "metadata")
 	workOverlay := filepath.Join(baseDir, branchID + "_work")
 	temporaryDir := filepath.Join(baseDir, branchID + "_temp") // Not sure if should be branch specific?
+
+	currDir := filepath.Join(baseDir, branchID)
 
 	// Create directories
 	os.MkdirAll(metadataDir, 0755)
 	os.MkdirAll(workOverlay, 0755)
 	os.MkdirAll(temporaryDir, 0777)
 
+	// need to figure out shell fields for branch
 	return &Manager{
 		baseDir:     baseDir,
 		metadataDir: metadataDir,
 		workOverlay: workOverlay,
+		currDir: currDir,
+		sessionID: sessionID,
+		branchID: branchID,
+		shellPid: ShellNotEnabled, // subject to change
+		shellSocket: "", // subject to change
+		currentParent: []string{}, // subject to change
 	}
 }
 

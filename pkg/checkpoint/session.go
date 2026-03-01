@@ -19,19 +19,7 @@ func NewManagerWithBranch(sessionID string) (*Manager, string, string, error) {
 		return nil, "", "", fmt.Errorf("failed to generate branch ID: %w", err)
 	}
 
-	baseDir := filepath.Join(DefaultSessionsDir, sessionID)
-
-	manager := NewManager(baseDir, branchID)
-	manager.sessionID = sessionID
-	manager.branchID = branchID
-	manager.currDir = filepath.Join(baseDir, manager.branchID)
-	manager.currentParent = []string{}
-
-	// original dir NOT set: will be set on RestoreNewBranch
-
-	// figure out memory parts later
-	manager.shellPid = ShellNotEnabled
-	manager.shellSocket = ""
+	manager := NewManager(sessionID, branchID) 	// original dir NOT set: will be set on RestoreNewBranch
 
 	if err := saveSessionInfo(sessionID, branchID, manager); err != nil {
 		return nil, "", "", fmt.Errorf("failed to save session info: %w", err)
@@ -51,14 +39,7 @@ func NewManagerWithSession() (*Manager, string, string, error) {
 	loadConfig()
 
 	branchID := DefaultBranchID
-	baseDir := filepath.Join(DefaultSessionsDir, sessionID)
-	manager := NewManager(baseDir, branchID)
-	manager.sessionID = sessionID
-	manager.branchID = branchID
-	manager.currDir = filepath.Join(baseDir, manager.branchID)
-	manager.currentParent = []string{}
-	manager.shellPid = ShellNotEnabled
-	manager.shellSocket = ""
+	manager := NewManager(sessionID, branchID)
 
 	// Save session info globally
 	if err := saveSessionInfo(sessionID, branchID, manager); err != nil { // why pass in sessionID? need to pass in branchID?
@@ -75,15 +56,11 @@ func LoadManager(sessionID string, branchID string) (*Manager, error) {
 		return nil, fmt.Errorf("failed to load session: %w", err)
 	}
 
-	manager := NewManager(sessionInfo.BaseDir, branchID)
-	manager.sessionID = sessionID
-	manager.branchID = sessionInfo.BranchID
-	manager.currDir = sessionInfo.CurrDir
-	manager.originalDir = sessionInfo.OriginalDir
-	manager.workOverlay = sessionInfo.WorkOverlay // ASK: redundant to NewManager?
+	manager := NewManager(sessionID, branchID)
 	manager.shellPid = sessionInfo.ShellPid
 	manager.shellSocket = sessionInfo.ShellSocket
 	manager.currentParent = sessionInfo.CurrentParent
+	manager.originalDir = sessionInfo.OriginalDir
 
 	return manager, nil
 }
