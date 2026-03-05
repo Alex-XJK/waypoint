@@ -36,6 +36,8 @@ func NewManager(sessionID string, branchID string) *Manager {
 		branchID: branchID,
 		shellPid: ShellNotEnabled, // subject to change
 		shellSocket: "", // subject to change
+		shellDev: ShellNotEnabled, //subject to change
+		shellRdev: ShellNotEnabled, //subject to change
 		currentParent: []string{}, // subject to change
 	}
 }
@@ -97,7 +99,13 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 		currentCriuDir := filepath.Join(m.currDir, "criu")
 		os.RemoveAll(currentCriuDir)
 		os.MkdirAll(currentCriuDir, 0755)
-		memoryErr := m.createMemoryCheckpoint(pid, currentCriuDir)
+
+		var memoryErr error
+		if (pid == m.shellPid) {
+			memoryErr = m.createMemoryCheckpointShell(pid, currentCriuDir)
+		} else{
+			memoryErr = m.createMemoryCheckpoint(pid, currentCriuDir)
+		}
 		if memoryErr != nil {
 			return fmt.Errorf("memory checkpoint failed: %w", memoryErr)
 		}
@@ -136,28 +144,37 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 		return fmt.Errorf("failed to remount new current overlay: %w", err)
 	}
 
-	// Restore the memory state into the new overlay
-	// (so that the process can continue running in the new overlay)
-	if pid != SkipMemoryCheckpoint {
-		currentCriuDir := filepath.Join(m.baseDir, checkpointID, "criu")
-		hostPID, nsPID, err := m.restoreCheckpointCRIU(checkpointID, pid, currentCriuDir)
-		if err != nil {
-			return fmt.Errorf("failed to restore into new pid: %w", err)
-		}
-
-		fmt.Printf("Process %d restored into new overlay with host PID %d, ns PID %d\n", pid, hostPID, nsPID)
-	}
-
-	// Save metadata
 	metadata := Metadata{
 		ID:          checkpointID,
 		PID:         pid,
-		Timestamp:   time.Now().Unix(),
 		OriginalDir: m.originalDir,
 		SessionID:   m.sessionID,
 		ParentList:  parentList,
 	}
 
+	// Restore the memory state into the new overlay
+	// (so that the process can continue running in the new overlay)
+	if pid != SkipMemoryCheckpoint {
+		currentCriuDir := filepath.Join(m.baseDir, checkpointID, "criu")
+		if pid == m.shellPid {
+			metadata.Rdev = m.shellRdev
+			metadata.Dev = m.shellDev
+		}
+		hostPID, nsPID, err := m.restoreCheckpointCRIU(&metadata, currentCriuDir)
+		if err != nil {
+			return fmt.Errorf("failed to restore into new pid: %w", err)
+		}
+
+		if pid == m.shellPid {
+			m.shellPid = hostPID
+			m.syncManagerToSession()
+		}
+
+		fmt.Printf("Process %d restored into new overlay with host PID %d, ns PID %d\n", pid, hostPID, nsPID)
+	}
+
+	// save metadata
+	metadata.Timestamp = time.Now().Unix()
 	return m.saveMetadata(checkpointID, metadata)
 }
 
@@ -190,7 +207,7 @@ func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
 	}
 
 	criuPath := filepath.Join(m.baseDir, checkpointID, "criu")
-	hostPID, _, err := m.restoreCheckpointCRIU(checkpointID, checkpointMetadata.PID, criuPath) //use ns pid?
+	hostPID, _, err := m.restoreCheckpointCRIU(checkpointMetadata, criuPath) //use ns pid?
 	if err != nil {
 		return 0, fmt.Errorf("failed to restore into new pid: %w", err)
 	}
@@ -232,7 +249,7 @@ func (m *Manager) RestoreCheckpointNewBranch(checkpointID string) (int, error) {
 	}
 
 	criuPath := filepath.Join(m.baseDir, checkpointID, "criu")
-	hostPID, _, err := m.restoreCheckpointCRIU(checkpointID, checkpointMetadata.PID, criuPath) //use ns pid?
+	hostPID, _, err := m.restoreCheckpointCRIU(checkpointMetadata, criuPath) //use ns pid?
 	if err != nil {
 		return 0, fmt.Errorf("failed to restore into new pid: %w", err)
 	}
@@ -265,7 +282,7 @@ func (m *Manager) restoreCheckpointFS(parentList []string) error {
 	return nil
 }
 
-func (m *Manager) restoreCheckpointCRIU(checkpointID string, checkpointPID int, criuPath string) (int, int, error) {
+func (m *Manager) restoreCheckpointCRIU(ckptMetadata *Metadata, criuPath string) (int, int, error) {
 	pidFilename, err := generateID()
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to generate pid filename ID: %w", err)
@@ -273,11 +290,17 @@ func (m *Manager) restoreCheckpointCRIU(checkpointID string, checkpointPID int, 
 
 	pidFilename += ".pid"
 
-	nsPID, errMem := m.restoreMemoryState(checkpointPID, criuPath, pidFilename)
+	var nsPID int
+	var errMem error
+	if ckptMetadata.PID == m.shellPid {
+		nsPID, errMem = m.restoreMemoryStateShell(ckptMetadata.PID, criuPath, pidFilename, ckptMetadata.Rdev, ckptMetadata.Dev)
+	} else {
+		nsPID, errMem = m.restoreMemoryState(ckptMetadata.PID, criuPath, pidFilename)
+	}
 	if errMem != nil {
 		return 0, 0, fmt.Errorf("CRIU memory restore failed: %w", errMem)
 	}
-
+	
 	// get the new hostPID
 	hostPID, err := getHostPID(filepath.Join(criuPath, pidFilename))
 	if err != nil {
@@ -288,13 +311,15 @@ func (m *Manager) restoreCheckpointCRIU(checkpointID string, checkpointPID int, 
 }
 
 func getHostPID(pidFile string) (int, error) {
-	// Hacky: Need to wait for pid file to be created
+	// Need to wait for pid file to be created -> Unecessary with criu detached coupled with .Run()
+	/*
 	for {
 		if _, err := os.Stat(pidFile); err == nil {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	*/
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		return 0, fmt.Errorf("Failed to read pid file: %w", err)

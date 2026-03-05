@@ -50,6 +50,11 @@ func main() {
 		panic(err)
 	}
 
+	//need to pass back the rdev and dev numbers somehow, make this more elegant later
+	var st syscall.Stat_t
+	syscall.Fstat(int(ptySlave.Fd()), &st)
+	os.WriteFile("/tmp/pty-info", []byte(fmt.Sprintf("%d %d", st.Rdev, st.Dev)), 0666)
+
 	// Create Unix domain socket for command communication
 	os.Remove(socketPath) // Clean up old socket
 

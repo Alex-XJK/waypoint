@@ -61,6 +61,8 @@ func LoadManager(sessionID string, branchID string) (*Manager, error) {
 	manager.shellSocket = sessionInfo.ShellSocket
 	manager.currentParent = sessionInfo.CurrentParent
 	manager.originalDir = sessionInfo.OriginalDir
+	manager.shellRdev = sessionInfo.ShellRdev
+	manager.shellDev = sessionInfo.ShellDev
 
 	return manager, nil
 }
@@ -89,6 +91,8 @@ func saveSessionInfo(sessionID string, branchID string, manager *Manager) error 
 		CurrentParent: manager.currentParent,
 		ShellPid:      manager.shellPid,
 		ShellSocket:   manager.shellSocket,
+		ShellRdev:     manager.shellRdev,
+		ShellDev: 	   manager.shellDev,
 	}
 
 	data, err := json.MarshalIndent(sessionInfo, "", "  ")

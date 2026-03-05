@@ -19,6 +19,8 @@ type Manager struct {
 	branchID      string   // Unique branch identifier 
 	shellPid      int      // PID of the shell process if a shell is enabled, ShellNotEnabled(=0) otherwise
 	shellSocket   string   // Path to the shell socket if enabled, empty otherwise
+	shellRdev	  uint64   // pty slave rdev
+	shellDev	  uint64   // pty slave dev
 	currentParent []string // Current parent checkpoints
 }
 
@@ -31,6 +33,8 @@ type Metadata struct {
 	Timestamp   int64    `json:"timestamp"`
 	OriginalDir string   `json:"original_dir"`
 	SessionID   string   `json:"session_id"`
+	Rdev		uint64   `json:"rdev"`
+	Dev			uint64   `json:"dev"`
 	ParentList  []string `json:"parent_list,omitempty"`
 }
 
@@ -47,6 +51,8 @@ type SessionInfo struct {
 	CurrentParent []string `json:"current_parent"`
 	ShellPid      int      `json:"shell_pid"`
 	ShellSocket   string   `json:"shell_socket,omitempty"`
+	ShellRdev	  uint64   `json:"shell_rdev,omitempty"`
+	ShellDev	  uint64   `json:"shell_dev,omitempty"`
 }
 
 // PID values for special cases

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"strconv"
 )
 
 func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool) error {
@@ -139,9 +140,23 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 		return ShellNotEnabled, "", fmt.Errorf("failed to start bash_init: %w", err)
 	}
 
+	// change later, get pty info
+	for {
+		if _, err := os.Stat("/tmp/pty-info"); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	data, _ := os.ReadFile("/tmp/pty-info")
+	parts := strings.Fields(string(data))
+	rdev, _ := strconv.ParseUint(parts[0], 10, 64)
+	dev, _ := strconv.ParseUint(parts[1], 10, 64)
+
 	// Update shell PID and socket path in session info
 	m.shellPid = cmd.Process.Pid
 	m.shellSocket = socketPath
+	m.shellRdev = rdev
+	m.shellDev = dev
 
 	// Save updated session info
 	if err := saveSessionInfo(m.sessionID, m.branchID, m); err != nil {
