@@ -7,21 +7,41 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 )
 
 func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 	// Use CRIU to dump the process
 	// Notice: Cannot use '--shell-job' because the PTY issue during the restore phase.
-	cmd := exec.Command("criu", "dump",
-		"-t", fmt.Sprintf("%d", pid),
-		"-D", criuPath,
-		"-vv", "-o", "dump.log",
-	)
+	useInc, prevRel := m.isIncrementalPossible()
+
+	var cmd *exec.Cmd
+	if useInc {
+		// Use the Incremental Dump
+		// criu dump --tree <pid> --images-dir <B> --prev-images-dir <A-relative-to-B> --track-mem
+		cmd = exec.Command(
+			"criu", "dump",
+			"-t", fmt.Sprintf("%d", pid),
+			"-D", criuPath,
+			"--prev-images-dir", prevRel,
+			"--track-mem",
+			"-vv", "-o", "dump.log",
+		)
+	} else {
+		// Use the original criu dump
+		cmd = exec.Command(
+			"criu", "dump",
+			"-t", fmt.Sprintf("%d", pid),
+			"-D", criuPath,
+			"--track-mem",
+			"-vv", "-o", "dump.log",
+		)
+	}
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
-
+	cmd.Dir = criuPath
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{
 			Uid: 0,
@@ -65,4 +85,25 @@ func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
 	}
 
 	return pid, nil
+}
+
+// isIncrementalPossible Checks whether there is a pre-dump image exist
+// if found, return the path to that directory relative to this one
+func (m *Manager) isIncrementalPossible() (bool, string) {
+	parLength := len(m.currentParent)
+	if parLength > 0 {
+		// Get the latest parent snapshot name
+		lastParent := m.currentParent[parLength-1]
+		prevDir := filepath.Join(m.baseDir, lastParent, "criu")
+		if st, err := os.Stat(prevDir); err == nil && st.IsDir() {
+			// Compute path to previous images relative to current images dir
+			curDir := filepath.Join(m.baseDir, "current", "criu")
+			if rel, err := filepath.Rel(curDir, prevDir); err == nil && rel != "" {
+				return true, rel
+			}
+			// Fallback to a conservative relative path
+			return true, filepath.Join("..", "..", lastParent, "criu")
+		}
+	} 
+	return false, ""
 }
