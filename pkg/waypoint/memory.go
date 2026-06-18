@@ -7,19 +7,26 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 )
 
 func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 	// Use CRIU to dump the process
 	// Notice: Cannot use '--shell-job' because the PTY issue during the restore phase.
-	cmd := exec.Command("criu", "dump",
+	args := []string{"dump",
 		"-t", fmt.Sprintf("%d", pid),
 		"-D", criuPath,
 		"--tcp-established",
 		"--ghost-limit", "8388608",
 		"-vv", "-o", "dump.log",
-	)
+	}
+	if mountID, err := findMountID(pid, m.workOverlay); err == nil && mountID != "" {
+		args = append(args, "--external", fmt.Sprintf("mnt[%s]:waypoint-work", mountID))
+	}
+
+	cmd := exec.Command("criu", args...)
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
@@ -38,6 +45,33 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 	}
 
 	return nil
+}
+
+func findMountID(pid int, mountPoint string) (string, error) {
+	data, err := os.ReadFile(filepath.Join("/proc", fmt.Sprintf("%d", pid), "mountinfo"))
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		if unescapeMountInfoPath(fields[4]) == mountPoint {
+			return fields[0], nil
+		}
+	}
+	return "", fmt.Errorf("mount %s not found in pid %d mountinfo", mountPoint, pid)
+}
+
+func unescapeMountInfoPath(path string) string {
+	replacer := strings.NewReplacer(
+		`\\`, `\`,
+		`\040`, " ",
+		`\011`, "\t",
+		`\012`, "\n",
+	)
+	return replacer.Replace(path)
 }
 
 func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {

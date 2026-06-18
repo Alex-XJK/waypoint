@@ -225,8 +225,10 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 
 	cmd := exec.Command(bashInitSrc, socketPath, workDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid: true, // new session = no controlling TTY
+		Cloneflags: uintptr(unix.CLONE_NEWPID | unix.CLONE_NEWNS | unix.CLONE_NEWNET | unix.CLONE_NEWIPC),
+		Setsid:     true, // new session = no controlling TTY
 	}
+	cmd.Env = append(os.Environ(), "WAYPOINT_NAMESPACED=1")
 
 	// stdin -> /dev/null
 	devNull, err := os.OpenFile("/dev/null", os.O_RDWR, 0)

@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -45,6 +46,13 @@ func main() {
 	if _, err := os.Stat(chrootDir); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Chroot directory does not exist: %s\n", chrootDir)
 		os.Exit(1)
+	}
+	if os.Getenv("WAYPOINT_NAMESPACED") == "1" {
+		if err := setupNamespaceRuntime(chrootDir); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to set up namespace runtime: %v\n", err)
+			os.Exit(1)
+		}
+		go reapOrphanedChildren()
 	}
 
 	// Create PTY
@@ -113,6 +121,61 @@ func main() {
 		}
 
 		go handleClient(conn, ptyMaster, ptySlave, &ptyMutex, outputBuffer, bashPID)
+	}
+}
+
+func setupNamespaceRuntime(chrootDir string) error {
+	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
+		return fmt.Errorf("make mount namespace private failed: %w", err)
+	}
+	for _, mount := range []struct {
+		rel    string
+		source string
+		fstype string
+	}{
+		{rel: "proc", source: "proc", fstype: "proc"},
+		{rel: "sys", source: "sys", fstype: "sysfs"},
+	} {
+		target := filepath.Join(chrootDir, mount.rel)
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return err
+		}
+		if err := unix.Mount(mount.source, target, mount.fstype, 0, ""); err != nil && err != syscall.EBUSY {
+			return fmt.Errorf("mount %s on %s failed: %w", mount.fstype, target, err)
+		}
+	}
+	return bringLoopbackUp()
+}
+
+func bringLoopbackUp() error {
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+
+	ifr, err := unix.NewIfreq("lo")
+	if err != nil {
+		return err
+	}
+	if err := unix.IoctlIfreq(fd, unix.SIOCGIFFLAGS, ifr); err != nil {
+		return err
+	}
+	ifr.SetUint16(ifr.Uint16() | unix.IFF_UP | unix.IFF_RUNNING)
+	return unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, ifr)
+}
+
+func reapOrphanedChildren() {
+	for {
+		var status unix.WaitStatus
+		_, err := unix.Wait4(-1, &status, 0, nil)
+		if err == unix.ECHILD {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if err != nil {
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 }
 

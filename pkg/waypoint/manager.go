@@ -244,6 +244,13 @@ func (m *Manager) Cleanup() error {
 			}
 		}
 	}
+	if forks, err := m.ListForks(); err == nil {
+		for _, f := range forks {
+			if err := m.DestroyFork(f.ID); err != nil {
+				fmt.Printf("Warning: Failed to destroy fork %s: %v\n", f.ID, err)
+			}
+		}
+	}
 
 	// Unmount overlay
 	if m.workOverlay != "" {
@@ -274,6 +281,13 @@ func (m *Manager) CleanupForce() error {
 
 	// Step 1: Kill processes using files in this directory
 	fmt.Println("Killing processes using session directory...")
+	if forks, err := m.ListForks(); err == nil {
+		for _, f := range forks {
+			if f.PID > 0 {
+				_ = m.killProcess(f.PID)
+			}
+		}
+	}
 	if err := m.killProcessesUsingDirectory(); err != nil {
 		fmt.Printf("Warning: Failed to kill some processes: %v\n", err)
 	}

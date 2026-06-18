@@ -23,6 +23,9 @@ func main() {
 		fmt.Println("  build <dockerfile-directory> [--quiet]       - Build environment from Dockerfile")
 		fmt.Println("  create <session> <checkpoint-id> [pid | -1]  - Create checkpoint")
 		fmt.Println("  restore <session> <checkpoint-id>            - Restore checkpoint")
+		fmt.Println("  fork <session> <checkpoint-id> [--n K]       - Materialize live fork(s)")
+		fmt.Println("  fork-exec <session> <fork-id> <command>      - Execute command in a fork")
+		fmt.Println("  destroy <session> <fork-id>                  - Destroy a live fork")
 		fmt.Println("  exec <session> <command> [args...]           - Execute command in environment")
 		fmt.Println("  list <session>                               - List checkpoints")
 		fmt.Println("  cleanup <session> [--force]                  - Clean up session")
@@ -33,6 +36,12 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "__waypoint_restore_fork_child":
+		if err := waypoint.RunForkRestoreChildFromArgs(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+
 	case "init":
 		if len(os.Args) < 3 {
 			fmt.Println("Usage: init <work-directory> [--quiet] [--shell]")
@@ -190,6 +199,92 @@ func main() {
 		}
 		fmt.Printf("Checkpoint '%s' restored, new PID: %d\n", checkpointID, newPID)
 
+	case "fork":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: fork <session> <checkpoint-id> [--n K] [--lazy-pages]")
+			os.Exit(1)
+		}
+		sessionID := os.Args[2]
+		checkpointID := os.Args[3]
+		count := 1
+		lazyPages := false
+		for i := 4; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--n":
+				if i+1 >= len(os.Args) {
+					fmt.Println("Error: --n requires a value")
+					os.Exit(1)
+				}
+				parsed, err := strconv.Atoi(os.Args[i+1])
+				if err != nil || parsed <= 0 {
+					fmt.Printf("Invalid fork count: %s\n", os.Args[i+1])
+					os.Exit(1)
+				}
+				count = parsed
+				i++
+			case "--lazy-pages":
+				lazyPages = true
+			default:
+				fmt.Printf("Error: unknown flag: %s\n", os.Args[i])
+				os.Exit(1)
+			}
+		}
+
+		manager, err := waypoint.LoadManager(sessionID)
+		if err != nil {
+			fmt.Printf("Error loading session: %v\n", err)
+			os.Exit(1)
+		}
+		for i := 0; i < count; i++ {
+			f, err := manager.ForkCheckpoint(checkpointID, waypoint.ForkSpec{LazyPages: lazyPages})
+			if err != nil {
+				fmt.Printf("Error creating fork: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("%s pid=%d socket=%s duration=%s\n", f.ID, f.PID, f.SocketPath, f.RestoreDuration)
+		}
+
+	case "fork-exec":
+		if len(os.Args) < 5 {
+			fmt.Println("Usage: fork-exec <session> <fork-id> <command> [args...]")
+			os.Exit(1)
+		}
+		sessionID := os.Args[2]
+		forkID := os.Args[3]
+		command := os.Args[4]
+		args := os.Args[5:]
+
+		manager, err := waypoint.LoadManager(sessionID)
+		if err != nil {
+			fmt.Printf("Error loading session: %v\n", err)
+			os.Exit(1)
+		}
+		output, err := manager.ExecuteForkCommand(forkID, command, args...)
+		if err != nil {
+			fmt.Printf("Error executing fork command: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(output)
+
+	case "destroy":
+		if len(os.Args) != 4 {
+			fmt.Println("Usage: destroy <session> <fork-id>")
+			os.Exit(1)
+		}
+		sessionID := os.Args[2]
+		forkID := os.Args[3]
+
+		manager, err := waypoint.LoadManager(sessionID)
+		if err != nil {
+			fmt.Printf("Error loading session: %v\n", err)
+			os.Exit(1)
+		}
+		if err := manager.DestroyFork(forkID); err != nil {
+			fmt.Printf("Error destroying fork: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Fork '%s' destroyed successfully\n", forkID)
+
 	case "exec":
 		if len(os.Args) < 4 {
 			fmt.Println("Usage: exec <session> <command> [args...]")
@@ -238,6 +333,17 @@ func main() {
 			fmt.Println("Available checkpoints:")
 			for _, cp := range checkpoints {
 				fmt.Printf("  %s\n", cp)
+			}
+		}
+		forks, err := manager.ListForks()
+		if err != nil {
+			fmt.Printf("Error listing forks: %v\n", err)
+			os.Exit(1)
+		}
+		if len(forks) > 0 {
+			fmt.Println("Live forks:")
+			for _, f := range forks {
+				fmt.Printf("  %s checkpoint=%s status=%s pid=%d socket=%s\n", f.ID, f.CheckpointID, f.Status, f.PID, f.SocketPath)
 			}
 		}
 
