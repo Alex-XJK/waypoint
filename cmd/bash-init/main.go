@@ -48,10 +48,22 @@ func main() {
 		os.Exit(1)
 	}
 	if os.Getenv("WAYPOINT_NAMESPACED") == "1" {
-		if err := setupNamespaceRuntime(chrootDir); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to set up namespace runtime: %v\n", err)
-			os.Exit(1)
+		if os.Getenv("WAYPOINT_REEXECED") != "1" {
+			if err := setupNamespaceRuntime(chrootDir); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to set up namespace runtime: %v\n", err)
+				os.Exit(1)
+			}
+			reexecPath := os.Getenv("WAYPOINT_REEXEC_PATH")
+			if reexecPath == "" {
+				reexecPath = "/.waypoint/bash_init"
+			}
+			env := append(os.Environ(), "WAYPOINT_REEXECED=1")
+			if err := syscall.Exec(reexecPath, []string{reexecPath, socketPath, "/"}, env); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to re-exec %s: %v\n", reexecPath, err)
+				os.Exit(1)
+			}
 		}
+		chrootDir = "/"
 		go reapOrphanedChildren()
 	}
 
@@ -128,6 +140,14 @@ func setupNamespaceRuntime(chrootDir string) error {
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
 		return fmt.Errorf("make mount namespace private failed: %w", err)
 	}
+
+	if err := pivotIntoSessionRoot(chrootDir); err != nil {
+		return err
+	}
+	if err := mountDeviceRuntime(); err != nil {
+		return err
+	}
+
 	for _, mount := range []struct {
 		rel    string
 		source string
@@ -145,6 +165,53 @@ func setupNamespaceRuntime(chrootDir string) error {
 		}
 	}
 	return bringLoopbackUp()
+}
+
+func pivotIntoSessionRoot(newRoot string) error {
+	newRoot = filepath.Clean(newRoot)
+	if err := unix.Mount(newRoot, newRoot, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
+		return fmt.Errorf("bind mount new root %s failed: %w", newRoot, err)
+	}
+
+	oldRoot := filepath.Join(newRoot, ".waypoint-old-root")
+	if err := os.MkdirAll(oldRoot, 0o755); err != nil {
+		return fmt.Errorf("mkdir old root %s failed: %w", oldRoot, err)
+	}
+	if err := unix.PivotRoot(newRoot, oldRoot); err != nil {
+		return fmt.Errorf("pivot_root into %s failed: %w", newRoot, err)
+	}
+	if err := unix.Chdir("/"); err != nil {
+		return fmt.Errorf("chdir after pivot_root failed: %w", err)
+	}
+	if err := unix.Unmount("/.waypoint-old-root", unix.MNT_DETACH); err != nil {
+		return fmt.Errorf("unmount old root failed: %w", err)
+	}
+	if err := os.RemoveAll("/.waypoint-old-root"); err != nil {
+		return fmt.Errorf("remove old root marker failed: %w", err)
+	}
+	return nil
+}
+
+func mountDeviceRuntime() error {
+	if err := os.MkdirAll("/dev", 0o755); err != nil {
+		return err
+	}
+	if err := unix.Mount("devtmpfs", "/dev", "devtmpfs", unix.MS_NOSUID, "mode=755"); err != nil && err != syscall.EBUSY {
+		return fmt.Errorf("mount devtmpfs on /dev failed: %w", err)
+	}
+	if err := os.MkdirAll("/dev/pts", 0o755); err != nil {
+		return err
+	}
+	if err := unix.Mount("devpts", "/dev/pts", "devpts", unix.MS_NOSUID|unix.MS_NOEXEC, "newinstance,ptmxmode=0666,mode=0620"); err != nil && err != syscall.EBUSY {
+		return fmt.Errorf("mount devpts on /dev/pts failed: %w", err)
+	}
+	if err := os.Remove("/dev/ptmx"); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale /dev/ptmx failed: %w", err)
+	}
+	if err := os.Symlink("pts/ptmx", "/dev/ptmx"); err != nil && !os.IsExist(err) {
+		return fmt.Errorf("create /dev/ptmx symlink failed: %w", err)
+	}
+	return nil
 }
 
 func bringLoopbackUp() error {

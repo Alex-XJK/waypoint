@@ -214,8 +214,16 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	if _, err := os.Stat(bashInitSrc); os.IsNotExist(err) {
 		return ShellNotEnabled, "", fmt.Errorf("bash_init binary not found at %s", bashInitSrc)
 	}
+	namespacedBashInit := filepath.Join(workDir, ".waypoint", "bash_init")
+	if err := copyFile(bashInitSrc, namespacedBashInit); err != nil {
+		return ShellNotEnabled, "", fmt.Errorf("failed to stage bash_init in session root: %w", err)
+	}
 
-	socketPath := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.sock", m.sessionID))
+	canonicalSocketPath := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.sock", m.sessionID))
+	hostSocketPath := filepath.Join(workDir, strings.TrimPrefix(canonicalSocketPath, string(filepath.Separator)))
+	if err := os.MkdirAll(filepath.Dir(hostSocketPath), 0o777); err != nil {
+		return ShellNotEnabled, "", fmt.Errorf("failed to create shell socket directory: %w", err)
+	}
 
 	// Judge /bin/bash pre-requisite for bash_init
 	bashPath := filepath.Join(workDir, "bin/bash")
@@ -223,12 +231,15 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 		return ShellNotEnabled, "", fmt.Errorf("bash pre-requisite not met: %s does not exist", bashPath)
 	}
 
-	cmd := exec.Command(bashInitSrc, socketPath, workDir)
+	cmd := exec.Command(bashInitSrc, canonicalSocketPath, workDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: uintptr(unix.CLONE_NEWPID | unix.CLONE_NEWNS | unix.CLONE_NEWNET | unix.CLONE_NEWIPC),
 		Setsid:     true, // new session = no controlling TTY
 	}
-	cmd.Env = append(os.Environ(), "WAYPOINT_NAMESPACED=1")
+	cmd.Env = append(os.Environ(),
+		"WAYPOINT_NAMESPACED=1",
+		"WAYPOINT_REEXEC_PATH=/.waypoint/bash_init",
+	)
 
 	// stdin -> /dev/null
 	devNull, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
@@ -237,14 +248,8 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	}
 	cmd.Stdin = devNull
 
-	// stdout/stderr -> log file
-	logPath := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.log", m.sessionID))
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return ShellNotEnabled, "", fmt.Errorf("failed to open log file: %w", err)
-	}
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
 
 	// Start the bash_init process in the background
 	if err := cmd.Start(); err != nil {
@@ -253,7 +258,7 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 
 	// Update shell PID and socket path in session info
 	m.shellPid = cmd.Process.Pid
-	m.shellSocket = socketPath
+	m.shellSocket = socketPathThroughProcRoot(m.shellPid, canonicalSocketPath)
 
 	// Save updated session info
 	if err := saveSessionInfo(m.sessionID, m); err != nil {

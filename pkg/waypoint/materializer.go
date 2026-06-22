@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -87,6 +89,7 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 	}
 	if pid, err := readPIDFile(f.PidFile); err == nil {
 		f.PID = pid
+		f.SocketPath = socketPathThroughProcRoot(pid, f.CanonicalSocket)
 	}
 	if err := waitForForkSocket(f.SocketPath, 5*time.Second); err != nil {
 		f.Status = ForkStatusDestroyed
@@ -200,6 +203,7 @@ func restoreForkChild(f *Fork) error {
 		args = append(args, "--lazy-pages")
 	}
 	if f.MountPoint != "" {
+		args = append(args, "-r", f.MountPoint)
 		args = append(args, "--external", fmt.Sprintf("mnt[waypoint-work]:%s", f.MountPoint))
 	}
 	cmd := exec.Command("criu", args...)
@@ -223,18 +227,6 @@ func restoreForkChild(f *Fork) error {
 func prepareForkMountNamespace(f *Fork) error {
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
 		return fmt.Errorf("make mount namespace private failed: %w", err)
-	}
-	if f.CanonicalTempDir != "" {
-		if err := os.MkdirAll(f.CanonicalTempDir, 0o777); err != nil {
-			return err
-		}
-		if err := os.MkdirAll(f.TempDir, 0o755); err != nil {
-			return err
-		}
-		_ = unix.Unmount(f.CanonicalTempDir, unix.MNT_DETACH)
-		if err := unix.Mount(f.TempDir, f.CanonicalTempDir, "", unix.MS_BIND, ""); err != nil {
-			return fmt.Errorf("bind mount %s on %s failed: %w", f.TempDir, f.CanonicalTempDir, err)
-		}
 	}
 
 	if err := mountOverlayAt(f.ParentList, f.UpperDir, f.WorkDir, f.MountPoint, f.SessionID, f.RootDir, f.OriginalDir); err != nil {
@@ -327,4 +319,8 @@ func waitForForkSocket(path string, timeout time.Duration) error {
 		time.Sleep(25 * time.Millisecond)
 	}
 	return fmt.Errorf("socket %s did not appear", path)
+}
+
+func socketPathThroughProcRoot(pid int, canonicalSocket string) string {
+	return filepath.Join("/proc", strconv.Itoa(pid), "root", strings.TrimPrefix(canonicalSocket, string(filepath.Separator)))
 }

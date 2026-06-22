@@ -71,6 +71,9 @@ func (m *Manager) prepareCheckpointRestore(rootPID int, criuPath string) error {
 		}
 		return nil
 	}
+	if rootPID > 0 && containsTaskID(taskIDs, 1) {
+		return m.killProcess(rootPID)
+	}
 
 	pidsToKill := make(map[int]struct{})
 	for _, taskID := range taskIDs {
@@ -104,6 +107,15 @@ func (m *Manager) prepareCheckpointRestore(rootPID int, criuPath string) error {
 	}
 
 	return nil
+}
+
+func containsTaskID(taskIDs []int, target int) bool {
+	for _, taskID := range taskIDs {
+		if taskID == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) readCheckpointTaskIDs(criuPath string) ([]int, error) {

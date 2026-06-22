@@ -147,10 +147,7 @@ func newForkRecord(m *Manager, checkpointID string, metadata *Metadata, spec For
 	if originalDir == "" {
 		originalDir = m.originalDir
 	}
-	canonicalSocket := m.shellSocket
-	if canonicalSocket == "" {
-		canonicalSocket = filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.sock", m.sessionID))
-	}
+	canonicalSocket := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.sock", m.sessionID))
 	socketPath := filepath.Join(tempDir, filepath.Base(canonicalSocket))
 
 	return &Fork{

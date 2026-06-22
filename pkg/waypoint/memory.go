@@ -22,8 +22,10 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 		"--ghost-limit", "8388608",
 		"-vv", "-o", "dump.log",
 	}
-	if mountID, err := findMountID(pid, m.workOverlay); err == nil && mountID != "" {
-		args = append(args, "--external", fmt.Sprintf("mnt[%s]:waypoint-work", mountID))
+	if _, err := findMountID(pid, m.workOverlay); err == nil {
+		args = append(args, "--external", fmt.Sprintf("mnt[%s]:waypoint-work", m.workOverlay))
+	} else if _, err := findMountID(pid, "/"); err == nil {
+		args = append(args, "--external", "mnt[/]:waypoint-work")
 	}
 
 	cmd := exec.Command("criu", args...)
@@ -77,12 +79,21 @@ func unescapeMountInfoPath(path string) string {
 func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
 	// Use CRIU to restore the process
 	// Notice: Cannot use '--shell-job' because it will try to attach to the original PTY, which does not exist anymore.
-	cmd := exec.Command(
-		"criu", "restore",
+	pidFile := filepath.Join(criuPath, "restore.pid")
+	_ = os.Remove(pidFile)
+	args := []string{
+		"restore",
 		"--images-dir", criuPath,
 		"--tcp-established",
+		"--restore-detached",
+		"--pidfile", pidFile,
 		"-vv", "-o", "restore.log",
-	)
+	}
+	if m.workOverlay != "" {
+		args = append(args, "-r", m.workOverlay)
+		args = append(args, "--external", fmt.Sprintf("mnt[waypoint-work]:%s", m.workOverlay))
+	}
+	cmd := exec.Command("criu", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true,
 	}
@@ -91,9 +102,20 @@ func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
 	cmd.Stdout = devNull
 	cmd.Stderr = devNull
 
-	if err := cmd.Start(); err != nil {
+	if err := cmd.Run(); err != nil {
 		return -1, fmt.Errorf("failed to restore memory state: %w", err)
 	}
 
-	return pid, nil
+	newPID := pid
+	if restoredPID, err := readPIDFile(pidFile); err == nil {
+		newPID = restoredPID
+	}
+	m.shellPid = newPID
+	if m.shellSocket != "" {
+		canonicalSocket := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.sock", m.sessionID))
+		m.shellSocket = socketPathThroughProcRoot(newPID, canonicalSocket)
+		_ = saveSessionInfo(m.sessionID, m)
+	}
+
+	return newPID, nil
 }
