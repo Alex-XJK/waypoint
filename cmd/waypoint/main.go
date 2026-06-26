@@ -343,7 +343,7 @@ func main() {
 		if len(forks) > 0 {
 			fmt.Println("Live forks:")
 			for _, f := range forks {
-				fmt.Printf("  %s checkpoint=%s status=%s pid=%d socket=%s\n", f.ID, f.CheckpointID, f.Status, f.PID, f.SocketPath)
+				fmt.Printf("  %s checkpoint=%s status=%s pid=%d socket=%s\n", f.ID, f.BaseCheckpointID, f.Status, f.PID, f.SocketPath)
 			}
 		}
 

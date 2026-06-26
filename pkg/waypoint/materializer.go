@@ -44,11 +44,11 @@ func (m *Manager) LoadCheckpoint(checkpointID string) (*Checkpoint, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to load checkpoint metadata: %w", err)
 	}
-	dir := filepath.Join(m.baseDir, checkpointID)
+	dir := m.checkpointDir(checkpointID)
 	return &Checkpoint{
 		ID:       checkpointID,
 		Dir:      dir,
-		CriuPath: filepath.Join(dir, "criu"),
+		CriuPath: m.checkpointCriuDir(checkpointID),
 		Metadata: metadata,
 	}, nil
 }
@@ -229,17 +229,17 @@ func prepareForkMountNamespace(f *Fork) error {
 		return fmt.Errorf("make mount namespace private failed: %w", err)
 	}
 
-	if err := mountOverlayAt(f.ParentList, f.UpperDir, f.WorkDir, f.MountPoint, f.SessionID, f.RootDir, f.OriginalDir); err != nil {
+	if err := mountOverlayAt(f.LayerIDs, f.UpperDir, f.WorkDir, f.MountPoint, f.SessionID, f.RootDir, f.OriginalDir); err != nil {
 		return err
 	}
 	return nil
 }
 
-func mountOverlayAt(parentList []string, upperDir, workDir, mountPoint, sessionID, rootDir, originalDir string) error {
-	baseDir := filepath.Dir(filepath.Dir(rootDir))
-	lowerDirs := make([]string, 0, len(parentList)+1)
-	for i := len(parentList) - 1; i >= 0; i-- {
-		lowerDirs = append(lowerDirs, filepath.Join(baseDir, parentList[i], "upper"))
+func mountOverlayAt(layerIDs []string, upperDir, workDir, mountPoint, sessionID, rootDir, originalDir string) error {
+	sessionDir := filepath.Dir(filepath.Dir(rootDir))
+	lowerDirs := make([]string, 0, len(layerIDs)+1)
+	for i := len(layerIDs) - 1; i >= 0; i-- {
+		lowerDirs = append(lowerDirs, filepath.Join(sessionDir, "checkpoints", layerIDs[i], "upper"))
 	}
 	lowerDirs = append(lowerDirs, originalDir)
 

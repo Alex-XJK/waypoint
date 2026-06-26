@@ -23,7 +23,8 @@ const (
 type Fork struct {
 	ID               string     `json:"id"`
 	SessionID        string     `json:"session_id"`
-	CheckpointID     string     `json:"checkpoint_id"`
+	BaseCheckpointID string     `json:"base_checkpoint_id"`
+	LayerIDs         []string   `json:"layer_ids"`
 	OriginalDir      string     `json:"original_dir"`
 	RootDir          string     `json:"root_dir"`
 	UpperDir         string     `json:"upper_dir"`
@@ -37,7 +38,6 @@ type Fork struct {
 	CriuPath         string     `json:"criu_path"`
 	PidFile          string     `json:"pid_file"`
 	PID              int        `json:"pid"`
-	ParentList       []string   `json:"parent_list"`
 	CreatedAt        int64      `json:"created_at"`
 	RestoreDuration  string     `json:"restore_duration,omitempty"`
 	Status           ForkStatus `json:"status"`
@@ -68,7 +68,7 @@ func (m *Manager) saveFork(f *Fork) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(f.RootDir, ForkStateFile), data, 0o644)
+	return atomicWriteFile(filepath.Join(f.RootDir, ForkStateFile), data, 0o644)
 }
 
 func (m *Manager) loadFork(forkID string) (*Fork, error) {
@@ -153,7 +153,8 @@ func newForkRecord(m *Manager, checkpointID string, metadata *Metadata, spec For
 	return &Fork{
 		ID:               forkID,
 		SessionID:        m.sessionID,
-		CheckpointID:     checkpointID,
+		BaseCheckpointID: checkpointID,
+		LayerIDs:         append([]string(nil), metadata.LayerIDs...),
 		OriginalDir:      originalDir,
 		RootDir:          rootDir,
 		UpperDir:         filepath.Join(rootDir, "upper"),
@@ -164,9 +165,8 @@ func newForkRecord(m *Manager, checkpointID string, metadata *Metadata, spec For
 		SocketPath:       socketPath,
 		CanonicalSocket:  canonicalSocket,
 		LogPath:          filepath.Join(rootDir, "restore.log"),
-		CriuPath:         filepath.Join(m.baseDir, checkpointID, "criu"),
+		CriuPath:         m.checkpointCriuDir(checkpointID),
 		PidFile:          filepath.Join(rootDir, "restore.pid"),
-		ParentList:       append([]string(nil), metadata.ParentList...),
 		CreatedAt:        time.Now().Unix(),
 		Status:           ForkStatusStarting,
 		LazyPages:        spec.LazyPages,

@@ -21,15 +21,19 @@ type Manager struct {
 	currentParent []string // Current parent checkpoints
 }
 
-// Metadata represents the metadata stored for each checkpoint.
-// It is serialized to JSON and stored in the per-session metadata directory for snapshot tracking.
+// Metadata represents the metadata stored for each immutable checkpoint.
+// ParentID is the logical DAG edge. LayerIDs is the resolved filesystem layer
+// chain from oldest to newest and includes this checkpoint's ID.
 type Metadata struct {
-	ID          string   `json:"id"`
-	PID         int      `json:"pid"`
-	Timestamp   int64    `json:"timestamp"`
-	OriginalDir string   `json:"original_dir"`
-	SessionID   string   `json:"session_id"`
-	ParentList  []string `json:"parent_list,omitempty"`
+	ID                string           `json:"id"`
+	ParentID          string           `json:"parent_id,omitempty"`
+	LayerIDs          []string         `json:"layer_ids"`
+	PID               int              `json:"pid"`
+	OriginalDir       string           `json:"original_dir"`
+	SessionID         string           `json:"session_id"`
+	CreatedFromForkID string           `json:"created_from_fork_id,omitempty"`
+	CreatedAt         int64            `json:"created_at"`
+	Status            CheckpointStatus `json:"status"`
 }
 
 // SessionInfo holds information about a checkpoint session.
@@ -50,6 +54,14 @@ type SessionInfo struct {
 const SkipMemoryCheckpoint = -1 // User requested to skip memory checkpoint
 const ShellNotEnabled = 0       // Shell is not enabled for this session
 const PidNotProvided = -2       // PID not provided for checkpointing
+
+type CheckpointStatus string
+
+const (
+	CheckpointStatusCreating CheckpointStatus = "creating"
+	CheckpointStatusReady    CheckpointStatus = "ready"
+	CheckpointStatusFailed   CheckpointStatus = "failed"
+)
 
 const SessionInfoDir = "/tmp/waypoint-sessions-info"
 

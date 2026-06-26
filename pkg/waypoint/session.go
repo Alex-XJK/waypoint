@@ -84,7 +84,7 @@ func saveSessionInfo(sessionID string, manager *Manager) error {
 	}
 
 	sessionFile := filepath.Join(SessionInfoDir, sessionID+".json")
-	return os.WriteFile(sessionFile, data, 0644)
+	return atomicWriteFile(sessionFile, data, 0o644)
 }
 
 // Load SessionInfo from the fixed-path global store

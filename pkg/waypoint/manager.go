@@ -101,9 +101,12 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 	// Unmount current overlay to ensure filesystem consistency
 	exec.Command("umount", m.workOverlay).Run()
 
-	// Rename "~/current/" to "~/<checkpointID>/"
+	// Rename "~/current/" to "~/checkpoints/<checkpointID>/"
 	currentDir := filepath.Join(m.baseDir, "current")
-	ckptDir := filepath.Join(m.baseDir, checkpointID)
+	ckptDir := m.checkpointDir(checkpointID)
+	if err := os.MkdirAll(m.checkpointsDir(), 0o755); err != nil {
+		return fmt.Errorf("failed to create checkpoints directory: %w", err)
+	}
 	if err := os.Rename(currentDir, ckptDir); err != nil {
 		return fmt.Errorf("failed to rename current directory: %w", err)
 	}
@@ -116,13 +119,17 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 	os.MkdirAll(workDir, 0755)
 
 	// Update current parent list to include this new checkpoint
-	parentList := m.currentParent
-	parentList = append(parentList, checkpointID)
-	m.currentParent = parentList
+	layerIDs := append([]string(nil), m.currentParent...)
+	parentID := ""
+	if len(layerIDs) > 0 {
+		parentID = layerIDs[len(layerIDs)-1]
+	}
+	layerIDs = append(layerIDs, checkpointID)
+	m.currentParent = layerIDs
 	m.syncManagerToSession()
 
 	// Remount the new "current" overlay with multiple lowerdirs
-	lowerDirs := m.buildOverlayLayers(parentList)
+	lowerDirs := m.buildOverlayLayers(layerIDs)
 	err := m.mountOverlay(lowerDirs, upperDir, workDir, m.workOverlay)
 	if err != nil {
 		return fmt.Errorf("failed to remount new current overlay: %w", err)
@@ -131,7 +138,7 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 	// Restore the memory state into the new overlay
 	// (so that the process can continue running in the new overlay)
 	if pid != SkipMemoryCheckpoint {
-		currentCriuDir := filepath.Join(m.baseDir, checkpointID, "criu")
+		currentCriuDir := m.checkpointCriuDir(checkpointID)
 		if errPrep := m.prepareCheckpointRestore(pid, currentCriuDir); errPrep != nil {
 			return fmt.Errorf("failed to prepare memory restore into new overlay: %w", errPrep)
 		}
@@ -145,11 +152,13 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 	// Save metadata
 	metadata := Metadata{
 		ID:          checkpointID,
+		ParentID:    parentID,
+		LayerIDs:    layerIDs,
 		PID:         pid,
-		Timestamp:   time.Now().Unix(),
 		OriginalDir: m.originalDir,
 		SessionID:   m.sessionID,
-		ParentList:  parentList,
+		CreatedAt:   time.Now().Unix(),
+		Status:      CheckpointStatusReady,
 	}
 
 	return m.saveMetadata(checkpointID, metadata)
@@ -162,7 +171,7 @@ func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
 		return 0, fmt.Errorf("failed to load checkpoint metadata: %w", err)
 	}
 
-	previousCriuPath := filepath.Join(m.baseDir, checkpointID, "criu")
+	previousCriuPath := m.checkpointCriuDir(checkpointID)
 
 	// If the previous checkpoint contains process, we need to first kill it, so that mountpoint can be released.
 	if checkpointMetadata.PID != SkipMemoryCheckpoint {
@@ -182,11 +191,11 @@ func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
 	os.RemoveAll(upperDir)
 	os.RemoveAll(workDir)
 
-	// Rebuild lowerdirs list from checkpointMetadata.ParentList
-	lowerDirs := m.buildOverlayLayers(checkpointMetadata.ParentList)
+	// Rebuild lowerdirs list from checkpointMetadata.LayerIDs
+	lowerDirs := m.buildOverlayLayers(checkpointMetadata.LayerIDs)
 
-	// Update current parent list to checkpoint's parent list
-	m.currentParent = checkpointMetadata.ParentList
+	// Update current parent list to checkpoint's layer chain
+	m.currentParent = checkpointMetadata.LayerIDs
 	m.syncManagerToSession()
 
 	// Remount overlay with the checkpoint's upper layer on top of the parent lowerdirs

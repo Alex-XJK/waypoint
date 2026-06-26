@@ -15,7 +15,7 @@ func (m *Manager) saveMetadata(checkpointID string, metadata Metadata) error {
 	}
 
 	metadataPath := filepath.Join(m.metadataDir, checkpointID+".json")
-	return os.WriteFile(metadataPath, data, 0644)
+	return atomicWriteFile(metadataPath, data, 0o644)
 }
 
 func (m *Manager) loadMetadata(checkpointID string) (*Metadata, error) {
@@ -54,5 +54,5 @@ func updateSessionEnvironment(sessionID, originalDir, workOverlay string) error 
 	}
 
 	sessionFile := filepath.Join(SessionInfoDir, sessionID+".json")
-	return os.WriteFile(sessionFile, data, 0644)
+	return atomicWriteFile(sessionFile, data, 0o644)
 }
