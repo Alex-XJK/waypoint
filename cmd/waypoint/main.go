@@ -22,10 +22,12 @@ func main() {
 		fmt.Println("Commands:")
 		fmt.Println("  init <work-directory> [--quiet] [--shell]    - Initialize environment")
 		fmt.Println("  build <dockerfile-directory> [--quiet]       - Build environment from Dockerfile")
-		fmt.Println("  create <session> <checkpoint-id> [pid | -1]  - Create checkpoint")
-		fmt.Println("  restore <session> <checkpoint-id>            - Restore checkpoint")
+		fmt.Println("  checkpoint <session> <checkpoint-id>         - Snapshot main fork")
 		fmt.Println("  fork <session> <checkpoint-id> [--id ID] [--n K] - Materialize live fork(s)")
 		fmt.Println("  exec <session> <fork-id> -- <command>        - Execute command in a fork")
+		fmt.Println("  snapshot <session> <fork-id> <checkpoint-id> - Snapshot a live fork")
+		fmt.Println("  create <session> <checkpoint-id>             - Legacy alias for checkpoint")
+		fmt.Println("  restore <session> <checkpoint-id>            - Legacy destructive restore")
 		fmt.Println("  fork-exec <session> <fork-id> <command>      - Legacy alias for exec")
 		fmt.Println("  destroy <session> <fork-id>                  - Destroy a live fork")
 		fmt.Println("  list <session>                               - List checkpoints")
@@ -147,25 +149,13 @@ func main() {
 			fmt.Printf("\nSave the session ID for future operations!\n")
 		}
 
-	case "create":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: create <session> <checkpoint-id> [pid | -1]")
-			fmt.Println("  If pid not provided, checkpoint the shell if enabled; otherwise, skip memory checkpoint")
-			fmt.Println("  Use -1 to force skip memory checkpoint")
+	case "checkpoint", "create":
+		if len(os.Args) != 4 {
+			fmt.Printf("Usage: %s <session> <checkpoint-id>\n", os.Args[1])
 			os.Exit(1)
 		}
 		sessionID := os.Args[2]
 		checkpointID := os.Args[3]
-
-		pid := waypoint.PidNotProvided
-		err := error(nil)
-		if len(os.Args) > 4 {
-			pid, err = strconv.Atoi(os.Args[4])
-			if err != nil {
-				fmt.Printf("Invalid PID: %s\n", os.Args[4])
-				os.Exit(1)
-			}
-		}
 
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
@@ -173,7 +163,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := manager.CreateCheckpointNew(pid, checkpointID); err != nil {
+		if _, err := manager.SnapshotFork(waypoint.MainForkID, checkpointID); err != nil {
 			fmt.Printf("Error creating checkpoint: %v\n", err)
 			os.Exit(1)
 		}
@@ -301,6 +291,26 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Fork '%s' destroyed successfully\n", forkID)
+
+	case "snapshot":
+		if len(os.Args) != 5 {
+			fmt.Println("Usage: snapshot <session> <fork-id> <checkpoint-id>")
+			os.Exit(1)
+		}
+		sessionID := os.Args[2]
+		forkID := os.Args[3]
+		checkpointID := os.Args[4]
+
+		manager, err := waypoint.LoadManager(sessionID)
+		if err != nil {
+			fmt.Printf("Error loading session: %v\n", err)
+			os.Exit(1)
+		}
+		if _, err := manager.SnapshotFork(forkID, checkpointID); err != nil {
+			fmt.Printf("Error snapshotting fork: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Fork '%s' snapshotted as checkpoint '%s'\n", forkID, checkpointID)
 
 	case "exec":
 		if len(os.Args) < 6 || os.Args[4] != "--" {

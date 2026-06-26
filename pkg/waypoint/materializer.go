@@ -113,7 +113,7 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 }
 
 func (c *CRIUMaterializer) Snapshot(f *Fork, id string) (*Checkpoint, error) {
-	return nil, fmt.Errorf("fork snapshot is planned for a later milestone")
+	return c.manager.snapshotFork(f, id)
 }
 
 func (c *CRIUMaterializer) runRestoreHelper(f *Fork) error {
@@ -142,6 +142,140 @@ func (m *Manager) ForkCheckpoint(checkpointID string, spec ForkSpec) (*Fork, err
 		return nil, err
 	}
 	return NewCRIUMaterializer(m).Materialize(ckpt, spec)
+}
+
+func (m *Manager) SnapshotFork(forkID, checkpointID string) (*Checkpoint, error) {
+	var ckpt *Checkpoint
+	err := m.withForkLock(forkID, func() error {
+		f, err := m.loadFork(forkID)
+		if err != nil {
+			return err
+		}
+		ckpt, err = NewCRIUMaterializer(m).Snapshot(f, checkpointID)
+		return err
+	})
+	return ckpt, err
+}
+
+func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error) {
+	if checkpointID == "" || checkpointID == "current" {
+		return nil, fmt.Errorf("invalid checkpoint ID: %s", checkpointID)
+	}
+	if f.Status != ForkStatusRunning {
+		return nil, fmt.Errorf("fork %s is not running (status=%s)", f.ID, f.Status)
+	}
+	if f.PID <= 0 {
+		return nil, fmt.Errorf("fork %s has no live PID", f.ID)
+	}
+
+	parentID := f.BaseCheckpointID
+	layerIDs := append(append([]string(nil), f.LayerIDs...), checkpointID)
+	metadata := Metadata{
+		ID:                checkpointID,
+		ParentID:          parentID,
+		LayerIDs:          layerIDs,
+		PID:               f.PID,
+		OriginalDir:       f.OriginalDir,
+		SessionID:         f.SessionID,
+		CreatedFromForkID: f.ID,
+		CreatedAt:         time.Now().Unix(),
+		Status:            CheckpointStatusCreating,
+	}
+	ckptDir := m.checkpointDir(checkpointID)
+	ckptUpper := m.checkpointUpperDir(checkpointID)
+	ckptCriu := m.checkpointCriuDir(checkpointID)
+
+	if err := m.withSessionLock(func() error {
+		if _, err := os.Stat(ckptDir); err == nil {
+			return fmt.Errorf("checkpoint %s already exists", checkpointID)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.MkdirAll(ckptCriu, 0o755); err != nil {
+			return err
+		}
+		return m.saveMetadata(checkpointID, metadata)
+	}); err != nil {
+		return nil, err
+	}
+
+	fail := func(err error) (*Checkpoint, error) {
+		metadata.Status = CheckpointStatusFailed
+		_ = m.saveMetadata(checkpointID, metadata)
+		f.Status = ForkStatusFailed
+		_ = m.saveFork(f)
+		return nil, err
+	}
+
+	f.Status = ForkStatusSnapshot
+	if err := m.saveFork(f); err != nil {
+		return fail(err)
+	}
+	if err := m.createMemoryCheckpoint(f.PID, ckptCriu); err != nil {
+		return fail(fmt.Errorf("memory checkpoint failed: %w", err))
+	}
+
+	if f.ID == MainForkID {
+		m.unmountRuntimeFS(f.MountPoint)
+		_ = unix.Unmount(f.MountPoint, unix.MNT_DETACH)
+	}
+
+	if err := os.Rename(f.UpperDir, ckptUpper); err != nil {
+		return fail(fmt.Errorf("seal fork upper failed: %w", err))
+	}
+	if err := os.RemoveAll(f.WorkDir); err != nil {
+		return fail(fmt.Errorf("remove old fork workdir failed: %w", err))
+	}
+	for _, dir := range []string{f.UpperDir, f.WorkDir, f.TempDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fail(fmt.Errorf("mkdir %s failed: %w", dir, err))
+		}
+	}
+
+	f.BaseCheckpointID = checkpointID
+	f.LayerIDs = layerIDs
+	f.CriuPath = ckptCriu
+	f.PidFile = filepath.Join(f.RootDir, "restore.pid")
+	_ = os.Remove(f.PidFile)
+	if err := m.saveFork(f); err != nil {
+		return fail(err)
+	}
+	if err := NewCRIUMaterializer(m).runRestoreHelper(f); err != nil {
+		return fail(err)
+	}
+	if pid, err := readPIDFile(f.PidFile); err == nil {
+		f.PID = pid
+		f.SocketPath = socketPathThroughProcRoot(pid, f.CanonicalSocket)
+	}
+	if err := waitForForkSocket(f.SocketPath, 5*time.Second); err != nil {
+		return fail(err)
+	}
+	f.Status = ForkStatusRunning
+	f.RestoreDuration = ""
+	if err := m.saveFork(f); err != nil {
+		return fail(err)
+	}
+
+	metadata.PID = f.PID
+	metadata.Status = CheckpointStatusReady
+	if err := m.withSessionLock(func() error {
+		return m.saveMetadata(checkpointID, metadata)
+	}); err != nil {
+		return nil, err
+	}
+	if f.ID == MainForkID {
+		m.shellPid = f.PID
+		m.shellSocket = f.SocketPath
+		m.currentParent = append([]string(nil), f.LayerIDs...)
+		_ = saveSessionInfo(m.sessionID, m)
+	}
+
+	return &Checkpoint{
+		ID:       checkpointID,
+		Dir:      ckptDir,
+		CriuPath: ckptCriu,
+		Metadata: &metadata,
+	}, nil
 }
 
 func (m *Manager) ExecuteForkCommand(forkID, command string, args ...string) (string, error) {

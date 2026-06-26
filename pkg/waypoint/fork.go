@@ -18,6 +18,8 @@ type ForkStatus string
 const (
 	ForkStatusStarting  ForkStatus = "starting"
 	ForkStatusRunning   ForkStatus = "running"
+	ForkStatusSnapshot  ForkStatus = "snapshotting"
+	ForkStatusFailed    ForkStatus = "failed"
 	ForkStatusDestroyed ForkStatus = "destroyed"
 )
 
