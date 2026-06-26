@@ -11,6 +11,7 @@ import (
 )
 
 const ForkStateFile = "fork.json"
+const MainForkID = "main"
 
 type ForkStatus string
 
@@ -171,4 +172,26 @@ func newForkRecord(m *Manager, checkpointID string, metadata *Metadata, spec For
 		Status:           ForkStatusStarting,
 		LazyPages:        spec.LazyPages,
 	}, nil
+}
+
+func (m *Manager) saveMainFork(pid int, socketPath, canonicalSocket, logPath string) error {
+	rootDir := m.forkDir(MainForkID)
+	f := &Fork{
+		ID:              MainForkID,
+		SessionID:       m.sessionID,
+		LayerIDs:        append([]string(nil), m.currentParent...),
+		OriginalDir:     m.originalDir,
+		RootDir:         rootDir,
+		UpperDir:        filepath.Join(rootDir, "upper"),
+		WorkDir:         filepath.Join(rootDir, "work"),
+		TempDir:         filepath.Join(rootDir, "temp"),
+		MountPoint:      m.workOverlay,
+		SocketPath:      socketPath,
+		CanonicalSocket: canonicalSocket,
+		LogPath:         logPath,
+		PID:             pid,
+		CreatedAt:       time.Now().Unix(),
+		Status:          ForkStatusRunning,
+	}
+	return m.saveFork(f)
 }

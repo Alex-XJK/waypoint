@@ -65,40 +65,48 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 		return nil, fmt.Errorf("checkpoint %s CRIU images not found: %w", ckpt.ID, err)
 	}
 
-	f, err := newForkRecord(m, ckpt.ID, ckpt.Metadata, spec)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.RemoveAll(f.RootDir); err != nil {
-		return nil, err
-	}
-	for _, dir := range []string{f.UpperDir, f.WorkDir, f.TempDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("mkdir %s failed: %w", dir, err)
+	var f *Fork
+	if err := m.withSessionLock(func() error {
+		var err error
+		f, err = newForkRecord(m, ckpt.ID, ckpt.Metadata, spec)
+		if err != nil {
+			return err
 		}
-	}
-	if err := m.saveFork(f); err != nil {
+		if _, err := os.Stat(f.RootDir); err == nil {
+			return fmt.Errorf("fork %s already exists", f.ID)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		for _, dir := range []string{f.UpperDir, f.WorkDir, f.TempDir} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return fmt.Errorf("mkdir %s failed: %w", dir, err)
+			}
+		}
+		return m.saveFork(f)
+	}); err != nil {
 		return nil, err
 	}
 
 	start := time.Now()
-	if err := c.runRestoreHelper(f); err != nil {
-		f.Status = ForkStatusDestroyed
-		_ = m.saveFork(f)
-		return nil, err
-	}
-	if pid, err := readPIDFile(f.PidFile); err == nil {
-		f.PID = pid
-		f.SocketPath = socketPathThroughProcRoot(pid, f.CanonicalSocket)
-	}
-	if err := waitForForkSocket(f.SocketPath, 5*time.Second); err != nil {
-		f.Status = ForkStatusDestroyed
-		_ = m.saveFork(f)
-		return nil, err
-	}
-	f.RestoreDuration = time.Since(start).String()
-	f.Status = ForkStatusRunning
-	if err := m.saveFork(f); err != nil {
+	if err := m.withForkLock(f.ID, func() error {
+		if err := c.runRestoreHelper(f); err != nil {
+			f.Status = ForkStatusDestroyed
+			_ = m.saveFork(f)
+			return err
+		}
+		if pid, err := readPIDFile(f.PidFile); err == nil {
+			f.PID = pid
+			f.SocketPath = socketPathThroughProcRoot(pid, f.CanonicalSocket)
+		}
+		if err := waitForForkSocket(f.SocketPath, 5*time.Second); err != nil {
+			f.Status = ForkStatusDestroyed
+			_ = m.saveFork(f)
+			return err
+		}
+		f.RestoreDuration = time.Since(start).String()
+		f.Status = ForkStatusRunning
+		return m.saveFork(f)
+	}); err != nil {
 		return nil, err
 	}
 	return f, nil
@@ -137,39 +145,45 @@ func (m *Manager) ForkCheckpoint(checkpointID string, spec ForkSpec) (*Fork, err
 }
 
 func (m *Manager) ExecuteForkCommand(forkID, command string, args ...string) (string, error) {
-	f, err := m.loadFork(forkID)
-	if err != nil {
-		return "", err
-	}
-	if f.Status != ForkStatusRunning {
-		return "", fmt.Errorf("fork %s is not running (status=%s)", forkID, f.Status)
-	}
-	commandString := command
-	if len(args) > 0 {
-		for _, arg := range args {
-			commandString += " " + arg
+	var output string
+	err := m.withForkLock(forkID, func() error {
+		f, err := m.loadFork(forkID)
+		if err != nil {
+			return err
 		}
-	}
-	commandString += "\n"
-	return execCommand(f.SocketPath, commandString)
+		if f.Status != ForkStatusRunning {
+			return fmt.Errorf("fork %s is not running (status=%s)", forkID, f.Status)
+		}
+		commandString := command
+		if len(args) > 0 {
+			commandString += " " + strings.Join(args, " ")
+		}
+		commandString += "\n"
+		var execErr error
+		output, execErr = execCommand(f.SocketPath, commandString)
+		return execErr
+	})
+	return output, err
 }
 
 func (m *Manager) DestroyFork(forkID string) error {
-	f, err := m.loadFork(forkID)
-	if err != nil {
-		return err
-	}
-	if f.PID > 0 {
-		if err := m.killProcess(f.PID); err != nil {
+	return m.withForkLock(forkID, func() error {
+		f, err := m.loadFork(forkID)
+		if err != nil {
 			return err
 		}
-	}
-	_ = os.Remove(f.SocketPath)
-	f.Status = ForkStatusDestroyed
-	if err := m.saveFork(f); err != nil {
-		return err
-	}
-	return os.RemoveAll(f.RootDir)
+		f.Status = ForkStatusDestroyed
+		if err := m.saveFork(f); err != nil {
+			return err
+		}
+		if f.PID > 0 {
+			if err := m.killProcess(f.PID); err != nil {
+				return err
+			}
+		}
+		_ = os.Remove(f.SocketPath)
+		return os.RemoveAll(f.RootDir)
+	})
 }
 
 func RunForkRestoreChildFromArgs(args []string) error {

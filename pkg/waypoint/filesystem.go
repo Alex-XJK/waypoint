@@ -28,12 +28,15 @@ func (m *Manager) InitEnvironment(originalDir string) (string, error) {
 
 	m.originalDir = absDir
 
-	// Create overlay structure
-	upperDir := filepath.Join(m.baseDir, "current", "upper")
-	workDir := filepath.Join(m.baseDir, "current", "work")
+	// Create the main fork overlay structure.
+	mainRoot := m.forkDir(MainForkID)
+	upperDir := filepath.Join(mainRoot, "upper")
+	workDir := filepath.Join(mainRoot, "work")
+	tempDir := filepath.Join(mainRoot, "temp")
 
 	os.MkdirAll(upperDir, 0755)
 	os.MkdirAll(workDir, 0755)
+	os.MkdirAll(tempDir, 0755)
 
 	// Mount overlay
 	err = m.mountOverlay([]string{absDir}, upperDir, workDir, m.workOverlay)

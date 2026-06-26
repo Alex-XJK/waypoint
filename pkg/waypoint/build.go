@@ -283,6 +283,9 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 		m.shellSocket = ""
 		return ShellNotEnabled, "", err
 	}
+	if err := m.saveMainFork(m.shellPid, m.shellSocket, canonicalSocketPath, logPath); err != nil {
+		return m.shellPid, m.shellSocket, fmt.Errorf("failed to save main fork: %w", err)
+	}
 
 	// Save updated session info
 	if err := saveSessionInfo(m.sessionID, m); err != nil {

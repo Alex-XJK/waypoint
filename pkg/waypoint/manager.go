@@ -21,6 +21,9 @@ func NewManager(baseDir string) *Manager {
 	os.MkdirAll(metadataDir, 0755)
 	os.MkdirAll(workOverlay, 0755)
 	os.MkdirAll(temporaryDir, 0777)
+	os.MkdirAll(filepath.Join(baseDir, "checkpoints"), 0755)
+	os.MkdirAll(filepath.Join(baseDir, "forks"), 0755)
+	os.MkdirAll(filepath.Join(baseDir, "locks"), 0755)
 
 	return &Manager{
 		baseDir:     baseDir,

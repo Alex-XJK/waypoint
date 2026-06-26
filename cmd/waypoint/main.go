@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
@@ -23,10 +24,10 @@ func main() {
 		fmt.Println("  build <dockerfile-directory> [--quiet]       - Build environment from Dockerfile")
 		fmt.Println("  create <session> <checkpoint-id> [pid | -1]  - Create checkpoint")
 		fmt.Println("  restore <session> <checkpoint-id>            - Restore checkpoint")
-		fmt.Println("  fork <session> <checkpoint-id> [--n K]       - Materialize live fork(s)")
-		fmt.Println("  fork-exec <session> <fork-id> <command>      - Execute command in a fork")
+		fmt.Println("  fork <session> <checkpoint-id> [--id ID] [--n K] - Materialize live fork(s)")
+		fmt.Println("  exec <session> <fork-id> -- <command>        - Execute command in a fork")
+		fmt.Println("  fork-exec <session> <fork-id> <command>      - Legacy alias for exec")
 		fmt.Println("  destroy <session> <fork-id>                  - Destroy a live fork")
-		fmt.Println("  exec <session> <command> [args...]           - Execute command in environment")
 		fmt.Println("  list <session>                               - List checkpoints")
 		fmt.Println("  cleanup <session> [--force]                  - Clean up session")
 		fmt.Println("  version                                      - Show version")
@@ -201,15 +202,23 @@ func main() {
 
 	case "fork":
 		if len(os.Args) < 4 {
-			fmt.Println("Usage: fork <session> <checkpoint-id> [--n K] [--lazy-pages]")
+			fmt.Println("Usage: fork <session> <checkpoint-id> [--id ID] [--n K] [--lazy-pages]")
 			os.Exit(1)
 		}
 		sessionID := os.Args[2]
 		checkpointID := os.Args[3]
 		count := 1
+		forkID := ""
 		lazyPages := false
 		for i := 4; i < len(os.Args); i++ {
 			switch os.Args[i] {
+			case "--id":
+				if i+1 >= len(os.Args) {
+					fmt.Println("Error: --id requires a value")
+					os.Exit(1)
+				}
+				forkID = os.Args[i+1]
+				i++
 			case "--n":
 				if i+1 >= len(os.Args) {
 					fmt.Println("Error: --n requires a value")
@@ -229,6 +238,10 @@ func main() {
 				os.Exit(1)
 			}
 		}
+		if forkID != "" && count != 1 {
+			fmt.Println("Error: --id can only be used when creating one fork")
+			os.Exit(1)
+		}
 
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
@@ -236,7 +249,11 @@ func main() {
 			os.Exit(1)
 		}
 		for i := 0; i < count; i++ {
-			f, err := manager.ForkCheckpoint(checkpointID, waypoint.ForkSpec{LazyPages: lazyPages})
+			spec := waypoint.ForkSpec{LazyPages: lazyPages}
+			if forkID != "" {
+				spec.ID = forkID
+			}
+			f, err := manager.ForkCheckpoint(checkpointID, spec)
 			if err != nil {
 				fmt.Printf("Error creating fork: %v\n", err)
 				os.Exit(1)
@@ -286,15 +303,13 @@ func main() {
 		fmt.Printf("Fork '%s' destroyed successfully\n", forkID)
 
 	case "exec":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: exec <session> <command> [args...]")
-			fmt.Println("  Execute a command in the checkpoint environment")
-			fmt.Println("  If shell enabled, command runs using the shell's sandbox; otherwise, it runs directly in the work overlay")
+		if len(os.Args) < 6 || os.Args[4] != "--" {
+			fmt.Println("Usage: exec <session> <fork-id> -- <command>")
 			os.Exit(1)
 		}
 		sessionID := os.Args[2]
-		command := os.Args[3]
-		args := os.Args[4:]
+		forkID := os.Args[3]
+		command := strings.Join(os.Args[5:], " ")
 
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
@@ -302,7 +317,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		output, err := manager.ExecuteCommand(command, args...)
+		output, err := manager.ExecuteForkCommand(forkID, command)
 		if err != nil {
 			fmt.Printf("Error executing command: %v\n", err)
 			os.Exit(1)
