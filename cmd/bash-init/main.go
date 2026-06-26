@@ -117,6 +117,11 @@ func main() {
 	fmt.Println("Bash pid:", bashPID)
 	fmt.Println("Socket path:", socketPath)
 	fmt.Println("Ready to receive commands from Unix Domain Socket...")
+	if os.Getenv("WAYPOINT_NAMESPACED") == "1" {
+		if err := detachStandardFiles(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to detach stdio: %v\n", err)
+		}
+	}
 
 	// Mutex to protect PTY reads/writes
 	var ptyMutex sync.Mutex
@@ -136,6 +141,23 @@ func main() {
 	}
 }
 
+func detachStandardFiles() error {
+	fd, err := unix.Open("/dev/null", unix.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	if fd > 2 {
+		defer unix.Close(fd)
+	}
+
+	for _, stdfd := range []int{0, 1, 2} {
+		if err := unix.Dup2(fd, stdfd); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func setupNamespaceRuntime(chrootDir string) error {
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
 		return fmt.Errorf("make mount namespace private failed: %w", err)
@@ -148,6 +170,7 @@ func setupNamespaceRuntime(chrootDir string) error {
 		return err
 	}
 
+	newRoot := string(filepath.Separator)
 	for _, mount := range []struct {
 		rel    string
 		source string
@@ -156,7 +179,7 @@ func setupNamespaceRuntime(chrootDir string) error {
 		{rel: "proc", source: "proc", fstype: "proc"},
 		{rel: "sys", source: "sys", fstype: "sysfs"},
 	} {
-		target := filepath.Join(chrootDir, mount.rel)
+		target := filepath.Join(newRoot, mount.rel)
 		if err := os.MkdirAll(target, 0o755); err != nil {
 			return err
 		}

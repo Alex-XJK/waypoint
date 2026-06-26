@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -218,11 +219,18 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	if err := copyFile(bashInitSrc, namespacedBashInit); err != nil {
 		return ShellNotEnabled, "", fmt.Errorf("failed to stage bash_init in session root: %w", err)
 	}
+	if err := stageBashInitRuntimeDeps(workDir, bashInitSrc); err != nil {
+		return ShellNotEnabled, "", err
+	}
 
 	canonicalSocketPath := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.sock", m.sessionID))
 	hostSocketPath := filepath.Join(workDir, strings.TrimPrefix(canonicalSocketPath, string(filepath.Separator)))
 	if err := os.MkdirAll(filepath.Dir(hostSocketPath), 0o777); err != nil {
 		return ShellNotEnabled, "", fmt.Errorf("failed to create shell socket directory: %w", err)
+	}
+	logPath := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.log", m.sessionID))
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return ShellNotEnabled, "", fmt.Errorf("failed to create shell log directory: %w", err)
 	}
 
 	// Judge /bin/bash pre-requisite for bash_init
@@ -246,19 +254,35 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	if err != nil {
 		return ShellNotEnabled, "", fmt.Errorf("failed to open /dev/null: %w", err)
 	}
+	defer devNull.Close()
 	cmd.Stdin = devNull
 
-	cmd.Stdout = devNull
-	cmd.Stderr = devNull
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return ShellNotEnabled, "", fmt.Errorf("failed to open shell startup log: %w", err)
+	}
+	defer logFile.Close()
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 
 	// Start the bash_init process in the background
 	if err := cmd.Start(); err != nil {
 		return ShellNotEnabled, "", fmt.Errorf("failed to start bash_init: %w", err)
 	}
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
 
 	// Update shell PID and socket path in session info
 	m.shellPid = cmd.Process.Pid
 	m.shellSocket = socketPathThroughProcRoot(m.shellPid, canonicalSocketPath)
+	if err := waitForShellSocket(m.shellSocket, waitCh, logPath, 5*time.Second); err != nil {
+		_ = cmd.Process.Kill()
+		m.shellPid = ShellNotEnabled
+		m.shellSocket = ""
+		return ShellNotEnabled, "", err
+	}
 
 	// Save updated session info
 	if err := saveSessionInfo(m.sessionID, m); err != nil {
@@ -266,6 +290,67 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	}
 
 	return m.shellPid, m.shellSocket, nil
+}
+
+func stageBashInitRuntimeDeps(rootfs, bashInitSrc string) error {
+	deps, err := lddPaths(bashInitSrc)
+	if err != nil {
+		return fmt.Errorf("failed to inspect bash_init runtime dependencies: %w", err)
+	}
+	for _, dep := range deps {
+		if err := copyIfBlank(rootfs, dep); err != nil {
+			return fmt.Errorf("failed to stage bash_init dependency %s: %w", dep, err)
+		}
+	}
+	return nil
+}
+
+func waitForShellSocket(path string, waitCh <-chan error, logPath string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		select {
+		case err := <-waitCh:
+			if err == nil {
+				err = fmt.Errorf("bash_init exited")
+			}
+			return fmt.Errorf("bash_init exited before shell socket became ready: %w\nstartup log %s:\n%s", err, logPath, readRecentFile(logPath, 16*1024))
+		default:
+		}
+
+		if err := dialUnixSocket(path, 100*time.Millisecond); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for shell socket %s: %v\nstartup log %s:\n%s", path, lastErr, logPath, readRecentFile(logPath, 16*1024))
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func dialUnixSocket(path string, timeout time.Duration) error {
+	conn, err := net.DialTimeout("unix", path, timeout)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+func readRecentFile(path string, maxBytes int) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("(unable to read log: %v)", err)
+	}
+	if len(data) > maxBytes {
+		data = data[len(data)-maxBytes:]
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return "(empty)"
+	}
+	return string(data)
 }
 
 func ensureBinAndDeps(rootfs, bin string) error {
@@ -286,15 +371,22 @@ func ensureBinAndDeps(rootfs, bin string) error {
 }
 
 func lddPaths(bin string) ([]string, error) {
-	out, err := exec.Command("ldd", bin).Output()
+	out, err := exec.Command("ldd", bin).CombinedOutput()
+	text := string(out)
 	if err != nil {
-		return nil, err
+		if strings.Contains(text, "not a dynamic executable") || strings.Contains(text, "statically linked") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("ldd %s failed: %w: %s", bin, err, strings.TrimSpace(text))
+	}
+	if strings.Contains(text, "statically linked") {
+		return nil, nil
 	}
 
 	var deps []string
 	seen := map[string]bool{}
 
-	s := bufio.NewScanner(bytes.NewReader(out))
+	s := bufio.NewScanner(strings.NewReader(text))
 	for s.Scan() {
 		line := s.Text()
 
