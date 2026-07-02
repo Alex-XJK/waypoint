@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -54,6 +57,12 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
 	// Use CRIU to restore the process. --restore-detached makes CRIU exit
 	// after a successful restore, so waypoint can report real failures.
+	// --pidfile captures the restored root task's *host* PID: with a private PID
+	// namespace CRIU recreates the namespace and the host PID changes on every
+	// restore, so callers must re-track it (via the returned value) for the next
+	// dump/exec/kill to target the right process.
+	pidFile := filepath.Join(criuPath, "restored.pid")
+	_ = os.Remove(pidFile)
 	cmd := exec.Command(
 		"criu", "restore",
 		"--images-dir", criuPath,
@@ -61,6 +70,7 @@ func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
 		"--manage-cgroups=ignore",
 		"--file-locks",
 		"--restore-detached",
+		"--pidfile", pidFile,
 		"-vv", "-o", "restore.log",
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -84,5 +94,11 @@ func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
 		return -1, fmt.Errorf("failed to restore memory state: %w", err)
 	}
 
+	// Prefer the real restored host PID from the pidfile; fall back to the input.
+	if data, rerr := os.ReadFile(pidFile); rerr == nil {
+		if p, perr := strconv.Atoi(strings.TrimSpace(string(data))); perr == nil && p > 0 {
+			return p, nil
+		}
+	}
 	return pid, nil
 }

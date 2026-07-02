@@ -259,6 +259,15 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	cmd := exec.Command(bashInitSrc, socketPath, workDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true, // new session = no controlling TTY
+		// Private PID namespace: bash_init becomes PID 1 of the session and every
+		// task process it spawns is namespace-local. CRIU then checkpoints
+		// namespace-local PIDs and restores them into a FRESH namespace, so
+		// restore never collides with host PIDs ("Can't fork ...: File exists")
+		// — the root cause of the filter-js / pypi-server / mailman /
+		// hf-model-inference failures. Teardown also reaps the whole tree by
+		// killing this init. Networking stays on the host namespace (tasks keep
+		// internet); a private net namespace is a separate, later change.
+		Cloneflags: syscall.CLONE_NEWPID,
 	}
 
 	// stdin -> /dev/null

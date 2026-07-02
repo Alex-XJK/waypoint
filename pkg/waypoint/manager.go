@@ -132,14 +132,22 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 	// (so that the process can continue running in the new overlay)
 	if pid != SkipMemoryCheckpoint {
 		currentCriuDir := filepath.Join(m.baseDir, checkpointID, "criu")
-		if errPrep := m.prepareCheckpointRestore(pid, currentCriuDir); errPrep != nil {
-			return fmt.Errorf("failed to prepare memory restore into new overlay: %w", errPrep)
-		}
+		// The dump above stopped/killed the original process. With a private PID
+		// namespace, restore recreates the tree in a FRESH namespace, so the
+		// checkpointed (namespace-local) PIDs cannot collide with the host — no
+		// host-side conflict cleanup is needed (the old host-PID prepare step
+		// would have misfired against host init/kthreads). Restore assigns a new
+		// host PID which we must track for the next dump/exec/kill.
 		newPID, errMem := m.restoreMemoryState(pid, currentCriuDir)
 		if errMem != nil {
 			return fmt.Errorf("memory restore into new overlay failed: %w", errMem)
 		}
 		fmt.Printf("Process %d restored into new overlay with PID %d\n", pid, newPID)
+		m.shellPid = newPID
+		pid = newPID // record the live host PID in metadata + persist below
+		if err := saveSessionInfo(m.sessionID, m); err != nil {
+			return fmt.Errorf("failed to persist restored shell PID: %w", err)
+		}
 	}
 
 	// Save metadata
@@ -164,10 +172,16 @@ func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
 
 	previousCriuPath := filepath.Join(m.baseDir, checkpointID, "criu")
 
-	// If the previous checkpoint contains process, we need to first kill it, so that mountpoint can be released.
+	// Kill the currently-running session so it releases the overlay mount and
+	// shell socket before we restore. With a private PID namespace, restore
+	// recreates a FRESH namespace, so we do NOT free the checkpoint's
+	// (namespace-local) PIDs on the host — we only stop the live process tree by
+	// its current host PID.
 	if checkpointMetadata.PID != SkipMemoryCheckpoint {
-		if err := m.prepareCheckpointRestore(checkpointMetadata.PID, previousCriuPath); err != nil {
-			return 0, fmt.Errorf("failed to prepare restore for process %d: %w", checkpointMetadata.PID, err)
+		if m.shellPid != ShellNotEnabled && m.shellPid > 0 {
+			if err := m.killProcess(m.shellPid); err != nil {
+				fmt.Printf("Warning: failed to stop current session process %d: %v\n", m.shellPid, err)
+			}
 		}
 	}
 
@@ -205,6 +219,12 @@ func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
 	newPID, errMem := m.restoreMemoryState(checkpointMetadata.PID, previousCriuPath)
 	if errMem != nil {
 		return 0, fmt.Errorf("memory restore failed: %w", errMem)
+	}
+
+	// Track the restored process's new host PID so later dump/exec/kill target it.
+	m.shellPid = newPID
+	if err := saveSessionInfo(m.sessionID, m); err != nil {
+		fmt.Printf("Warning: failed to persist restored shell PID %d: %v\n", newPID, err)
 	}
 
 	return newPID, nil
