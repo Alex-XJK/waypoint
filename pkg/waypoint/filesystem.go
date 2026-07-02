@@ -87,23 +87,36 @@ func (m *Manager) mountRuntimeFS(mountPoint string) error {
 		relPath string
 		fsType  string
 		source  string
+		data    string
 	}
 	mounts := []runtimeMount{
 		{relPath: "proc", fsType: "proc", source: "proc"},
 		{relPath: "sys", fsType: "sysfs", source: "sys"},
+		// devpts is required by anything that opens a PTY via posix_openpt:
+		// dpkg/apt's log writer, sudo, script, and interactive tools. Without it
+		// they fail with "Is /dev/pts mounted?" (seen on qemu-startup /
+		// qemu-alpine-ssh). newinstance keeps the pty set isolated per session.
+		{relPath: "dev/pts", fsType: "devpts", source: "devpts", data: "newinstance,ptmxmode=0666,mode=0620"},
 	}
 	for _, rm := range mounts {
 		target := filepath.Join(mountPoint, rm.relPath)
 		if err := os.MkdirAll(target, 0o755); err != nil {
 			return fmt.Errorf("mkdir runtime mount target %s failed: %w", target, err)
 		}
-		if err := unix.Mount(rm.source, target, rm.fsType, 0, ""); err != nil {
+		if err := unix.Mount(rm.source, target, rm.fsType, 0, rm.data); err != nil {
 			if err == syscall.EBUSY {
 				continue
 			}
 			return fmt.Errorf("mount %s on %s failed: %w", rm.fsType, target, err)
 		}
 	}
+	// Point /dev/ptmx at the freshly-mounted devpts instance so posix_openpt
+	// works (glibc opens /dev/ptmx). Best-effort: some images already ship one.
+	ptmx := filepath.Join(mountPoint, "dev", "ptmx")
+	if fi, err := os.Lstat(ptmx); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+		_ = os.Remove(ptmx)
+	}
+	_ = os.Symlink("pts/ptmx", ptmx)
 	return nil
 }
 
@@ -111,7 +124,7 @@ func (m *Manager) unmountRuntimeFS(mountPoint string) {
 	if strings.TrimSpace(mountPoint) == "" {
 		return
 	}
-	for _, rel := range []string{"proc", "sys"} {
+	for _, rel := range []string{"dev/pts", "proc", "sys"} {
 		target := filepath.Join(mountPoint, rel)
 		if err := unix.Unmount(target, 0); err != nil {
 			if err == syscall.EINVAL || err == syscall.ENOENT {
