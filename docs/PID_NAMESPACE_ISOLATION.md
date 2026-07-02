@@ -2,6 +2,22 @@
 
 _Investigation 2026-07-01 on branch `feature/session-isolation`._
 
+## STATUS: IMPLEMENTED & VALIDATED (2026-07-01)
+
+Implemented as:
+- `build.go StartShell`: `SysProcAttr.Cloneflags = syscall.CLONE_NEWPID` (session runs as PID 1 of a private PID namespace; networking stays on the host ns so apt/pip/uv keep internet).
+- `memory.go restoreMemoryState`: `--pidfile` captures the restored root's new **host** PID (it changes on every restore into a fresh namespace) and returns it.
+- `manager.go CreateCheckpointNew` / `RestoreCheckpointNew`: dropped the host-PID conflict cleanup (`prepareCheckpointRestore`) — a fresh namespace has no host conflicts; restore now just kills the *live* session to release the overlay. Both re-track the new host PID via `saveSessionInfo` so later dump/exec/kill target it.
+
+Validated (harness `validate_reliability.py`, concurrency 1):
+- **filter-js-from-html (RESTORE) → RELIABLE**; **mailman, hf-model-inference (SNAPSHOT) → RELIABLE**. `restore(s0)` now succeeds (`Restore finished successfully`).
+- **pypi-server**: snapshot failure fixed (no longer SNAPSHOT); residual verify/EXEC failure remains (service reachability — likely needs the later `CLONE_NEWNET` stage).
+- **No regression**: openssl, sqlite-db-truncate, kv-store-grpc (setsid daemon), write-compressor all still RELIABLE. **0 leaked daemons** post-run (the PID namespace reaps the tree on teardown — also fixes the daemon-leak/contamination problem).
+
+Net: 3 of the 4 target failures fully fixed + the daemon-leak isolation problem solved. Remaining: pypi-server's service reachability, the `CLONE_NEWNET` concurrency stage, and the non-CRIU EXEC failures (git/terminal/qemu). Follow-ups below.
+
+---
+
 ## Root cause (validated)
 
 Waypoint build-mode runs the chroot session in the **host PID namespace**. CRIU
