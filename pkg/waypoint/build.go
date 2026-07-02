@@ -304,6 +304,18 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 }
 
 func ensureBinAndDeps(rootfs, bin string) error {
+	// If the image already provides this binary, do NOTHING. Copying the HOST
+	// binary's shared-library closure into an image built against a different
+	// glibc pollutes the rootfs: e.g. dropping the host's libgcrypt.so.20 (which
+	// needs GLIBC_2.33+) into an older-glibc image makes curl/apt fail with
+	// "version `GLIBC_2.33' not found". The image is self-consistent (it works
+	// under Docker); we must not clobber its libraries. Only inject when the
+	// binary is genuinely missing from the image.
+	dst := filepath.Join(rootfs, bin)
+	if !isMissingOrBlank(dst) {
+		return nil
+	}
+
 	if err := copyIfBlank(rootfs, bin); err != nil {
 		return err
 	}
