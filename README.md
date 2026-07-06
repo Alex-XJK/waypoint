@@ -1,4 +1,4 @@
-# Waypoint
+# <img src="./docs/Waypoint-logo-notext.png" height="30" /> Waypoint
 
 A lightweight checkpoint/restore tool that captures both filesystem and memory state with minimal overhead. 
 Built on top of CRIU and OverlayFS for fast, isolated process state management.
@@ -190,7 +190,7 @@ in his TBench integration for v0.2.0.
 
 ### 2. Run Your Application
 
-#### 2.1. Manual Execution
+#### 2.1. Manual Execution (not recommended)
 
 The simplest way is to just run your application in the provided work directory.
 
@@ -213,9 +213,8 @@ sudo ./waypoint exec a1b2c3d4e5f6g7h8 cat hello_world.txt
 
 Note that the `exec` command can be used all the time, regardless of whether you started a shell session or not.
 
-If you have a shell session, the `exec` command will execute using a long-running shell session, and will be able to preserve
-state across multiple `exec` calls and also across checkpoints.
-If you don't have a shell session, the `exec` will simply help you execute the command in the correct workspace.
+If you have a shell session, the `exec` command will execute using a long-running shell session, and will be able to preserve state across multiple `exec` calls and also across checkpoints.
+If you don't have a shell session, the `exec` will simply help you execute the command in the correct workspace WITHOUT containment.
 
 ### 3. Create Checkpoints
 
@@ -253,50 +252,11 @@ For debugging, set `preserve_session_on_cleanup` to `true` in the config file, o
 
 ## Demo 🎥
 
-- **Direct CLI Usage** – Using waypoint directly from the terminal: https://youtu.be/fbNlGyIndjc
-- **StateFork Integration** – Using waypoint as a backend inside StateFork’s interactive shell: https://youtu.be/oe8ONkqr2a8
+- **Direct CLI Usage** – Using waypoint directly from the terminal: https://youtu.be/bdo0th40yrE
 
 ## Example Workflow 🧩
 
-### Example 1: Checkpointing a Simulator Application
-```bash
-# Initialize environment
-sudo ./waypoint init /home/user/myproject
-## Environment initialized!
-## Session ID: abc123def456
-## Work in this directory: /tmp/waypoint-sessions/abc123def456/work
-##
-## Save the session ID for future operations!
-
-# Run application in managed directory
-cd /tmp/waypoint-sessions/abc123def456/work
-./my-simulator --config config.json &
-## [1] 5678
-
-# Create checkpoints after some computation
-sudo ./waypoint create abc123def456 simulation-step-100 5678
-## Checkpoint 'simulation-step-100' created successfully
-
-# Continue running, create another checkpoint
-sudo ./waypoint create abc123def456 simulation-step-200 5678
-## Checkpoint 'simulation-step-200' created successfully
-
-# List available checkpoints
-sudo ./waypoint list abc123def456
-## Available checkpoints:
-##   simulation-step-100
-##   simulation-step-200
-
-# Restore to earlier state
-sudo ./waypoint restore abc123def456 simulation-step-100
-## Checkpoint 'simulation-step-100' restored, new PID: 5678
-
-# Clean up when done
-sudo ./waypoint cleanup abc123def456
-## Session 'abc123def456' cleaned up successfully
-```
-
-### Example 2: Checkpointing with a Shell Session
+### Checkpointing with a Shell Session
 ```bash
 # Initialize environment using a Dockerfile
 sudo ./waypoint build /home/docker-tasks/context
