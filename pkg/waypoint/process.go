@@ -46,8 +46,9 @@ func (m *Manager) killProcess(pid int) error {
 		}
 	}
 
-	// Wait for process to terminate (up to 1 second)
-	for i := 0; i < 10; i++ {
+	// Wait for process to terminate (up to 5 seconds). CRIU restore needs
+	// the checkpointed task IDs to disappear before it can reuse them.
+	for i := 0; i < 50; i++ {
 		if !m.processExists(pid) {
 			return nil
 		}
@@ -95,15 +96,20 @@ func (m *Manager) prepareCheckpointRestore(rootPID int, criuPath string) error {
 		}
 	}
 
-	conflicts, err := m.findConflictingCheckpointTasks(taskIDs)
-	if err != nil {
-		return fmt.Errorf("failed to verify checkpoint task IDs: %w", err)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		conflicts, err := m.findConflictingCheckpointTasks(taskIDs)
+		if err != nil {
+			return fmt.Errorf("failed to verify checkpoint task IDs: %w", err)
+		}
+		if len(conflicts) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("checkpoint task IDs still exist after cleanup: %s", strings.Join(conflicts, ", "))
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	if len(conflicts) > 0 {
-		return fmt.Errorf("checkpoint task IDs still exist after cleanup: %s", strings.Join(conflicts, ", "))
-	}
-
-	return nil
 }
 
 func (m *Manager) readCheckpointTaskIDs(criuPath string) ([]int, error) {

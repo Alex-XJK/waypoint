@@ -17,6 +17,7 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 		"-t", fmt.Sprintf("%d", pid),
 		"-D", criuPath,
 		"--tcp-established",
+		"--manage-cgroups=ignore",
 		// Node 22 keeps inotify watches and unlinked-but-open files (e.g. the
 		// bundled mock-api's working files). --force-irmap lets CRIU resolve
 		// inotify watches via the inode reverse-map when the path is gone, and
@@ -49,12 +50,14 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 }
 
 func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
-	// Use CRIU to restore the process
-	// Notice: Cannot use '--shell-job' because it will try to attach to the original PTY, which does not exist anymore.
+	// Use CRIU to restore the process. --restore-detached makes CRIU exit
+	// after a successful restore, so waypoint can report real failures.
 	cmd := exec.Command(
 		"criu", "restore",
 		"--images-dir", criuPath,
 		"--tcp-established",
+		"--manage-cgroups=ignore",
+		"--restore-detached",
 		"--file-locks",
 		"-vv", "-o", "restore.log",
 	)
@@ -62,11 +65,20 @@ func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
 		Setsid: true,
 	}
 	devNull, _ := os.OpenFile("/dev/null", os.O_RDWR, 0)
-	cmd.Stdin = devNull
-	cmd.Stdout = devNull
-	cmd.Stderr = devNull
+	if devNull != nil {
+		defer devNull.Close()
+		cmd.Stdin = devNull
+		cmd.Stdout = devNull
+	}
 
-	if err := cmd.Start(); err != nil {
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Run(); err != nil {
+		stderr := stderrBuf.String()
+		if stderr != "" {
+			fmt.Printf("CRIU stderr: %s\n", stderr)
+		}
 		return -1, fmt.Errorf("failed to restore memory state: %w", err)
 	}
 
