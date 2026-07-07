@@ -24,7 +24,6 @@ func NewManagerWithSession() (*Manager, string, error) {
 	baseDir := filepath.Join(DefaultSessionsDir, sessionID)
 	manager := NewManager(baseDir)
 	manager.sessionID = sessionID
-	manager.currentParent = []string{}
 	manager.shellPid = ShellNotEnabled
 	manager.shellSocket = ""
 
@@ -49,7 +48,6 @@ func LoadManager(sessionID string) (*Manager, error) {
 	manager.workOverlay = sessionInfo.WorkOverlay
 	manager.shellPid = sessionInfo.ShellPid
 	manager.shellSocket = sessionInfo.ShellSocket
-	manager.currentParent = sessionInfo.CurrentParent
 
 	return manager, nil
 }
@@ -68,14 +66,13 @@ func saveSessionInfo(sessionID string, manager *Manager) error {
 	os.MkdirAll(SessionInfoDir, 0755)
 
 	sessionInfo := SessionInfo{
-		SessionID:     sessionID,
-		BaseDir:       manager.baseDir,
-		OriginalDir:   manager.originalDir,
-		WorkOverlay:   manager.workOverlay,
-		CreatedAt:     time.Now().Unix(),
-		CurrentParent: manager.currentParent,
-		ShellPid:      manager.shellPid,
-		ShellSocket:   manager.shellSocket,
+		SessionID:   sessionID,
+		BaseDir:     manager.baseDir,
+		OriginalDir: manager.originalDir,
+		WorkOverlay: manager.workOverlay,
+		CreatedAt:   time.Now().Unix(),
+		ShellPid:    manager.shellPid,
+		ShellSocket: manager.shellSocket,
 	}
 
 	data, err := json.MarshalIndent(sessionInfo, "", "  ")

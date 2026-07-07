@@ -27,7 +27,6 @@ func main() {
 		fmt.Println("  exec <session> <fork-id> -- <command>        - Execute command in a fork")
 		fmt.Println("  snapshot <session> <fork-id> <checkpoint-id> - Snapshot a live fork")
 		fmt.Println("  create <session> <checkpoint-id>             - Legacy alias for checkpoint")
-		fmt.Println("  restore <session> <checkpoint-id>            - Legacy destructive restore")
 		fmt.Println("  fork-exec <session> <fork-id> <command>      - Legacy alias for exec")
 		fmt.Println("  destroy <session> <fork-id>                  - Destroy a live fork")
 		fmt.Println("  list <session>                               - List checkpoints")
@@ -168,27 +167,6 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Checkpoint '%s' created successfully\n", checkpointID)
-
-	case "restore":
-		if len(os.Args) != 4 {
-			fmt.Println("Usage: restore <session> <checkpoint-id>")
-			os.Exit(1)
-		}
-		sessionID := os.Args[2]
-		checkpointID := os.Args[3]
-
-		manager, err := waypoint.LoadManager(sessionID)
-		if err != nil {
-			fmt.Printf("Error loading session: %v\n", err)
-			os.Exit(1)
-		}
-
-		newPID, err := manager.RestoreCheckpointNew(checkpointID)
-		if err != nil {
-			fmt.Printf("Error restoring checkpoint: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Checkpoint '%s' restored, new PID: %d\n", checkpointID, newPID)
 
 	case "fork":
 		if len(os.Args) < 4 {

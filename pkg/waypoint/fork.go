@@ -181,7 +181,6 @@ func (m *Manager) saveMainFork(pid int, socketPath, canonicalSocket, logPath str
 	f := &Fork{
 		ID:              MainForkID,
 		SessionID:       m.sessionID,
-		LayerIDs:        append([]string(nil), m.currentParent...),
 		OriginalDir:     m.originalDir,
 		RootDir:         rootDir,
 		UpperDir:        filepath.Join(rootDir, "upper"),

@@ -272,7 +272,6 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 	if f.ID == MainForkID {
 		m.shellPid = f.PID
 		m.shellSocket = f.SocketPath
-		m.currentParent = append([]string(nil), f.LayerIDs...)
 		_ = saveSessionInfo(m.sessionID, m)
 	}
 

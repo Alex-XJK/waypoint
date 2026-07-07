@@ -30,15 +30,6 @@ func (m *Manager) loadMetadata(checkpointID string) (*Metadata, error) {
 	return &metadata, err
 }
 
-// syncManagerToSession updates the session info file with the current manager state
-func (m *Manager) syncManagerToSession() error {
-	err := saveSessionInfo(m.sessionID, m)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 func updateSessionEnvironment(sessionID, originalDir, workOverlay string) error {
 	sessionInfo, err := loadSessionInfo(sessionID)
 	if err != nil {
