@@ -244,6 +244,12 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	if _, err := os.Stat(bashPath); os.IsNotExist(err) {
 		return ShellNotEnabled, "", fmt.Errorf("bash pre-requisite not met: %s does not exist", bashPath)
 	}
+	// A rootfs with bash but without its shared libraries (libtinfo etc.)
+	// produces a shell that dies after startup; heal from the host when the
+	// libraries resolve there.
+	if err := stageRootBinaryRuntimeDeps(workDir, "/bin/bash"); err != nil {
+		return ShellNotEnabled, "", fmt.Errorf("failed to stage bash runtime dependencies: %w", err)
+	}
 
 	cmd := exec.Command(bashInitSrc, canonicalSocketPath, workDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -309,6 +315,22 @@ func stageBashInitRuntimeDeps(rootfs, bashInitSrc string) error {
 	for _, dep := range deps {
 		if err := copyIfBlank(rootfs, dep); err != nil {
 			return fmt.Errorf("failed to stage bash_init dependency %s: %w", dep, err)
+		}
+	}
+	return nil
+}
+
+// stageRootBinaryRuntimeDeps copies host-resolved shared-library
+// dependencies of a rootfs binary into the rootfs where they are missing.
+func stageRootBinaryRuntimeDeps(rootfs, binaryPath string) error {
+	rootedBinary := filepath.Join(rootfs, strings.TrimPrefix(binaryPath, string(filepath.Separator)))
+	deps, err := lddPaths(rootedBinary)
+	if err != nil {
+		return fmt.Errorf("failed to inspect %s runtime dependencies: %w", binaryPath, err)
+	}
+	for _, dep := range deps {
+		if err := copyIfBlank(rootfs, dep); err != nil {
+			return fmt.Errorf("failed to stage dependency %s for %s: %w", dep, binaryPath, err)
 		}
 	}
 	return nil

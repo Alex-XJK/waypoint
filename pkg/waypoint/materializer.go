@@ -2,6 +2,7 @@ package waypoint
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -90,7 +91,7 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 	start := time.Now()
 	if err := m.withForkLock(f.ID, func() error {
 		if err := c.runRestoreHelper(f); err != nil {
-			f.Status = ForkStatusDestroyed
+			f.Status = ForkStatusFailed
 			_ = m.saveFork(f)
 			return err
 		}
@@ -99,7 +100,7 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 			f.SocketPath = socketPathThroughProcRoot(pid, f.CanonicalSocket)
 		}
 		if err := waitForForkSocket(f.SocketPath, 5*time.Second); err != nil {
-			f.Status = ForkStatusDestroyed
+			f.Status = ForkStatusFailed
 			_ = m.saveFork(f)
 			return err
 		}
@@ -303,6 +304,10 @@ func (m *Manager) ExecuteForkCommand(forkID, command string, args ...string) (*E
 		commandString += "\n"
 		var execErr error
 		result, execErr = execCommand(f.SocketPath, commandString)
+		if errors.Is(execErr, ErrForkShellDead) {
+			f.Status = ForkStatusFailed
+			_ = m.saveFork(f)
+		}
 		return execErr
 	})
 	return result, err
@@ -409,7 +414,7 @@ func mountOverlayAt(layerIDs []string, upperDir, workDir, mountPoint, sessionID,
 	_ = unix.Unmount(filepath.Join(mountPoint, "sys"), unix.MNT_DETACH)
 	_ = unix.Unmount(mountPoint, unix.MNT_DETACH)
 
-	options := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", joinStrings(lowerDirs, ":"), upperDir, workDir)
+	options := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", strings.Join(lowerDirs, ":"), upperDir, workDir)
 	if err := unix.Mount("overlay", mountPoint, "overlay", 0, options); err != nil {
 		return fmt.Errorf("mount overlay for fork %s failed: %w", sessionID, err)
 	}
@@ -458,26 +463,16 @@ func bringLoopbackUp() error {
 	return unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, ifr)
 }
 
-func joinStrings(values []string, sep string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	out := values[0]
-	for _, value := range values[1:] {
-		out += sep + value
-	}
-	return out
-}
-
 func waitForForkSocket(path string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	var lastErr error
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
+		if lastErr = dialUnixSocket(path, 100*time.Millisecond); lastErr == nil {
 			return nil
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	return fmt.Errorf("socket %s did not appear", path)
+	return fmt.Errorf("socket %s did not become dialable: %v", path, lastErr)
 }
 
 func socketPathThroughProcRoot(pid int, canonicalSocket string) string {

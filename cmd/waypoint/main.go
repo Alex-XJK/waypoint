@@ -6,6 +6,7 @@ package main
 // Designed and developed by Alex Jiakai Xu (https://alex-xjk.github.io/), DAPLab @ Columbia University (https://daplab.cs.columbia.edu/)
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -44,7 +45,7 @@ func main() {
 		fmt.Println("  create <session> <checkpoint-id>             - Legacy alias for checkpoint")
 		fmt.Println("  fork-exec <session> <fork-id> <command>      - Legacy alias for exec")
 		fmt.Println("  destroy <session> <fork-id>                  - Destroy a live fork")
-		fmt.Println("  list <session>                               - List checkpoints")
+		fmt.Println("  list <session> [--json]                      - List checkpoints and forks")
 		fmt.Println("  cleanup <session> [--force]                  - Clean up session")
 		fmt.Println("  version                                      - Show version")
 		fmt.Println()
@@ -328,11 +329,12 @@ func main() {
 		printExecResult(result)
 
 	case "list":
-		if len(os.Args) != 3 {
-			fmt.Println("Usage: list <session>")
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: list <session> [--json]")
 			os.Exit(1)
 		}
 		sessionID := os.Args[2]
+		asJSON := len(os.Args) > 3 && os.Args[3] == "--json"
 
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
@@ -340,27 +342,31 @@ func main() {
 			os.Exit(1)
 		}
 
-		checkpoints, err := manager.ListCheckpoints()
+		listing, err := manager.ListSession()
 		if err != nil {
-			fmt.Printf("Error listing checkpoints: %v\n", err)
+			fmt.Printf("Error listing session: %v\n", err)
 			os.Exit(1)
 		}
-		if len(checkpoints) == 0 {
+		if asJSON {
+			data, err := json.MarshalIndent(listing, "", "  ")
+			if err != nil {
+				fmt.Printf("Error encoding listing: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(string(data))
+			break
+		}
+		if len(listing.Checkpoints) == 0 {
 			fmt.Println("No checkpoints found")
 		} else {
-			fmt.Println("Available checkpoints:")
-			for _, cp := range checkpoints {
-				fmt.Printf("  %s\n", cp)
+			fmt.Println("Checkpoints:")
+			for _, cp := range listing.Checkpoints {
+				fmt.Printf("  %s parent=%s status=%s layers=%s\n", cp.ID, cp.ParentID, cp.Status, strings.Join(cp.LayerIDs, ","))
 			}
 		}
-		forks, err := manager.ListForks()
-		if err != nil {
-			fmt.Printf("Error listing forks: %v\n", err)
-			os.Exit(1)
-		}
-		if len(forks) > 0 {
+		if len(listing.Forks) > 0 {
 			fmt.Println("Live forks:")
-			for _, f := range forks {
+			for _, f := range listing.Forks {
 				fmt.Printf("  %s checkpoint=%s status=%s pid=%d socket=%s\n", f.ID, f.BaseCheckpointID, f.Status, f.PID, f.SocketPath)
 			}
 		}

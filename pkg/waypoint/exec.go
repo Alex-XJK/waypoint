@@ -2,6 +2,7 @@ package waypoint
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -9,6 +10,10 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrForkShellDead reports that the fork's shell process is gone (the
+// command ran `exit`, or bash crashed); the fork is no longer usable.
+var ErrForkShellDead = errors.New("fork shell has exited")
 
 // ExecResult is the outcome of one command executed in a fork's shell.
 type ExecResult struct {
@@ -51,7 +56,7 @@ func execCommand(socketPath, command string) (*ExecResult, error) {
 			return nil, fmt.Errorf("failed to read command output: %w", err)
 		}
 		if status == "dead" {
-			return nil, fmt.Errorf("fork shell has exited; the fork is no longer usable (output: %q)", string(rest))
+			return nil, fmt.Errorf("%w; the fork is no longer usable (output: %q)", ErrForkShellDead, string(rest))
 		}
 		return &ExecResult{
 			Output:   string(rest),
