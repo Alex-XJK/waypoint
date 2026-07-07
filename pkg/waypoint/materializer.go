@@ -137,6 +137,9 @@ func (c *CRIUMaterializer) runRestoreHelper(f *Fork) error {
 }
 
 func (m *Manager) ForkCheckpoint(checkpointID string, spec ForkSpec) (*Fork, error) {
+	if err := EnsureCriuCompatible(); err != nil {
+		return nil, err
+	}
 	ckpt, err := m.LoadCheckpoint(checkpointID)
 	if err != nil {
 		return nil, err
@@ -145,6 +148,9 @@ func (m *Manager) ForkCheckpoint(checkpointID string, spec ForkSpec) (*Fork, err
 }
 
 func (m *Manager) SnapshotFork(forkID, checkpointID string) (*Checkpoint, error) {
+	if err := EnsureCriuCompatible(); err != nil {
+		return nil, err
+	}
 	var ckpt *Checkpoint
 	err := m.withForkLock(forkID, func() error {
 		f, err := m.loadFork(forkID)

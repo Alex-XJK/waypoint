@@ -68,6 +68,13 @@ as aliases if that is convenient. Do not let them distort the new model.
 
 ## Non-Obvious Runtime Constraints
 
+- On aarch64 hosts with pointer authentication (`paca`/`pacg` in `/proc/cpuinfo`),
+  CRIU >= 4.0 is required: older CRIU does not checkpoint PAC keys, so restored
+  PAC-built binaries (bash, glibc userland) die with SIGILL at the first
+  authenticated return. `EnsureCriuCompatible()` enforces this at runtime. See the
+  "Definitive Root Causes" section of `parallel-fork-runtime-bugs.md`.
+- Do not keep an os/exec pidfd open for a long-lived child in a checkpointed
+  process; call `cmd.Process.Release()` after start (CRIU cannot dump pidfds).
 - `bash_init` must pivot into the session overlay root before checkpointing.
 - `bash_init` must re-exec from inside the overlay (`/.waypoint/bash_init`) so CRIU can
   resolve its executable mapping.

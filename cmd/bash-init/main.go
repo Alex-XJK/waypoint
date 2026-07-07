@@ -112,6 +112,11 @@ func main() {
 	}
 
 	bashPID := cmd.Process.Pid
+	// Drop the pidfd os/exec opened for the child; a retained pidfd is an
+	// anon inode CRIU cannot dump. We only ever address bash by numeric PID.
+	if err := cmd.Process.Release(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to release bash process handle: %v\n", err)
+	}
 
 	fmt.Println("Server pid:", os.Getpid())
 	fmt.Println("Bash pid:", bashPID)

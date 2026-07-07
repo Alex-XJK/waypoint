@@ -168,6 +168,10 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 }
 
 func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
+	if err := EnsureCriuCompatible(); err != nil {
+		return 0, err
+	}
+
 	// Load checkpointMetadata
 	checkpointMetadata, err := m.loadMetadata(checkpointID)
 	if err != nil {
