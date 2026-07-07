@@ -5,6 +5,8 @@ package waypoint
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -17,9 +19,40 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// imageRefComponent sanitizes s (a build-context directory basename) into a
+// string usable inside a buildah/Docker image reference. Reference name
+// components must be lowercase and match
+// [a-z0-9]+((?:[._]|__|[-]+)[a-z0-9]+)*, so they may not start or end with a
+// separator, nor contain other characters — a trailing "_" or an uppercase
+// letter (e.g. a tempfile.mkdtemp dir like "img3_4l96kk1_") otherwise yields
+// "invalid reference format". We lowercase, collapse every run of disallowed
+// characters into a single "-", and trim trailing separators. If nothing
+// usable remains, we fall back to a short hash so the result is always a
+// valid, deterministic component.
+func imageRefComponent(s string) string {
+	var b strings.Builder
+	sep := true // start "after a separator" so leading junk is dropped
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			sep = false
+			continue
+		}
+		if !sep {
+			b.WriteByte('-')
+			sep = true
+		}
+	}
+	out := strings.TrimRight(b.String(), "-")
+	if out == "" {
+		sum := sha1.Sum([]byte(s))
+		return hex.EncodeToString(sum[:])[:12]
+	}
+	return out
+}
+
 func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool) error {
-	lowercaseBasename := strings.ToLower(filepath.Base(dockerfileDir))
-	imageTag := fmt.Sprintf("waypoint_%s:%d", lowercaseBasename, time.Now().Unix())
+	imageTag := fmt.Sprintf("waypoint_%s:%d", imageRefComponent(filepath.Base(dockerfileDir)), time.Now().Unix())
 
 	run := func(cmd *exec.Cmd, capture bool) (string, error) {
 		var stdout bytes.Buffer

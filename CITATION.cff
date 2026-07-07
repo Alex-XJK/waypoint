@@ -23,8 +23,8 @@ abstract: >-
   on top of CRIU and OverlayFS for fast, isolated process
   state management.
 license: Apache-2.0
-version: 0.5.1
-date-released: '2026-02-20'
+version: 0.6.0
+date-released: '2026-07-01'
 references:
   - type: article
     title: "Toward Systems Foundations for Agentic Exploration"
