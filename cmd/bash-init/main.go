@@ -80,6 +80,11 @@ func main() {
 	if err := setNonCanonicalWithEcho(ptySlave); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to set non-canonical PTY mode: %v\n", err)
 	}
+	// Give the terminal a real size; otherwise programs see 0x0 and
+	// width-aware output (pagers, tables, wrapping) misbehaves.
+	if err := pty.Setsize(ptyMaster, &pty.Winsize{Rows: 40, Cols: 120}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to set PTY window size: %v\n", err)
+	}
 
 	// Create Unix domain socket for command communication
 	os.Remove(socketPath) // Clean up old socket

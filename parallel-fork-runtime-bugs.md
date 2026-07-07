@@ -331,5 +331,39 @@ shell state (including the running background job), independent divergence, recu
 destroy, and mount-free cleanup. Fork restore latency ~300-420 ms (unoptimized).
 
 Operational requirement: on aarch64 hosts with PAC, Waypoint requires CRIU >= 4.0.
-A startup version/feature check in Waypoint would fail fast on 3.x hosts.
+`EnsureCriuCompatible()` in `pkg/waypoint/criu.go` enforces this at runtime.
+
+## Multiprocess and Server Fork Validation (2026-07-06, CRIU 4.2)
+
+A four-task tree — `bash_init` (PID 1) + interactive bash + `python3 -m http.server`
+(with a listening TCP socket on loopback) + a `sleep` — was checkpointed, restored,
+and forked twice. Results:
+
+- The restored `main` keeps serving HTTP on 127.0.0.1:8000.
+- Both forks run their own copy of the server bound to the same port in their own
+  network namespaces, serving diverged filesystem content (`from-sf1` / `from-sf2`
+  vs. main's `original`).
+- Background processes reparented or started under bash all survive.
+
+An earlier multi-task restore failure (`Can't setns .../mnt: EINVAL`) observed with
+CRIU 3.18 does not occur with 4.2.
+
+## PTY Findings (2026-07-06)
+
+The PTY pair (master+slave both held inside the checkpointed image) restores
+correctly with CRIU 4.2, including into fresh per-fork `devpts newinstance` mounts:
+programs inside the session see a real TTY (`/dev/pts/0`), `termios` state works,
+and this holds in restored forks. `bash_init` now sets an explicit window size
+(120x40) at startup because a fresh PTY otherwise reports 0x0, which breaks
+width-aware programs; the size survives checkpoint/fork.
+
+Known exec-protocol gaps (not restore bugs):
+
+- Command exit codes are not propagated to the CLI (`waypoint exec ... 'false'`
+  exits 0).
+- Heredoc/multi-line commands leak PS2 continuation prompts (`> > >`) into
+  captured output; prompt/echo stripping is heuristic.
+- Fully interactive foreground programs (REPLs, pagers) hang the exec until
+  timeout by design; the protocol is command/response, not an interactive
+  terminal stream.
 

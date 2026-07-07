@@ -351,7 +351,10 @@ func restoreForkChild(f *Fork) error {
 		"--tcp-established",
 		"--restore-detached",
 		"--pidfile", f.PidFile,
-		"-vv", "-o", filepath.Base(f.LogPath),
+		// Absolute path: criu resolves relative -o against the images dir,
+		// which is shared by all forks of a checkpoint and would make
+		// concurrent restores clobber one another's logs.
+		"-vv", "-o", f.LogPath,
 	}
 	if f.LazyPages {
 		args = append(args, "--lazy-pages")
