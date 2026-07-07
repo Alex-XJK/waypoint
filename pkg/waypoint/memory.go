@@ -24,6 +24,7 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 		// Without both, dumping the shop process tree fails.
 		"--force-irmap",
 		"--link-remap",
+		"--file-locks",
 		"--ghost-limit", "8388608",
 		"-vv", "-o", "dump.log",
 	)
@@ -54,6 +55,7 @@ func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
 		"criu", "restore",
 		"--images-dir", criuPath,
 		"--tcp-established",
+		"--file-locks",
 		"-vv", "-o", "restore.log",
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
