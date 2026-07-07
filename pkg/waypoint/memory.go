@@ -17,6 +17,7 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 		"-t", fmt.Sprintf("%d", pid),
 		"-D", criuPath,
 		"--tcp-established",
+		"--file-locks",
 		"--ghost-limit", "8388608",
 		"-vv", "-o", "dump.log",
 	)
@@ -47,6 +48,7 @@ func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
 		"criu", "restore",
 		"--images-dir", criuPath,
 		"--tcp-established",
+		"--file-locks",
 		"-vv", "-o", "restore.log",
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
