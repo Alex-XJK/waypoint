@@ -283,8 +283,11 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 	}, nil
 }
 
-func (m *Manager) ExecuteForkCommand(forkID, command string, args ...string) (string, error) {
-	var output string
+// ExecuteForkCommand runs one shell command string in the fork's persistent
+// shell. Extra args are joined with spaces into the command string, so the
+// payload is always a single bash input, not an argv.
+func (m *Manager) ExecuteForkCommand(forkID, command string, args ...string) (*ExecResult, error) {
+	var result *ExecResult
 	err := m.withForkLock(forkID, func() error {
 		f, err := m.loadFork(forkID)
 		if err != nil {
@@ -299,10 +302,10 @@ func (m *Manager) ExecuteForkCommand(forkID, command string, args ...string) (st
 		}
 		commandString += "\n"
 		var execErr error
-		output, execErr = execCommand(f.SocketPath, commandString)
+		result, execErr = execCommand(f.SocketPath, commandString)
 		return execErr
 	})
-	return output, err
+	return result, err
 }
 
 func (m *Manager) DestroyFork(forkID string) error {

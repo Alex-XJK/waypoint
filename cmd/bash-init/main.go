@@ -1,9 +1,25 @@
 package main
 
-// pty-rpc-shell: A RPC shell implementation that turns an interactive process into a request–response execution service.
+// bash_init supervises one long-lived interactive bash on a PTY inside the
+// session root and exposes it as a request/response command service over a
+// Unix socket. The whole tree (bash_init + bash + any user processes) is what
+// CRIU checkpoints, so hidden process state (cwd, variables, background jobs,
+// local servers) survives checkpoint/restore/fork.
 //
-// GitHub Repository: https://github.com/Alex-XJK/pty-rpc-shell.git
-// Designed and developed by Alex Jiakai Xu (https://alex-xjk.github.io/), DAPLab @ Columbia University (https://daplab.cs.columbia.edu/)
+// Exec protocol (v2, "WP2"):
+//
+//	request:  <decimal payload length>\n<payload bytes>
+//	response: WP2 <ok|timeout|dead> <exit-code>\n<raw output until close>
+//
+// "dead" means the shell process is gone (the command ran `exit`, or it
+// crashed); the fork is no longer usable and bash_init exits shortly after.
+//
+// Command completion and exit codes travel out-of-band: every command is
+// followed by a bash builtin that writes "<nonce> $?" to the FIFO at
+// /.waypoint/exec.done. The PTY therefore carries only program output — echo
+// and prompts are disabled — and no in-band marker parsing is needed.
+// Clients that see a response without the WP2 header are talking to an older
+// checkpointed bash_init and should treat the whole stream as v1 raw output.
 
 import (
 	"bufio"
@@ -14,7 +30,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,12 +40,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Compile regexes once at package level for performance
-var (
-	ansiEscapeRegex  = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
-	oscSequenceRegex = regexp.MustCompile(`\x1b\][^\x07]*\x07`)
-	otherEscapeRegex = regexp.MustCompile(`\x1b[>=]`)
-)
+// completionFifoGuestPath is the path bash redirects completion lines to,
+// as seen from inside the session root.
+const completionFifoGuestPath = "/.waypoint/exec.done"
+
+// execTimeout bounds a single command. Clients normally control command
+// lifetime by disconnecting (which terminates the foreground process group),
+// so this is a backstop, not a policy.
+const execTimeout = 24 * time.Hour
 
 func main() {
 	if len(os.Args) < 3 {
@@ -64,21 +81,23 @@ func main() {
 			}
 		}
 		chrootDir = "/"
-		go reapOrphanedChildren()
 	}
+	// Reap children (the bash we spawn, plus orphans reparented to us when
+	// we are PID 1 of the namespace). We never call cmd.Wait, so this does
+	// not race with os/exec.
+	go reapOrphanedChildren()
 
 	// Create PTY
 	ptyMaster, ptySlave, err := pty.Open()
 	if err != nil {
 		panic(err)
 	}
-	// Disable canonical mode on the slave PTY so long single-line commands
-	// are not truncated by line discipline limits (commonly ~4096 bytes).
-	// Keep ECHO enabled because output cleaning logic depends on echoed input.
-	// Also disable ECHOCTL so control chars are not shown as caret notation
-	// (e.g., "^J"), which pollutes captured command output.
-	if err := setNonCanonicalWithEcho(ptySlave); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to set non-canonical PTY mode: %v\n", err)
+	// Non-canonical so long command lines are not truncated by the line
+	// discipline, and no echo: with out-of-band completion the PTY carries
+	// only program output. ISIG stays on so Ctrl-C can reset a shell stuck
+	// in a continuation prompt.
+	if err := setRawishNoEcho(ptySlave); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to set PTY mode: %v\n", err)
 	}
 	// Give the terminal a real size; otherwise programs see 0x0 and
 	// width-aware output (pagers, tables, wrapping) misbehaves.
@@ -86,14 +105,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warning: failed to set PTY window size: %v\n", err)
 	}
 
-	// Create Unix domain socket for command communication
-	os.Remove(socketPath) // Clean up old socket
-
-	listener, err := net.Listen("unix", socketPath)
+	completions, err := openCompletionFifo(filepath.Join(chrootDir, completionFifoGuestPath))
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "failed to set up completion fifo: %v\n", err)
+		os.Exit(1)
 	}
-	defer listener.Close()
 
 	// Start bash with PTY
 	cmd := exec.Command(
@@ -108,6 +124,7 @@ func main() {
 		Ctty:    0,
 	}
 	cmd.Dir = "/"
+	cmd.Env = append(os.Environ(), "TERM=xterm")
 	cmd.Stdin = ptySlave
 	cmd.Stdout = ptySlave
 	cmd.Stderr = ptySlave
@@ -123,31 +140,309 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warning: failed to release bash process handle: %v\n", err)
 	}
 
+	// Drain PTY output continuously into a buffer.
+	outputBuffer := &syncBuffer{buf: &bytes.Buffer{}}
+	go drainPTY(ptyMaster, outputBuffer)
+
+	// Prove the shell executes commands and neutralize prompt output before
+	// accepting clients: socket presence then means "shell is usable".
+	if err := initShellSession(ptyMaster, completions); err != nil {
+		fmt.Fprintf(os.Stderr, "shell failed startup handshake: %v\n", err)
+		os.Exit(1)
+	}
+	outputBuffer.ReadAndClear() // discard rc-file/prompt noise from startup
+
+	// Create Unix domain socket for command communication
+	os.Remove(socketPath) // Clean up old socket
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		panic(err)
+	}
+	defer listener.Close()
+
 	fmt.Println("Server pid:", os.Getpid())
 	fmt.Println("Bash pid:", bashPID)
 	fmt.Println("Socket path:", socketPath)
 	fmt.Println("Ready to receive commands from Unix Domain Socket...")
-	if os.Getenv("WAYPOINT_NAMESPACED") == "1" {
+	if os.Getenv("WAYPOINT_NAMESPACED") == "1" && os.Getenv("WAYPOINT_KEEP_STDIO") != "1" {
 		if err := detachStandardFiles(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to detach stdio: %v\n", err)
 		}
 	}
 
-	// Mutex to protect PTY reads/writes
-	var ptyMutex sync.Mutex
+	// The fork is useless once its shell is gone (`exit`, crash): exit so
+	// the socket disappears and clients fail fast instead of hanging.
+	go func() {
+		for shellAlive(bashPID) {
+			time.Sleep(500 * time.Millisecond)
+		}
+		time.Sleep(2 * time.Second) // let an in-flight "dead" response drain
+		os.Exit(0)
+	}()
 
-	// Start a goroutine to continuously drain PTY output into a buffer
-	outputBuffer := &syncBuffer{buf: &bytes.Buffer{}}
-	go drainPTY(ptyMaster, outputBuffer)
+	// Serializes command execution on the single shared shell.
+	var shellMutex sync.Mutex
 
-	// Handle command connections
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
 
-		go handleClient(conn, ptyMaster, ptySlave, &ptyMutex, outputBuffer, bashPID)
+		go handleClient(conn, ptyMaster, &shellMutex, outputBuffer, bashPID, completions)
+	}
+}
+
+// shellAlive reports whether the shell process still exists. Once the reaper
+// collects it, the PID disappears from our namespace.
+func shellAlive(bashPID int) bool {
+	return unix.Kill(bashPID, 0) == nil
+}
+
+// openCompletionFifo creates (or reuses) the completion FIFO and returns a
+// channel of lines written to it. Both ends are held open by bash_init: the
+// read end feeds the channel, the dummy write end prevents EOF cycling.
+// Because the FIFO is a named pipe in the session filesystem, CRIU can
+// checkpoint these fds like any other.
+func openCompletionFifo(hostPath string) (<-chan string, error) {
+	if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
+		return nil, err
+	}
+	if fi, err := os.Lstat(hostPath); err == nil && fi.Mode()&os.ModeNamedPipe == 0 {
+		if err := os.Remove(hostPath); err != nil {
+			return nil, fmt.Errorf("cannot replace non-fifo %s: %w", hostPath, err)
+		}
+	}
+	if err := unix.Mkfifo(hostPath, 0o666); err != nil && err != unix.EEXIST {
+		return nil, fmt.Errorf("mkfifo %s: %w", hostPath, err)
+	}
+
+	readFD, err := unix.Open(hostPath, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open fifo for read: %w", err)
+	}
+	reader := os.NewFile(uintptr(readFD), hostPath)
+	// Keep a writer open so reads block instead of returning EOF between
+	// commands. Deliberately leaked for the process lifetime.
+	if _, err := unix.Open(hostPath, unix.O_WRONLY|unix.O_NONBLOCK, 0); err != nil {
+		reader.Close()
+		return nil, fmt.Errorf("open fifo keeper writer: %w", err)
+	}
+
+	lines := make(chan string, 16)
+	go func() {
+		scanner := bufio.NewScanner(reader)
+		for scanner.Scan() {
+			select {
+			case lines <- scanner.Text():
+			default: // drop if nobody is waiting; nonces make stale lines harmless
+			}
+		}
+	}()
+	return lines, nil
+}
+
+// initShellSession blanks the prompt state (PS1/PS2/PROMPT_COMMAND may be set
+// by rc files) and waits for the shell to acknowledge over the FIFO.
+func initShellSession(ptyMaster *os.File, completions <-chan string) error {
+	nonce := newNonce()
+	init := fmt.Sprintf("unset PROMPT_COMMAND; PS1=; PS2=; builtin printf '%%s 0\\n' '%s' > %s\n",
+		nonce, completionFifoGuestPath)
+	if _, err := ptyMaster.WriteString(init); err != nil {
+		return err
+	}
+	if _, ok := awaitCompletion(completions, nonce, 10*time.Second); !ok {
+		return fmt.Errorf("no handshake from shell within 10s")
+	}
+	return nil
+}
+
+func newNonce() string {
+	return fmt.Sprintf("wp%d", time.Now().UnixNano())
+}
+
+// parseCompletion extracts the exit code from a "<nonce> <exit-code>" line.
+func parseCompletion(line, nonce string) (int, bool) {
+	fields := strings.Fields(line)
+	if len(fields) != 2 || fields[0] != nonce {
+		return 0, false
+	}
+	code, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, false
+	}
+	return code, true
+}
+
+// awaitCompletion waits for a "<nonce> <exit-code>" line, ignoring lines with
+// other nonces (stale completions or stray writes to the FIFO).
+func awaitCompletion(completions <-chan string, nonce string, timeout time.Duration) (int, bool) {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		select {
+		case line := <-completions:
+			if code, ok := parseCompletion(line, nonce); ok {
+				return code, true
+			}
+		case <-deadline.C:
+			return 0, false
+		}
+	}
+}
+
+func handleClient(conn net.Conn, ptyMaster *os.File, shellMutex *sync.Mutex, outputBuffer *syncBuffer, bashPID int, completions <-chan string) {
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+
+	// Read one length-prefixed command from client.
+	lenLine, err := reader.ReadString('\n')
+	if err != nil {
+		return
+	}
+	payloadLen, err := strconv.Atoi(strings.TrimSpace(lenLine))
+	if err != nil || payloadLen < 0 {
+		return
+	}
+	payload := make([]byte, payloadLen)
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		return
+	}
+	command := string(payload)
+
+	shellMutex.Lock()
+	defer shellMutex.Unlock()
+
+	if !shellAlive(bashPID) {
+		respond(conn, "dead", 255, "")
+		return
+	}
+
+	// Output produced between commands (background job spew) is not part of
+	// any request/response exchange; drop it.
+	outputBuffer.ReadAndClear()
+
+	nonce := newNonce()
+	if !strings.HasSuffix(command, "\n") {
+		command += "\n"
+	}
+	command += fmt.Sprintf("builtin printf '%%s %%s\\n' '%s' \"$?\" > %s\n", nonce, completionFifoGuestPath)
+	if _, err := ptyMaster.WriteString(command); err != nil {
+		return
+	}
+
+	// Watch for the client disconnecting mid-command so abandoned commands
+	// do not run forever.
+	clientClosed := make(chan struct{})
+	serverDone := make(chan struct{})
+	defer close(serverDone)
+	go watchClient(conn, clientClosed, serverDone)
+
+	// Single consumer of the completions channel: leaked concurrent readers
+	// would steal later commands' completion lines.
+	timeout := time.After(execTimeout)
+	liveness := time.NewTicker(500 * time.Millisecond)
+	defer liveness.Stop()
+	for {
+		select {
+		case <-liveness.C:
+			// The command killed the shell (e.g. `exit`): no completion is
+			// coming. Report what output we have.
+			if !shellAlive(bashPID) {
+				respond(conn, "dead", 255, collectOutput(outputBuffer))
+				return
+			}
+
+		case line := <-completions:
+			code, ok := parseCompletion(line, nonce)
+			if !ok {
+				continue // stale nonce or stray write to the FIFO
+			}
+			respond(conn, "ok", code, collectOutput(outputBuffer))
+			return
+
+		case <-timeout:
+			interruptShell(ptyMaster, bashPID)
+			if code, ok := awaitCompletion(completions, nonce, 2*time.Second); ok {
+				respond(conn, "ok", code, collectOutput(outputBuffer))
+				return
+			}
+			respond(conn, "timeout", 124, collectOutput(outputBuffer))
+			return
+
+		case <-clientClosed:
+			interruptShell(ptyMaster, bashPID)
+			// Resync: give the completion line a moment to arrive so it does
+			// not bleed into the next command's exchange.
+			awaitCompletion(completions, nonce, 2*time.Second)
+			return
+		}
+	}
+}
+
+// interruptShell aborts whatever the shell is doing: Ctrl-C clears a parser
+// stuck in a continuation (e.g. unterminated quote swallowed the completion
+// line), and the foreground process group is terminated if one is running.
+func interruptShell(ptyMaster *os.File, bashPID int) {
+	_, _ = ptyMaster.Write([]byte{0x03})
+	terminateForegroundIfAny(bashPID, 500*time.Millisecond)
+}
+
+// collectOutput reads the buffered PTY output for the command that just
+// completed. The completion line arrives on a different fd than the PTY
+// data, so wait for the PTY to go quiet briefly to catch trailing output.
+func collectOutput(outputBuffer *syncBuffer) string {
+	var sb strings.Builder
+	sb.WriteString(outputBuffer.ReadAndClear())
+	deadline := time.Now().Add(250 * time.Millisecond)
+	quietSince := time.Now()
+	for time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		chunk := outputBuffer.ReadAndClear()
+		if chunk != "" {
+			sb.WriteString(chunk)
+			quietSince = time.Now()
+		} else if time.Since(quietSince) > 30*time.Millisecond {
+			break
+		}
+	}
+	// The PTY line discipline translates \n to \r\n on output; undo that.
+	// Lone \r (progress bars etc.) is program behavior and passes through.
+	return strings.ReplaceAll(sb.String(), "\r\n", "\n")
+}
+
+func respond(conn net.Conn, status string, code int, output string) {
+	writer := bufio.NewWriter(conn)
+	fmt.Fprintf(writer, "WP2 %s %d\n", status, code)
+	writer.WriteString(output)
+	writer.Flush()
+}
+
+// watchClient closes clientClosed when the peer disconnects.
+func watchClient(conn net.Conn, clientClosed chan struct{}, serverDone <-chan struct{}) {
+	buf := make([]byte, 1)
+	for {
+		select {
+		case <-serverDone:
+			return
+		default:
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		_, err := conn.Read(buf)
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			continue
+		}
+		if err == nil {
+			continue // ignore unexpected extra client data
+		}
+		select {
+		case <-serverDone:
+		default:
+			close(clientClosed)
+		}
+		return
 	}
 }
 
@@ -279,17 +574,16 @@ func reapOrphanedChildren() {
 	}
 }
 
-func setNonCanonicalWithEcho(tty *os.File) error {
+// setRawishNoEcho disables canonical mode (no line-length limits) and all
+// echo (the PTY should carry program output only). Signals stay enabled so
+// Ctrl-C works.
+func setRawishNoEcho(tty *os.File) error {
 	fd := int(tty.Fd())
 	tio, err := unix.IoctlGetTermios(fd, unix.TCGETS)
 	if err != nil {
 		return err
 	}
-	// Disable canonical mode only; keep echoing enabled.
-	tio.Lflag &^= unix.ICANON
-	// Do not render control chars via caret notation (e.g., "^J").
-	tio.Lflag &^= unix.ECHOCTL
-	// Ensure read returns as soon as at least one byte is available.
+	tio.Lflag &^= unix.ICANON | unix.ECHO | unix.ECHOE | unix.ECHOK | unix.ECHONL | unix.ECHOCTL
 	tio.Cc[unix.VMIN] = 1
 	tio.Cc[unix.VTIME] = 0
 	return unix.IoctlSetTermios(fd, unix.TCSETS, tio)
@@ -329,235 +623,6 @@ func drainPTY(ptyMaster *os.File, outputBuffer *syncBuffer) {
 	}
 }
 
-// buildWrappedMarkerRegex matches a marker even if PTY line wrapping inserts '\n' inside it.
-func buildWrappedMarkerRegex(marker string) *regexp.Regexp {
-	parts := make([]string, 0, len(marker))
-	for _, r := range marker {
-		parts = append(parts, regexp.QuoteMeta(string(r)))
-	}
-	return regexp.MustCompile(strings.Join(parts, `\n*`))
-}
-
-func handleClient(conn net.Conn, ptyMaster *os.File, ptySlave *os.File, ptyMutex *sync.Mutex, outputBuffer *syncBuffer, bashPID int) {
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
-
-	// Read one length-prefixed command from client.
-	// Protocol:
-	//   <decimal byte length>\n
-	//   <raw command bytes>
-	lenLine, err := reader.ReadString('\n')
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "read error: %v\n", err)
-		return
-	}
-	lenText := strings.TrimSpace(lenLine)
-	payloadLen, err := strconv.Atoi(lenText)
-	if err != nil || payloadLen < 0 {
-		fmt.Fprintf(os.Stderr, "invalid command length %q: %v\n", lenText, err)
-		return
-	}
-	fmt.Printf("Protocol >> Length [%d]\n", payloadLen)
-
-	payload := make([]byte, payloadLen)
-	_, err = io.ReadFull(reader, payload)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to read command payload: %v\n", err)
-		return
-	}
-	commandPayload := string(payload)
-
-	ptyMutex.Lock()
-	defer ptyMutex.Unlock()
-
-	// Clear any stale output before sending command
-	staleOutput := outputBuffer.ReadAndClear()
-	if staleOutput != "" {
-		fmt.Println("Cleanup >> ===== Start =====")
-		fmt.Printf("%s\n", staleOutput)
-		fmt.Println("Cleanup >> ===== End =====")
-	}
-
-	// Generate a unique marker for this command.
-	markerNonce := time.Now().UnixNano()
-	marker := fmt.Sprintf("__CMD_DONE_%d_%d__", bashPID, markerNonce)
-	markerRegex := buildWrappedMarkerRegex(marker)
-
-	fmt.Println("Recv >> ===== Start =====")
-	fmt.Print(commandPayload)
-	fmt.Println("Recv >> ===== End =====")
-
-	// Write command to PTY with a marker command appended on a new line.
-	// This preserves multi-line shell constructs (e.g., heredoc) in the payload.
-	cmdWithMarker := commandPayload
-	if !strings.HasSuffix(cmdWithMarker, "\n") {
-		cmdWithMarker += "\n"
-	}
-	cmdWithMarker += fmt.Sprintf("builtin printf '\\n%%s\\n' \"__CMD_DONE_$$_%d__\"\n", markerNonce)
-	_, err = ptyMaster.WriteString(cmdWithMarker)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "write error: %v\n", err)
-		return
-	}
-
-	// Wait for output with timeout
-	timeout := time.After(60000 * time.Second)
-	checkInterval := 5 * time.Millisecond // PTY scan cadence; low overhead
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
-
-	// Peer liveness watcher
-	clientClosed := make(chan struct{})
-	serverDone := make(chan struct{})
-	go func() {
-		fmt.Println("Watcher >> Start client liveness watcher")
-		// After we read the command line, server does not read further data from the client.
-		buf := make([]byte, 1)
-		for {
-			select {
-			case <-serverDone:
-				return
-			default:
-			}
-			// Short read deadline to poll liveness.
-			_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-			_, err := conn.Read(buf)
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				continue
-			}
-			// Any non-timeout error => client is closed or unreachable.
-			select {
-			case <-serverDone:
-				return
-			default:
-			}
-			fmt.Println("Watcher >> Client disconnected")
-			close(clientClosed)
-			return
-		}
-	}()
-
-	var allOutput strings.Builder
-
-	for {
-		select {
-		case <-timeout:
-			// Timeout: terminate foreground process group (if any), then send what we have
-			fmt.Println("Killer >> Timeout reached; attempt to terminate foreground process group")
-			terminateForegroundIfAny(ptySlave, bashPID, 500*time.Millisecond)
-			finalOutput := cleanOutput(allOutput.String(), cmdWithMarker, markerRegex)
-			fmt.Printf("Watcher >> Writing collected output after timeout: %d bytes\n", len(finalOutput))
-			close(serverDone)
-			writer.WriteString(finalOutput)
-			writer.Flush()
-			return
-
-		case <-clientClosed:
-			// Client disconnected: terminate foreground process group (if any).
-			fmt.Println("Killer >> Client disconnected; attempt to terminate foreground process group")
-			terminateForegroundIfAny(ptySlave, bashPID, 500*time.Millisecond)
-			close(serverDone)
-			fmt.Println("Watcher >> Raw buffered outputs before terminated ")
-			fmt.Println("Watcher >> ===== Start =====")
-			fmt.Printf("%s\n", allOutput.String())
-			fmt.Println("Watcher >> ===== End =====")
-			return
-
-		case <-ticker.C:
-			// Check if we have output with the marker
-			output := outputBuffer.ReadAndClear()
-			if output != "" {
-				allOutput.WriteString(output)
-
-				normalized := stripControlChars(allOutput.String())
-				if markerRegex.MatchString(normalized) {
-					// Found actual marker - clean up output and send
-					finalOutput := cleanOutput(allOutput.String(), cmdWithMarker, markerRegex)
-					close(serverDone)
-					writer.WriteString(finalOutput)
-					writer.Flush()
-					return
-				}
-			}
-		}
-	}
-}
-
-// stripControlChars removes ANSI escape sequences - optimized version
-func stripControlChars(s string) string {
-	// Remove ANSI escape sequences
-	s = ansiEscapeRegex.ReplaceAllString(s, "")
-	s = oscSequenceRegex.ReplaceAllString(s, "")
-	s = otherEscapeRegex.ReplaceAllString(s, "")
-
-	// Normalize line endings
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\r", "\n")
-
-	return s
-}
-
-// cleanOutput removes command echo and marker, leaving only actual output
-func cleanOutput(raw, cmdSent string, markerRegex *regexp.Regexp) string {
-	fmt.Println("Raw >> ===== Start =====")
-	fmt.Printf("%q\n", raw)
-	fmt.Println("Raw >> ===== End =====")
-
-	// Strip control characters
-	cleaned := stripControlChars(raw)
-
-	// Remove the actual marker, even if PTY wrapping split it across lines.
-	cleaned = markerRegex.ReplaceAllString(cleaned, "")
-
-	// Use a byte-budget approach to skip the echoed command across wrapped lines.
-	// Initialize with the exact length of the sent command (including trailing newline).
-	remainingEcho := len(cmdSent)
-
-	lines := strings.Split(cleaned, "\n")
-	var result []string
-
-	for i, line := range lines {
-		fmt.Printf("Line %d: %q\n", i, line)
-
-		trimmed := strings.TrimSpace(line)
-
-		// While we are still within the echoed command byte budget, drop lines entirely.
-		// Account for the implicit '\n' that was removed by strings.Split by adding 1.
-		if remainingEcho > 0 {
-			fmt.Println("Judge >> Echoed command (budget)")
-			remainingEcho -= len(line) + 1
-			continue
-		}
-
-		// Skip empty lines
-		if trimmed == "" {
-			fmt.Println("Judge >> Empty line")
-			continue
-		}
-
-		// Skip bash prompt patterns
-		if ((strings.HasPrefix(trimmed, "bash-") || strings.Contains(trimmed, "@")) && (strings.HasSuffix(trimmed, "#") || strings.HasSuffix(trimmed, "$"))) ||
-			trimmed == "$" || trimmed == "#" {
-			fmt.Println("Judge >> Bash prompt line")
-			continue
-		}
-
-		result = append(result, line)
-		fmt.Println("Judge >> Keep!")
-	}
-
-	stringResults := strings.Join(result, "\n")
-	stringResults = strings.Trim(stringResults, "\n")
-
-	fmt.Println("Return >> ===== Start =====")
-	fmt.Printf("%s\n", stringResults)
-	fmt.Println("Return >> ===== End =====")
-
-	return stringResults
-}
-
 // readProcTPGID parses /proc/<pid>/stat and returns tpgid.
 func readProcTPGID(bashPID int) (int, error) {
 	path := fmt.Sprintf("/proc/%d/stat", bashPID)
@@ -577,66 +642,36 @@ func readProcTPGID(bashPID int) (int, error) {
 	if len(fields) < 6 {
 		return 0, fmt.Errorf("malformed /proc stat: insufficient fields")
 	}
-	tpgidStr := fields[5]
-	tpgid, err := strconv.Atoi(tpgidStr)
-	if err != nil {
-		return 0, err
-	}
-	return tpgid, nil
+	return strconv.Atoi(fields[5])
 }
 
-// terminateForegroundIfAny sends SIGTERM to the current foreground process group of the PTY
-func terminateForegroundIfAny(tty *os.File, bashPID int, grace time.Duration) {
-	// Resolve bash's own process group id.
+// terminateForegroundIfAny sends SIGTERM to the current foreground process
+// group of the PTY, escalating to SIGKILL after a grace period.
+func terminateForegroundIfAny(bashPID int, grace time.Duration) {
 	bashPGID, err := unix.Getpgid(bashPID)
 	if err != nil {
-		fmt.Printf("Killer >> Getpgid(bashPID=%d) error: %v\n", bashPID, err)
 		return
 	}
-	fmt.Printf("Killer >> bashPGID=%d\n", bashPGID)
 
-	// Snapshot the current foreground process group as the termination target.
 	fgPGID, err := readProcTPGID(bashPID)
 	if err != nil {
-		fmt.Printf("Killer >> readProcTPGID error: %v\n", err)
 		return
 	}
-	fmt.Printf("Killer >> foregroundPGID=%d\n", fgPGID)
 	if fgPGID == bashPGID || fgPGID <= 0 {
-		fmt.Println("Killer >> Foreground is bash or invalid; skip terminate")
-		return
+		return // foreground is bash itself; nothing to terminate
 	}
 	target := fgPGID
 
-	// Send SIGTERM to the whole foreground process group.
-	if err := unix.Kill(-target, unix.SIGTERM); err != nil {
-		fmt.Printf("Killer >> SIGTERM to pgrp %d failed: %v\n", target, err)
-	} else {
-		fmt.Printf("Killer >> SIGTERM sent to pgrp %d\n", target)
-	}
+	_ = unix.Kill(-target, unix.SIGTERM)
 
-	// Optional graceful window before a hard kill.
 	if grace > 0 {
 		time.Sleep(grace)
-
-		// Re-check: only hard kill if the same group is still in foreground and still alive.
-		currentFG, errFG := readProcTPGID(bashPID)
-		if errFG != nil {
-			fmt.Printf("Killer >> readProcTPGID (post-term) error: %v\n", errFG)
+		currentFG, err := readProcTPGID(bashPID)
+		if err != nil || currentFG != target {
 			return
 		}
-		fmt.Printf("Killer >> foregroundPGID (post-term)=%d\n", currentFG)
-		if currentFG == target {
-			if err := unix.Kill(-target, 0); err == nil {
-				fmt.Printf("Killer >> pgrp %d still alive; sending SIGKILL\n", target)
-				if errK := unix.Kill(-target, unix.SIGKILL); errK != nil {
-					fmt.Printf("Killer >> SIGKILL to pgrp %d failed: %v\n", target, errK)
-				}
-			} else {
-				fmt.Printf("Killer >> pgrp %d not alive or kill -0 error: %v\n", target, err)
-			}
-		} else {
-			fmt.Printf("Killer >> Foreground changed (%d -> %d); skip SIGKILL\n", target, currentFG)
+		if err := unix.Kill(-target, 0); err == nil {
+			_ = unix.Kill(-target, unix.SIGKILL)
 		}
 	}
 }

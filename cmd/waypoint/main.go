@@ -16,6 +16,21 @@ import (
 
 var Version = "v0.6.0"
 
+// printExecResult writes the command output to stdout and exits with the
+// command's own exit code, so `waypoint exec` composes like ssh/docker exec.
+func printExecResult(result *waypoint.ExecResult) {
+	fmt.Print(result.Output)
+	if result.Output != "" && !strings.HasSuffix(result.Output, "\n") {
+		fmt.Println()
+	}
+	if result.TimedOut {
+		fmt.Fprintln(os.Stderr, "Error: command timed out")
+	}
+	if result.ExitCode != 0 {
+		os.Exit(result.ExitCode)
+	}
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: waypoint <command> [args...]")
@@ -244,12 +259,12 @@ func main() {
 			fmt.Printf("Error loading session: %v\n", err)
 			os.Exit(1)
 		}
-		output, err := manager.ExecuteForkCommand(forkID, command, args...)
+		result, err := manager.ExecuteForkCommand(forkID, command, args...)
 		if err != nil {
 			fmt.Printf("Error executing fork command: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println(output)
+		printExecResult(result)
 
 	case "destroy":
 		if len(os.Args) != 4 {
@@ -305,12 +320,12 @@ func main() {
 			os.Exit(1)
 		}
 
-		output, err := manager.ExecuteForkCommand(forkID, command)
+		result, err := manager.ExecuteForkCommand(forkID, command)
 		if err != nil {
 			fmt.Printf("Error executing command: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println(output)
+		printExecResult(result)
 
 	case "list":
 		if len(os.Args) != 3 {
