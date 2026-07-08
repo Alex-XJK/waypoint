@@ -63,15 +63,46 @@ See [our architecture decision record](./docs/tech_selection_note.md) for more d
 
 ## Installation 🔧
 
-### Prerequisites
+Waypoint can be installed either through the project setup targets or manually.
+For full details, see [Installing Waypoint](./docs/INSTALL.md).
+
+### Scripted Setup (Recommended)
+
+This path uses the repository `Makefile` to install system packages, build the
+binaries, install the CLI/helper pair, and run a root-level host check.
+
+```bash
+git clone https://github.com/Alex-XJK/waypoint.git
+cd waypoint
+
+# Ubuntu/Debian helper for host packages. This mutates system state with apt-get.
+sudo make deps-ubuntu
+
+make build
+make test
+sudo make install
+sudo make check
+
+waypoint version
+```
+
+If you do not want to use `make`, the `./setup` script provides equivalent
+commands, such as `./setup build`, `sudo ./setup install`, and
+`sudo ./setup check`.
+
+### Manual Installation
+
+#### Prerequisites
 
 - Linux system with root privileges
-- CRIU installed and configured
+- CRIU installed and configured, including the `criu` and `crit` commands
 - OverlayFS support (most modern Linux distributions)
 - Go 1.25 or the version listed in `go.mod` (for building from source)
-- Optional: `buildah` for the build from Dockerfile approach (since v0.5.0)
+- Host utilities used by Waypoint: `mount`, `umount`, `findmnt`, `lsof`, `fuser`, `ps`, `bash`, and `ldd`
+- Optional: `buildah`, `rsync`, and `gpgv` for the build from Dockerfile approach (since v0.5.0)
 
-### Install Go (just for reference)
+#### Install Go (just for reference)
+
 ```bash
 # Install Go (version 1.25.0)
 wget https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
@@ -89,7 +120,7 @@ source ~/.bashrc
 go version
 ```
 
-### Install CRIU
+#### Install CRIU
 
 ```bash
 # Ubuntu/Debian
@@ -100,7 +131,7 @@ sudo apt-get install criu
 sudo criu check
 ```
 
-### Build from Source
+#### Build from Source
 
 ```bash
 git clone https://github.com/Alex-XJK/waypoint.git
@@ -109,11 +140,18 @@ go build -o waypoint cmd/waypoint/main.go
 go build -o bash_init cmd/bash-init/main.go
 ```
 
-### Check Waypoint Version
+#### Check Waypoint Version
 
 ```bash
 ./waypoint version
 # Output: waypoint version v0.6.0
+```
+
+You can also run the root-level host check from the setup script after manual
+installation:
+
+```bash
+sudo ./setup check
 ```
 
 ## Usage 🗂
