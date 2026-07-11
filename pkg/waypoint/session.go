@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -104,6 +106,27 @@ func loadSessionInfo(sessionID string) (*SessionInfo, error) {
 // LoadSessionInfo returns persisted information for a checkpoint session.
 func LoadSessionInfo(sessionID string) (*SessionInfo, error) {
 	return loadSessionInfo(sessionID)
+}
+
+// ListSessions returns all session IDs recorded in the global session info store.
+func ListSessions() ([]string, error) {
+	files, err := os.ReadDir(SessionInfoDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+
+	var sessions []string
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+		sessions = append(sessions, strings.TrimSuffix(file.Name(), ".json"))
+	}
+	sort.Strings(sessions)
+	return sessions, nil
 }
 
 // Remove SessionInfo JSON file from the fixed-path global store

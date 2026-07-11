@@ -24,7 +24,7 @@ func main() {
 		fmt.Println("  create <session> <checkpoint-id> [pid | -1]  - Create checkpoint")
 		fmt.Println("  restore <session> <checkpoint-id>            - Restore checkpoint")
 		fmt.Println("  exec <session> <command> [args...]           - Execute command in environment")
-		fmt.Println("  list <session>                               - List checkpoints")
+		fmt.Println("  list [session]                               - List sessions or checkpoints")
 		fmt.Println("  cleanup <session> [--force]                  - Clean up session")
 		fmt.Println("  info [session [checkpoint-id]]               - Show system, session, or checkpoint info")
 		fmt.Println("  version                                      - Show version")
@@ -216,10 +216,28 @@ func main() {
 		fmt.Println(output)
 
 	case "list":
-		if len(os.Args) != 3 {
-			fmt.Println("Usage: list <session>")
+		if len(os.Args) > 3 {
+			fmt.Println("Usage: list [session]")
 			os.Exit(1)
 		}
+
+		if len(os.Args) == 2 {
+			sessions, err := waypoint.ListSessions()
+			if err != nil {
+				fmt.Printf("Error listing sessions: %v\n", err)
+				os.Exit(1)
+			}
+			if len(sessions) == 0 {
+				fmt.Println("No sessions found")
+			} else {
+				fmt.Println("Available sessions:")
+				for _, session := range sessions {
+					fmt.Printf("  %s\n", session)
+				}
+			}
+			break
+		}
+
 		sessionID := os.Args[2]
 
 		manager, err := waypoint.LoadManager(sessionID)
