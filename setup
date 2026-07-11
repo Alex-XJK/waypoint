@@ -31,7 +31,7 @@ Commands:
   install      Install waypoint, bash_init, and default system config
   uninstall    Remove files installed by ./setup install
   check        Check host commands and kernel features used by Waypoint
-  deps-ubuntu  Install common Ubuntu/Debian host dependencies with apt-get
+  deps-ubuntu  Install Ubuntu/Debian host dependencies and Go
   clean        Remove local build outputs
   help         Show this help
 
@@ -206,6 +206,109 @@ check_all() {
   return "$status"
 }
 
+go_required_version() {
+  awk '/^go / { print $2; exit }' "$ROOT_DIR/go.mod"
+}
+
+version_ge() {
+  local have="$1"
+  local want="$2"
+  [[ "$(printf '%s\n' "$want" "$have" | sort -V | head -n1)" == "$want" ]]
+}
+
+go_current_version() {
+  "$GO" version | awk '{ print $3 }' | sed 's/^go//'
+}
+
+install_go() {
+  local want="${GO_VERSION:-$(go_required_version)}"
+  local current=""
+
+  if command -v "$GO" >/dev/null 2>&1; then
+    current="$(go_current_version)"
+    if version_ge "$current" "$want"; then
+      ok "Go is already available: $("$GO" version)"
+      return 0
+    fi
+    warn "Go $current is older than required Go $want; replacing /usr/local/go"
+  else
+    warn "Go is not installed; installing Go $want"
+  fi
+
+  local arch=""
+  case "$(uname -m)" in
+    x86_64 | amd64)
+      arch="amd64"
+      ;;
+    aarch64 | arm64)
+      arch="arm64"
+      ;;
+    *)
+      err "unsupported architecture for automatic Go install: $(uname -m)"
+      return 1
+      ;;
+  esac
+
+  local tarball="go${want}.linux-${arch}.tar.gz"
+  local url="${GO_DOWNLOAD_URL:-https://go.dev/dl/${tarball}}"
+  local tmpdir=""
+  tmpdir="$(mktemp -d)"
+
+  log "downloading $url"
+  curl -fsSL "$url" -o "$tmpdir/$tarball"
+
+  log "installing Go $want to /usr/local/go"
+  rm -rf /usr/local/go
+  tar -C /usr/local -xzf "$tmpdir/$tarball"
+  ln -sf /usr/local/go/bin/go /usr/local/bin/go
+  ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+  rm -rf "$tmpdir"
+
+  ok "installed $(/usr/local/go/bin/go version)"
+}
+
+is_ubuntu() {
+  [[ -r /etc/os-release ]] || return 1
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  [[ "${ID:-}" == "ubuntu" ]]
+}
+
+enable_ubuntu_universe() {
+  if is_ubuntu && command -v add-apt-repository >/dev/null 2>&1; then
+    log "enabling Ubuntu universe repository"
+    add-apt-repository -y universe || warn "could not enable universe repository"
+    apt-get update
+  fi
+}
+
+install_criu() {
+  if command -v criu >/dev/null 2>&1 && command -v crit >/dev/null 2>&1; then
+    ok "CRIU is already available: $(command -v criu)"
+    ok "crit is already available: $(command -v crit)"
+    return 0
+  fi
+
+  log "installing CRIU"
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y criu; then
+    ok "installed CRIU from configured apt repositories"
+    return 0
+  fi
+
+  if is_ubuntu; then
+    warn "CRIU was not available from current apt repositories; enabling ppa:criu/ppa"
+    add-apt-repository -y ppa:criu/ppa
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y criu
+    ok "installed CRIU from ppa:criu/ppa"
+    return 0
+  fi
+
+  err "CRIU was not available from configured apt repositories"
+  err "Install CRIU manually for this distribution, then rerun ./setup check"
+  return 1
+}
+
 deps_ubuntu() {
   need_root
   if ! command -v apt-get >/dev/null 2>&1; then
@@ -213,12 +316,20 @@ deps_ubuntu() {
     exit 1
   fi
 
-  log "installing common Waypoint host dependencies with apt-get"
+  log "preparing apt dependencies"
   apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    ca-certificates \
+    curl \
+    software-properties-common \
+    tar
+
+  enable_ubuntu_universe
+
+  log "installing common Waypoint host dependencies with apt-get"
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     bash \
     buildah \
-    criu \
     gpgv \
     lsof \
     make \
@@ -227,11 +338,8 @@ deps_ubuntu() {
     rsync \
     util-linux
 
-  if command -v "$GO" >/dev/null 2>&1; then
-    ok "Go is already available: $("$GO" version)"
-  else
-    warn "Go is not installed. Install Go 1.25 or newer from https://go.dev/dl/ before building."
-  fi
+  install_criu
+  install_go
 }
 
 cmd="${1:-help}"

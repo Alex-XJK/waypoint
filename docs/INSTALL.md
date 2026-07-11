@@ -28,11 +28,7 @@ sudo make check
 
 ## Quick Start On Ubuntu/Debian
 
-Install Go 1.25 or newer first. The Ubuntu/Debian package repositories may not
-carry a new enough Go version, so the most predictable path is the official Go
-tarball from <https://go.dev/dl/>.
-
-Then from the Waypoint checkout:
+From the Waypoint checkout:
 
 ```bash
 sudo ./setup deps-ubuntu
@@ -41,9 +37,10 @@ sudo ./setup install
 sudo ./setup check
 ```
 
-`deps-ubuntu` intentionally changes system state with `apt-get`. It installs the
-common host packages needed by Waypoint itself and by the optional Dockerfile
-build path.
+`deps-ubuntu` intentionally changes system state. It installs common host packages,
+enables Ubuntu `universe`, falls back to `ppa:criu/ppa` when CRIU is unavailable
+from the configured apt sources, and installs the Go version from `go.mod` into
+`/usr/local/go` when `go` is missing or too old.
 
 ## What Gets Installed
 
@@ -82,7 +79,8 @@ Required for normal operation:
 
 Required for building from source:
 
-- Go 1.25 or newer
+- Go 1.25 or newer. `sudo ./setup deps-ubuntu` installs the version listed in
+  `go.mod` when `go` is missing or too old.
 
 Optional for `waypoint build`:
 

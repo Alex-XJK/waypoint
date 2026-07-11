@@ -75,7 +75,7 @@ binaries, install the CLI/helper pair, and run a root-level host check.
 git clone https://github.com/Alex-XJK/waypoint.git
 cd waypoint
 
-# Ubuntu/Debian helper for host packages. This mutates system state with apt-get.
+# Ubuntu/Debian helper for host packages, CRIU, and Go. This mutates system state.
 sudo make deps-ubuntu
 
 make build
