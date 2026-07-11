@@ -136,8 +136,8 @@ sudo criu check
 ```bash
 git clone https://github.com/Alex-XJK/waypoint.git
 cd waypoint
-go build -o waypoint cmd/waypoint/main.go
-go build -o bash_init cmd/bash-init/main.go
+go build -o waypoint ./cmd/waypoint
+go build -o bash_init ./cmd/bash-init
 ```
 
 #### Check Waypoint Version
@@ -274,13 +274,26 @@ Special options:
 sudo ./waypoint restore a1b2c3d4e5f6g7h8 checkpoint-name
 ```
 
-### 5. List Available Checkpoints
+### 5. List Available Sessions and Checkpoints
 
 ```bash
+sudo ./waypoint list
 sudo ./waypoint list a1b2c3d4e5f6g7h8
 ```
 
-### 6. Clean Up Session
+Without a session ID, `list` shows all recorded session IDs. With a session ID, it shows checkpoints for that session.
+
+### 6. Inspect System, Session, and Checkpoint Info
+
+```bash
+sudo ./waypoint info
+sudo ./waypoint info a1b2c3d4e5f6g7h8
+sudo ./waypoint info a1b2c3d4e5f6g7h8 checkpoint-name
+```
+
+The `info` command prints JSON for system/configuration details, a specific session, or a specific checkpoint.
+
+### 7. Clean Up Session
 
 ```bash
 sudo ./waypoint cleanup a1b2c3d4e5f6g7h8
