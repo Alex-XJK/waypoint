@@ -26,7 +26,7 @@ func main() {
 		fmt.Println("  exec <session> <command> [args...]           - Execute command in environment")
 		fmt.Println("  list <session>                               - List checkpoints")
 		fmt.Println("  cleanup <session> [--force]                  - Clean up session")
-		fmt.Println("  info                                         - Show system and configuration info")
+		fmt.Println("  info [session [checkpoint-id]]               - Show system, session, or checkpoint info")
 		fmt.Println("  version                                      - Show version")
 		fmt.Println()
 		fmt.Printf("Version: %s, DAPLab\n", Version)
@@ -272,11 +272,11 @@ func main() {
 		fmt.Printf("Session '%s' cleaned up successfully\n", sessionID)
 
 	case "info":
-		if len(os.Args) != 2 {
-			fmt.Println("Usage: info")
+		if len(os.Args) > 4 {
+			fmt.Println("Usage: info [session [checkpoint-id]]")
 			os.Exit(1)
 		}
-		if err := printInfo(); err != nil {
+		if err := printInfo(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "Error collecting info: %v\n", err)
 			os.Exit(1)
 		}

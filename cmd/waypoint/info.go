@@ -9,10 +9,23 @@ import (
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
 
-type infoOutput struct {
+type systemInfoOutput struct {
+	Type         string              `json:"type"`
 	Version      string              `json:"version"`
 	Config       waypoint.ConfigInfo `json:"config"`
 	Dependencies dependenciesInfo    `json:"dependencies"`
+}
+
+type sessionInfoOutput struct {
+	Type    string                `json:"type"`
+	Session *waypoint.SessionInfo `json:"session"`
+}
+
+type checkpointInfoOutput struct {
+	Type         string             `json:"type"`
+	SessionID    string             `json:"session_id"`
+	CheckpointID string             `json:"checkpoint_id"`
+	Metadata     *waypoint.Metadata `json:"metadata"`
 }
 
 type dependenciesInfo struct {
@@ -35,14 +48,30 @@ type overlayFSInfo struct {
 	Error         string `json:"error,omitempty"`
 }
 
-func printInfo() error {
+func printInfo(args []string) error {
+	var output any
+	var err error
+
+	switch len(args) {
+	case 0:
+		output = collectSystemInfo()
+	case 1:
+		output, err = collectSessionInfo(args[0])
+	case 2:
+		output, err = collectCheckpointInfo(args[0], args[1])
+	}
+	if err != nil {
+		return err
+	}
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	return enc.Encode(collectInfo())
+	return enc.Encode(output)
 }
 
-func collectInfo() infoOutput {
-	return infoOutput{
+func collectSystemInfo() systemInfoOutput {
+	return systemInfoOutput{
+		Type:    "system",
 		Version: Version,
 		Config:  waypoint.LoadConfigInfo(),
 		Dependencies: dependenciesInfo{
@@ -51,6 +80,30 @@ func collectInfo() infoOutput {
 			OverlayFS: inspectOverlayFS(),
 		},
 	}
+}
+
+func collectSessionInfo(sessionID string) (sessionInfoOutput, error) {
+	sessionInfo, err := waypoint.LoadSessionInfo(sessionID)
+	if err != nil {
+		return sessionInfoOutput{}, err
+	}
+	return sessionInfoOutput{
+		Type:    "session",
+		Session: sessionInfo,
+	}, nil
+}
+
+func collectCheckpointInfo(sessionID, checkpointID string) (checkpointInfoOutput, error) {
+	metadata, err := waypoint.LoadCheckpointMetadata(sessionID, checkpointID)
+	if err != nil {
+		return checkpointInfoOutput{}, err
+	}
+	return checkpointInfoOutput{
+		Type:         "checkpoint",
+		SessionID:    sessionID,
+		CheckpointID: checkpointID,
+		Metadata:     metadata,
+	}, nil
 }
 
 func inspectCommand(name string, versionArgs ...string) commandInfo {

@@ -101,6 +101,11 @@ func loadSessionInfo(sessionID string) (*SessionInfo, error) {
 	return &sessionInfo, err
 }
 
+// LoadSessionInfo returns persisted information for a checkpoint session.
+func LoadSessionInfo(sessionID string) (*SessionInfo, error) {
+	return loadSessionInfo(sessionID)
+}
+
 // Remove SessionInfo JSON file from the fixed-path global store
 func removeSessionInfo(sessionID string) error {
 	sessionFile := filepath.Join(SessionInfoDir, sessionID+".json")
