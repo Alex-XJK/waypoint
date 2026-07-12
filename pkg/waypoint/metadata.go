@@ -30,6 +30,24 @@ func (m *Manager) loadMetadata(checkpointID string) (*Metadata, error) {
 	return &metadata, err
 }
 
+// LoadCheckpointMetadata returns persisted metadata for a session checkpoint.
+func LoadCheckpointMetadata(sessionID, checkpointID string) (*Metadata, error) {
+	sessionInfo, err := loadSessionInfo(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	metadataPath := filepath.Join(sessionInfo.BaseDir, "metadata", checkpointID+".json")
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var metadata Metadata
+	err = json.Unmarshal(data, &metadata)
+	return &metadata, err
+}
+
 // syncManagerToSession updates the session info file with the current manager state
 func (m *Manager) syncManagerToSession() error {
 	err := saveSessionInfo(m.sessionID, m)
