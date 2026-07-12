@@ -283,7 +283,7 @@ func main() {
 		} else {
 			if err := manager.CleanupInteractive(); err != nil {
 				fmt.Printf("Error cleaning up session: %v\n", err)
-				fmt.Printf("Try: sudo ./waypoint cleanup %s --force\n", sessionID)
+				fmt.Printf("Try: sudo waypoint cleanup %s --force\n", sessionID)
 				os.Exit(1)
 			}
 		}
