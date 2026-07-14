@@ -1,8 +1,16 @@
 package waypoint
 
+// Live forks: the Fork record and its persistence, fork teardown, and the
+// client half of the exec protocol used to run commands in a fork's
+// persistent shell (the server half lives in cmd/bash-init).
+
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -47,21 +55,7 @@ type Fork struct {
 	LazyPages        bool       `json:"lazy_pages,omitempty"`
 }
 
-func (m *Manager) forksDir() string {
-	return filepath.Join(m.baseDir, "forks")
-}
-
-func (m *Manager) forkDir(forkID string) string {
-	return filepath.Join(m.forksDir(), forkID)
-}
-
-func (m *Manager) newForkID() (string, error) {
-	id, err := generateSessionID()
-	if err != nil {
-		return "", err
-	}
-	return "fork-" + id, nil
-}
+// --- fork record persistence ---
 
 func (m *Manager) saveFork(f *Fork) error {
 	if err := os.MkdirAll(f.RootDir, 0o755); err != nil {
@@ -75,16 +69,7 @@ func (m *Manager) saveFork(f *Fork) error {
 }
 
 func (m *Manager) loadFork(forkID string) (*Fork, error) {
-	path := filepath.Join(m.forkDir(forkID), ForkStateFile)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var f Fork
-	if err := json.Unmarshal(data, &f); err != nil {
-		return nil, err
-	}
-	return &f, nil
+	return loadForkFile(filepath.Join(m.forkDir(forkID), ForkStateFile))
 }
 
 func loadForkFile(path string) (*Fork, error) {
@@ -97,18 +82,6 @@ func loadForkFile(path string) (*Fork, error) {
 		return nil, err
 	}
 	return &f, nil
-}
-
-func readPIDFile(path string) (int, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, err
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return 0, fmt.Errorf("invalid pidfile %s: %w", path, err)
-	}
-	return pid, nil
 }
 
 func (m *Manager) ListForks() ([]*Fork, error) {
@@ -134,14 +107,17 @@ func (m *Manager) ListForks() ([]*Fork, error) {
 	return forks, nil
 }
 
+// newForkRecord builds the record for a fresh fork of a checkpoint. The fork
+// gets private upper/work/temp dirs; the canonical socket path is shared by
+// all forks because it is baked into the CRIU image.
 func newForkRecord(m *Manager, checkpointID string, metadata *Metadata, spec ForkSpec) (*Fork, error) {
 	forkID := spec.ID
 	if forkID == "" {
-		var err error
-		forkID, err = m.newForkID()
+		id, err := generateSessionID()
 		if err != nil {
 			return nil, err
 		}
+		forkID = "fork-" + id
 	}
 
 	rootDir := m.forkDir(forkID)
@@ -150,8 +126,7 @@ func newForkRecord(m *Manager, checkpointID string, metadata *Metadata, spec For
 	if originalDir == "" {
 		originalDir = m.originalDir
 	}
-	canonicalSocket := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.sock", m.sessionID))
-	socketPath := filepath.Join(tempDir, filepath.Base(canonicalSocket))
+	canonicalSocket := m.canonicalSocketPath()
 
 	return &Fork{
 		ID:               forkID,
@@ -165,7 +140,7 @@ func newForkRecord(m *Manager, checkpointID string, metadata *Metadata, spec For
 		TempDir:          tempDir,
 		CanonicalTempDir: filepath.Dir(canonicalSocket),
 		MountPoint:       m.workOverlay,
-		SocketPath:       socketPath,
+		SocketPath:       filepath.Join(tempDir, filepath.Base(canonicalSocket)),
 		CanonicalSocket:  canonicalSocket,
 		LogPath:          filepath.Join(rootDir, "restore.log"),
 		CriuPath:         m.checkpointCriuDir(checkpointID),
@@ -176,6 +151,8 @@ func newForkRecord(m *Manager, checkpointID string, metadata *Metadata, spec For
 	}, nil
 }
 
+// saveMainFork records the `main` fork right after `init --shell`; main is
+// just another fork, running directly on the session's work overlay.
 func (m *Manager) saveMainFork(pid int, socketPath, canonicalSocket, logPath string) error {
 	rootDir := m.forkDir(MainForkID)
 	f := &Fork{
@@ -195,4 +172,174 @@ func (m *Manager) saveMainFork(pid int, socketPath, canonicalSocket, logPath str
 		Status:          ForkStatusRunning,
 	}
 	return m.saveFork(f)
+}
+
+// --- fork lifecycle ---
+
+func (m *Manager) DestroyFork(forkID string) error {
+	return m.withForkLock(forkID, func() error {
+		f, err := m.loadFork(forkID)
+		if err != nil {
+			return err
+		}
+		f.Status = ForkStatusDestroyed
+		if err := m.saveFork(f); err != nil {
+			return err
+		}
+		if f.PID > 0 {
+			if err := killProcess(f.PID); err != nil {
+				return err
+			}
+		}
+		_ = os.Remove(f.SocketPath)
+		return os.RemoveAll(f.RootDir)
+	})
+}
+
+// ExecuteForkCommand runs one shell command string in the fork's persistent
+// shell. Extra args are joined with spaces into the command string, so the
+// payload is always a single bash input, not an argv.
+func (m *Manager) ExecuteForkCommand(forkID, command string, args ...string) (*ExecResult, error) {
+	var result *ExecResult
+	err := m.withForkLock(forkID, func() error {
+		f, err := m.loadFork(forkID)
+		if err != nil {
+			return err
+		}
+		if f.Status != ForkStatusRunning {
+			return fmt.Errorf("fork %s is not running (status=%s)", forkID, f.Status)
+		}
+		commandString := command
+		if len(args) > 0 {
+			commandString += " " + strings.Join(args, " ")
+		}
+		commandString += "\n"
+		var execErr error
+		result, execErr = execCommand(f.SocketPath, commandString)
+		if errors.Is(execErr, ErrForkShellDead) {
+			f.Status = ForkStatusFailed
+			_ = m.saveFork(f)
+		}
+		return execErr
+	})
+	return result, err
+}
+
+// --- exec protocol client ---
+
+// ErrForkShellDead reports that the fork's shell process is gone (the
+// command ran `exit`, or bash crashed); the fork is no longer usable.
+var ErrForkShellDead = errors.New("fork shell has exited")
+
+// ExecResult is the outcome of one command executed in a fork's shell.
+type ExecResult struct {
+	Output   string
+	ExitCode int
+	TimedOut bool
+}
+
+// clientReadTimeout bounds how long the client waits for a response. Command
+// lifetime is otherwise controlled by the server: if this client goes away,
+// the server terminates the command's foreground process group.
+const clientReadTimeout = 24 * time.Hour
+
+// execCommand sends one command to a fork's bash_init socket and parses the
+// response. Protocol v2 responses carry a "WP2 <status> <exit-code>" header
+// line; anything else is treated as v1 raw output (a bash_init checkpointed
+// before the protocol change), with the exit code unknown.
+func execCommand(socketPath, command string) (*ExecResult, error) {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to shell socket: %w", err)
+	}
+	defer conn.Close()
+
+	writer := bufio.NewWriter(conn)
+	if _, err := fmt.Fprintf(writer, "%d\n%s", len(command), command); err != nil {
+		return nil, fmt.Errorf("failed to send command: %w", err)
+	}
+	if err := writer.Flush(); err != nil {
+		return nil, fmt.Errorf("failed to send command: %w", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(clientReadTimeout))
+	reader := bufio.NewReader(conn)
+	header, headerErr := reader.ReadString('\n')
+
+	if status, code, ok := parseResponseHeader(header); ok {
+		rest, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read command output: %w", err)
+		}
+		if status == "dead" {
+			return nil, fmt.Errorf("%w; the fork is no longer usable (output: %q)", ErrForkShellDead, string(rest))
+		}
+		return &ExecResult{
+			Output:   string(rest),
+			ExitCode: code,
+			TimedOut: status == "timeout",
+		}, nil
+	}
+
+	// v1 fallback: the whole stream is output.
+	if headerErr != nil && headerErr != io.EOF {
+		return nil, fmt.Errorf("failed to read command output: %w", headerErr)
+	}
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read command output: %w", err)
+	}
+	return &ExecResult{Output: header + string(rest)}, nil
+}
+
+func parseResponseHeader(line string) (status string, code int, ok bool) {
+	fields := strings.Fields(line)
+	if len(fields) != 3 || fields[0] != "WP2" {
+		return "", 0, false
+	}
+	code, err := strconv.Atoi(fields[2])
+	if err != nil {
+		return "", 0, false
+	}
+	return fields[1], code, true
+}
+
+// --- small shared helpers ---
+
+func readPIDFile(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, fmt.Errorf("invalid pidfile %s: %w", path, err)
+	}
+	return pid, nil
+}
+
+// socketPathThroughProcRoot rewrites a fork's canonical socket path so the
+// host can dial it through the fork's mount namespace.
+func socketPathThroughProcRoot(pid int, canonicalSocket string) string {
+	return filepath.Join("/proc", strconv.Itoa(pid), "root", strings.TrimPrefix(canonicalSocket, string(filepath.Separator)))
+}
+
+func dialUnixSocket(path string, timeout time.Duration) error {
+	conn, err := net.DialTimeout("unix", path, timeout)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+func waitForForkSocket(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if lastErr = dialUnixSocket(path, 100*time.Millisecond); lastErr == nil {
+			return nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return fmt.Errorf("socket %s did not become dialable: %v", path, lastErr)
 }

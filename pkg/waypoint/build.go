@@ -1,13 +1,14 @@
 package waypoint
 
-// Dockerfile-based build process
+// Environment building: buildah-based rootfs builds from a Dockerfile, and
+// StartShell, which stages bash_init into the overlay and launches it in
+// fresh namespaces. Includes the ldd-based dependency-staging helpers.
 
 import (
 	"bufio"
 	"bytes"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,49 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+// BuildEnvironment builds a rootfs from a Dockerfile, mounts the session
+// overlay on top of it, and starts the shell inside.
+func (m *Manager) BuildEnvironment(dockerfileDir string, quiet bool) (string, int, error) {
+	originalDir := filepath.Join(m.baseDir, "original")
+
+	// Ensure originalDir is clean
+	if err := os.RemoveAll(originalDir); err != nil {
+		return "", 0, fmt.Errorf("failed to clean original directory: %w", err)
+	}
+	if err := os.MkdirAll(originalDir, 0755); err != nil {
+		return "", 0, fmt.Errorf("failed to create original directory: %w", err)
+	}
+
+	// Build from Dockerfile to create a virtual system environment
+	if err := BuildFromDockerfile(dockerfileDir, originalDir, quiet); err != nil {
+		return "", 0, fmt.Errorf("failed to build from Dockerfile: %w", err)
+	}
+	if err := PrepareNetworkDeps(originalDir); err != nil {
+		return "", 0, fmt.Errorf("failed to prepare network: %w", err)
+	}
+
+	m.originalDir = originalDir
+
+	// Initialize overlay environment on top of it
+	workDir, err := m.InitEnvironment(originalDir)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to initialize overlay environment: %w", err)
+	}
+
+	// Launch new chroot-embedded bash_init in background to set up the environment
+	pid, _, err := m.StartShell(workDir)
+	if err != nil {
+		return workDir, pid, fmt.Errorf("failed to start shell in environment: %w", err)
+	}
+
+	// Update session info with originalDir, workOverlay, shell PID, and socket path
+	if err := updateSessionEnvironment(m.sessionID, m.originalDir, m.workOverlay); err != nil {
+		return workDir, pid, fmt.Errorf("failed to update session info: %w", err)
+	}
+
+	return workDir, pid, nil
+}
 
 func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool) error {
 	lowercaseBasename := strings.ToLower(filepath.Base(dockerfileDir))
@@ -97,7 +141,12 @@ func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool) error {
 	}
 
 	// 6. Ensure basic char devices exist
-	devDir := filepath.Join(workspaceDir, "dev")
+	return prepareDevNodes(filepath.Join(workspaceDir, "dev"))
+}
+
+// prepareDevNodes creates the minimal /dev the environment needs: a
+// world-writable sticky /dev/shm and the basic character devices.
+func prepareDevNodes(devDir string) error {
 	if err := os.MkdirAll(devDir, 0755); err != nil {
 		return fmt.Errorf("failed to create dev directory: %w", err)
 	}
@@ -121,53 +170,48 @@ func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool) error {
 	}
 	_ = os.Chown(shmDir, 0, 0)
 
-	type devSpec struct {
-		name  string
-		major uint32
-		minor uint32
-		perm  os.FileMode
-	}
-	devices := []devSpec{
+	devices := []struct {
+		name         string
+		major, minor uint32
+		perm         os.FileMode
+	}{
 		{"null", 1, 3, 0o666},
 		{"zero", 1, 5, 0o666},
 		{"random", 1, 8, 0o666},
 		{"urandom", 1, 9, 0o666},
 	}
-
-	// Helper to (re)create a char device with given major/minor
-	makeChar := func(path string, major, minor uint32, perm os.FileMode) error {
-		// Remove existing non-char file
-		if fi, err := os.Lstat(path); err == nil {
-			if fi.Mode()&os.ModeDevice == 0 || fi.Mode()&os.ModeCharDevice == 0 {
-				if rmErr := os.Remove(path); rmErr != nil {
-					return fmt.Errorf("failed to remove existing %s: %w", path, rmErr)
-				}
-			}
-		}
-		// Create node if missing
-		if _, err := os.Lstat(path); os.IsNotExist(err) {
-			dev := unix.Mkdev(major, minor)
-			mode := uint32(unix.S_IFCHR | uint32(perm&0o777))
-			if err := unix.Mknod(path, mode, int(dev)); err != nil {
-				return fmt.Errorf("mknod %s failed (major=%d minor=%d): %w", path, major, minor, err)
-			}
-		}
-		// Ensure permissions are as requested (umask-safe)
-		if err := os.Chmod(path, perm); err != nil {
-			return fmt.Errorf("chmod %s failed: %w", path, err)
-		}
-		// Ensure ownership root:root (best-effort)
-		_ = os.Chown(path, 0, 0)
-		return nil
-	}
-
 	for _, d := range devices {
-		p := filepath.Join(devDir, d.name)
-		if err := makeChar(p, d.major, d.minor, d.perm); err != nil {
+		if err := makeCharDevice(filepath.Join(devDir, d.name), d.major, d.minor, d.perm); err != nil {
 			return err
 		}
 	}
+	return nil
+}
 
+// makeCharDevice (re)creates a character device node with the given major/minor.
+func makeCharDevice(path string, major, minor uint32, perm os.FileMode) error {
+	// Remove existing non-char file
+	if fi, err := os.Lstat(path); err == nil {
+		if fi.Mode()&os.ModeDevice == 0 || fi.Mode()&os.ModeCharDevice == 0 {
+			if rmErr := os.Remove(path); rmErr != nil {
+				return fmt.Errorf("failed to remove existing %s: %w", path, rmErr)
+			}
+		}
+	}
+	// Create node if missing
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		dev := unix.Mkdev(major, minor)
+		mode := uint32(unix.S_IFCHR | uint32(perm&0o777))
+		if err := unix.Mknod(path, mode, int(dev)); err != nil {
+			return fmt.Errorf("mknod %s failed (major=%d minor=%d): %w", path, major, minor, err)
+		}
+	}
+	// Ensure permissions are as requested (umask-safe)
+	if err := os.Chmod(path, perm); err != nil {
+		return fmt.Errorf("chmod %s failed: %w", path, err)
+	}
+	// Ensure ownership root:root (best-effort)
+	_ = os.Chown(path, 0, 0)
 	return nil
 }
 
@@ -216,25 +260,24 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 		return ShellNotEnabled, "", err
 	}
 
-	// Locate bash_init binary
+	// Locate bash_init binary and stage it inside the overlay
 	bashInitSrc := DefaultBashInitSrc
 	if _, err := os.Stat(bashInitSrc); os.IsNotExist(err) {
 		return ShellNotEnabled, "", fmt.Errorf("bash_init binary not found at %s", bashInitSrc)
 	}
-	namespacedBashInit := filepath.Join(workDir, ".waypoint", "bash_init")
-	if err := copyFile(bashInitSrc, namespacedBashInit); err != nil {
+	if err := copyFile(bashInitSrc, filepath.Join(workDir, ".waypoint", "bash_init")); err != nil {
 		return ShellNotEnabled, "", fmt.Errorf("failed to stage bash_init in session root: %w", err)
 	}
-	if err := stageBashInitRuntimeDeps(workDir, bashInitSrc); err != nil {
-		return ShellNotEnabled, "", err
+	if err := stageRuntimeDeps(workDir, bashInitSrc); err != nil {
+		return ShellNotEnabled, "", fmt.Errorf("failed to stage bash_init runtime dependencies: %w", err)
 	}
 
-	canonicalSocketPath := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.sock", m.sessionID))
+	canonicalSocketPath := m.canonicalSocketPath()
 	hostSocketPath := filepath.Join(workDir, strings.TrimPrefix(canonicalSocketPath, string(filepath.Separator)))
 	if err := os.MkdirAll(filepath.Dir(hostSocketPath), 0o777); err != nil {
 		return ShellNotEnabled, "", fmt.Errorf("failed to create shell socket directory: %w", err)
 	}
-	logPath := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.log", m.sessionID))
+	logPath := m.shellLogPath()
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return ShellNotEnabled, "", fmt.Errorf("failed to create shell log directory: %w", err)
 	}
@@ -247,7 +290,7 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	// A rootfs with bash but without its shared libraries (libtinfo etc.)
 	// produces a shell that dies after startup; heal from the host when the
 	// libraries resolve there.
-	if err := stageRootBinaryRuntimeDeps(workDir, "/bin/bash"); err != nil {
+	if err := stageRuntimeDeps(workDir, bashPath); err != nil {
 		return ShellNotEnabled, "", fmt.Errorf("failed to stage bash runtime dependencies: %w", err)
 	}
 
@@ -307,35 +350,6 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	return m.shellPid, m.shellSocket, nil
 }
 
-func stageBashInitRuntimeDeps(rootfs, bashInitSrc string) error {
-	deps, err := lddPaths(bashInitSrc)
-	if err != nil {
-		return fmt.Errorf("failed to inspect bash_init runtime dependencies: %w", err)
-	}
-	for _, dep := range deps {
-		if err := copyIfBlank(rootfs, dep); err != nil {
-			return fmt.Errorf("failed to stage bash_init dependency %s: %w", dep, err)
-		}
-	}
-	return nil
-}
-
-// stageRootBinaryRuntimeDeps copies host-resolved shared-library
-// dependencies of a rootfs binary into the rootfs where they are missing.
-func stageRootBinaryRuntimeDeps(rootfs, binaryPath string) error {
-	rootedBinary := filepath.Join(rootfs, strings.TrimPrefix(binaryPath, string(filepath.Separator)))
-	deps, err := lddPaths(rootedBinary)
-	if err != nil {
-		return fmt.Errorf("failed to inspect %s runtime dependencies: %w", binaryPath, err)
-	}
-	for _, dep := range deps {
-		if err := copyIfBlank(rootfs, dep); err != nil {
-			return fmt.Errorf("failed to stage dependency %s for %s: %w", dep, binaryPath, err)
-		}
-	}
-	return nil
-}
-
 func waitForShellSocket(path string, waitCh <-chan error, logPath string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
@@ -362,14 +376,6 @@ func waitForShellSocket(path string, waitCh <-chan error, logPath string, timeou
 	}
 }
 
-func dialUnixSocket(path string, timeout time.Duration) error {
-	conn, err := net.DialTimeout("unix", path, timeout)
-	if err != nil {
-		return err
-	}
-	return conn.Close()
-}
-
 func readRecentFile(path string, maxBytes int) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -384,21 +390,29 @@ func readRecentFile(path string, maxBytes int) string {
 	return string(data)
 }
 
+// --- dependency staging (ldd -> copy libs into the rootfs) ---
+
+// stageRuntimeDeps copies host-resolved shared-library dependencies of a
+// binary into the rootfs where they are missing. The binary may be a host
+// path or live inside the rootfs.
+func stageRuntimeDeps(rootfs, binaryPath string) error {
+	deps, err := lddPaths(binaryPath)
+	if err != nil {
+		return fmt.Errorf("failed to inspect %s runtime dependencies: %w", binaryPath, err)
+	}
+	for _, dep := range deps {
+		if err := copyIfBlank(rootfs, dep); err != nil {
+			return fmt.Errorf("failed to stage dependency %s for %s: %w", dep, binaryPath, err)
+		}
+	}
+	return nil
+}
+
 func ensureBinAndDeps(rootfs, bin string) error {
 	if err := copyIfBlank(rootfs, bin); err != nil {
 		return err
 	}
-
-	deps, err := lddPaths(bin)
-	if err != nil {
-		return err
-	}
-	for _, dep := range deps {
-		if err := copyIfBlank(rootfs, dep); err != nil {
-			return err
-		}
-	}
-	return nil
+	return stageRuntimeDeps(rootfs, bin)
 }
 
 func lddPaths(bin string) ([]string, error) {
@@ -436,6 +450,8 @@ func lddPaths(bin string) ([]string, error) {
 	return deps, s.Err()
 }
 
+// copyIfBlank copies a host file to the same path inside the rootfs if the
+// destination is missing or empty.
 func copyIfBlank(rootfs, hostAbs string) error {
 	if _, err := os.Stat(hostAbs); err != nil {
 		return nil
@@ -476,47 +492,4 @@ func isMissingOrBlank(path string) bool {
 		return true
 	}
 	return len(bytes.TrimSpace(data)) == 0
-}
-
-func (m *Manager) BuildEnvironment(dockerfileDir string, quiet bool) (string, int, error) {
-	originalDir := filepath.Join(m.baseDir, "original")
-
-	// Ensure originalDir is clean
-	if err := os.RemoveAll(originalDir); err != nil {
-		return "", 0, fmt.Errorf("failed to clean original directory: %w", err)
-	}
-	if err := os.MkdirAll(originalDir, 0755); err != nil {
-		return "", 0, fmt.Errorf("failed to create original directory: %w", err)
-	}
-
-	// Build from Dockerfile to create a virtual system environment
-	buildahErr := BuildFromDockerfile(dockerfileDir, originalDir, quiet)
-	if buildahErr != nil {
-		return "", 0, fmt.Errorf("failed to build from Dockerfile: %w", buildahErr)
-	}
-	if pndErr := PrepareNetworkDeps(originalDir); pndErr != nil {
-		return "", 0, fmt.Errorf("failed to prepare network: %w", pndErr)
-	}
-
-	// Now that we have a built environment ready.
-	m.originalDir = originalDir
-
-	// Initialize overlay environment on top of it
-	workDir, overlayErr := m.InitEnvironment(originalDir)
-	if overlayErr != nil {
-		return "", 0, fmt.Errorf("failed to initialize overlay environment: %w", overlayErr)
-	}
-
-	// Launch new chroot-embedded bash_init in background to set up the environment
-	pid, _, err := m.StartShell(workDir)
-	if err != nil {
-		return workDir, pid, fmt.Errorf("failed to start shell in environment: %w", err)
-	}
-
-	// Update session info with originalDir, workOverlay, shell PID, and socket path
-	if err := updateSessionEnvironment(m.sessionID, m.originalDir, m.workOverlay); err != nil {
-		return workDir, pid, fmt.Errorf("failed to update session info: %w", err)
-	}
-
-	return workDir, pid, nil
 }

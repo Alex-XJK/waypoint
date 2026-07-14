@@ -71,63 +71,47 @@ Two binaries, one library:
 
 ## File-by-file (`pkg/waypoint`)
 
-**Types & configuration**
-- `types.go` — `Manager` (the central handle: session paths + shell PID/socket),
-  `Metadata` (checkpoint record: `ParentID`, `LayerIDs`, `PID`, `Status`),
-  `SessionInfo` (global registry entry), status enums, constants, and
-  `loadConfig` (env/file overrides for sessions dir, bash_init path).
-- `paths.go` — pure path helpers (`checkpointDir`, `forkDir`, lock paths, ...).
-
-**Session lifecycle**
-- `session.go` — `NewManagerWithSession` (mint a session), `LoadManager`
-  (rehydrate one by ID), and the global session registry read/write under
-  `/tmp/waypoint-sessions-info/`.
-- `manager.go` — `NewManager` (directory scaffolding), `ListCheckpoints`, and
-  the three `Cleanup*` variants (graceful, forced, interactive).
-- `metadata.go` — checkpoint metadata JSON read/write + session-env update.
-
-**Filesystem (the CoW layer)**
-- `filesystem.go` — `InitEnvironment` (first overlay mount for `main`),
-  `mountOverlay`, runtime pseudo-fs mounts (`/proc`, `/sys`), the force-unmount
-  machinery, and `buildOverlayLayers` (turn a `LayerIDs` chain into ordered
-  overlay lowerdirs: newest checkpoint first, original rootfs last).
-
-**Memory (CRIU dump side)**
-- `memory.go` — `createMemoryCheckpoint` builds the `criu dump` command,
-  including the `--external mnt[...]:waypoint-work` mapping so CRIU treats the
-  overlay as externally managed.
-- `criu.go` — `EnsureCriuCompatible`: refuses to run on ARM64 PAC hosts with
-  CRIU < 4.0 (see the PAC story in `parallel-fork-runtime-bugs.md`).
-
-**Forks & materialization (the core)**
-- `fork.go` — the `Fork` record (paths, socket, PID, status) and its
-  persistence; `newForkRecord` (a fresh fork off a checkpoint) and
-  `saveMainFork` (record `main` after `init --shell`).
-- `materializer.go` — the heart. The `Materializer` interface + `CRIUMaterializer`:
+- `manager.go` — the `Manager` handle and everything session-level:
+  configuration (`loadConfig`: env/file overrides for sessions dir, bash_init
+  path), `NewManagerWithSession` (mint a session), `LoadManager` (rehydrate one
+  by ID), the global session registry under `/tmp/waypoint-sessions-info/`, the
+  on-disk layout (path helpers), `flock`-based `withSessionLock` /
+  `withForkLock` (cross-process, because each CLI invocation is a separate
+  process), `atomicWriteFile`, and `ListSession` / `SessionListing` (the stable
+  `list --json` shape).
+- `checkpoint.go` — immutable checkpoints: `Metadata` (checkpoint record:
+  `ParentID`, `LayerIDs`, `PID`, `Status`) and its JSON persistence, plus the
+  `Materializer` interface + `CRIUMaterializer`:
   - `Materialize` — checkpoint -> new live fork (allocate record under the
     session lock, then restore under the fork lock).
-  - `runRestoreHelper` / `RunForkRestoreChildFromArgs` / `restoreForkChild` —
-    re-exec into fresh mount/net/IPC namespaces, mount this fork's overlay at
-    the canonical path, and `criu restore` the image.
   - `snapshotFork` — dump the fork, seal its upper into a checkpoint, rebase the
     fork onto the new checkpoint.
-  - `ExecuteForkCommand` — run one command in a fork (dials the socket via
-    `exec.go`), `DestroyFork` — tear one fork down.
-- `list.go` — `ListSession` / `SessionListing`: the stable `list --json` shape.
-
-**Command transport**
-- `exec.go` — the client half of the exec protocol: dial the fork's socket,
-  send a length-prefixed command, parse the `WP2 <status> <code>` response
-  (with v1 fallback). Server half lives in `cmd/bash-init`.
-
-**Concurrency & building**
-- `lock.go` — `flock`-based `withSessionLock` / `withForkLock` (cross-process,
-  because each CLI invocation is a separate process) + `atomicWriteFile`.
+- `fork.go` — live forks: the `Fork` record (paths, socket, PID, status) and
+  its persistence; `newForkRecord` (a fresh fork off a checkpoint),
+  `saveMainFork` (record `main` after `init --shell`), `DestroyFork`; and the
+  client half of the exec protocol (`ExecuteForkCommand` -> `execCommand`: dial
+  the fork's socket, send a length-prefixed command, parse the
+  `WP2 <status> <code>` response with v1 fallback). Server half lives in
+  `cmd/bash-init`.
+- `criu.go` — every criu(8) interaction: `EnsureCriuCompatible` (refuses to
+  run on ARM64 PAC hosts with CRIU < 4.0; see the PAC story in
+  `parallel-fork-runtime-bugs.md`); `createMemoryCheckpoint` (the `criu dump`
+  command, including the `--external mnt[...]:waypoint-work` mapping so CRIU
+  treats the overlay as externally managed); and the restore side —
+  `runRestoreHelper` / `RunForkRestoreChildFromArgs` / `restoreForkChild`
+  re-exec into fresh mount/net/IPC namespaces, mount this fork's overlay at
+  the canonical path, and `criu restore` the image.
+- `overlay.go` — the CoW layer: `InitEnvironment` (first overlay mount for
+  `main`), the single `mountOverlay` used both on the host and inside a
+  restore child's namespace, runtime pseudo-fs mounts (`/proc`, `/sys`), and
+  `overlayLowerDirs` (turn a `LayerIDs` chain into ordered overlay lowerdirs:
+  newest checkpoint first, original rootfs last).
+- `cleanup.go` — the three `Cleanup*` variants (graceful, forced, interactive),
+  process existence/kill helpers, and the force-cleanup crew
+  (`lsof`/`fuser`/`findmnt`-based).
 - `build.go` — `StartShell` (stage `bash_init` into the overlay and launch it
   namespaced), `BuildEnvironment` / `BuildFromDockerfile` (buildah-based rootfs
   build), and dependency-staging helpers (`ldd` -> copy libs into rootfs).
-- `process.go` — process existence/kill helpers and the force-cleanup crew
-  (`lsof`/`fuser`/`findmnt`-based).
 
 ## On-disk layout
 
@@ -162,10 +146,10 @@ upperdir = forks/<fork>/upper      (private, writable)
 
 ```
 CLI (main.go)
-  -> NewManagerWithSession                 (session.go)
+  -> NewManagerWithSession                 (manager.go)
        mint session ID
        scaffold <sessions>/<session>/ + global session registry
-  -> Manager.InitEnvironment(rootfs)        (filesystem.go)
+  -> Manager.InitEnvironment(rootfs)        (overlay.go)
        create forks/main/{upper,work,temp}
        mount overlay at <session>/work:
          lowerdir = <original rootfs>
@@ -222,7 +206,7 @@ view in its own mount namespace.
 
 ```
 CLI (main.go)
-  -> Manager.ForkCheckpoint            (materializer.go)
+  -> Manager.ForkCheckpoint            (checkpoint.go)
        EnsureCriuCompatible            (criu.go)
        LoadCheckpoint A                (metadata + paths)
        CRIUMaterializer.Materialize:
@@ -230,7 +214,7 @@ CLI (main.go)
          withForkLock:
            runRestoreHelper -> re-exec `__waypoint_restore_fork_child`
              new NEWNS|NEWNET|NEWIPC namespaces          (restoreForkChild)
-             mount f1's overlay at <session>/work        (mountOverlayAt)
+             mount f1's overlay at <session>/work        (mountOverlay)
              bring loopback up
              criu restore --restore-detached --pidfile   (CRIU rebuilds pidns)
            read restored PID, rewrite socket to /proc/<pid>/root/...
@@ -241,10 +225,10 @@ CLI (main.go)
 
 ```
 CLI (main.go)
-  -> Manager.ExecuteForkCommand        (materializer.go)
+  -> Manager.ExecuteForkCommand        (fork.go)
        withForkLock (serializes same-fork commands):
          load fork.json, check status == running
-         execCommand(socket, "echo hi\n")               (exec.go)
+         execCommand(socket, "echo hi\n")               (fork.go)
            -> bash_init handleClient                    (cmd/bash-init)
                 inject command into PTY + a completion printf to the FIFO
                 read exit code off /.waypoint/exec.done
