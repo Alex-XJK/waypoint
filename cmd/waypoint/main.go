@@ -47,6 +47,7 @@ func main() {
 		fmt.Println("  destroy <session> <fork-id>                  - Destroy a live fork")
 		fmt.Println("  list <session> [--json]                      - List checkpoints and forks")
 		fmt.Println("  cleanup <session> [--force]                  - Clean up session")
+		fmt.Println("  info [session [checkpoint-id]]               - Show system, session, or checkpoint info")
 		fmt.Println("  version                                      - Show version")
 		fmt.Println()
 		fmt.Printf("Version: %s, DAPLab\n", Version)
@@ -329,10 +330,28 @@ func main() {
 		printExecResult(result)
 
 	case "list":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: list <session> [--json]")
+		if len(os.Args) > 4 {
+			fmt.Println("Usage: list [session] [--json]")
 			os.Exit(1)
 		}
+
+		if len(os.Args) == 2 {
+			sessions, err := waypoint.ListSessions()
+			if err != nil {
+				fmt.Printf("Error listing sessions: %v\n", err)
+				os.Exit(1)
+			}
+			if len(sessions) == 0 {
+				fmt.Println("No sessions found")
+			} else {
+				fmt.Println("Available sessions:")
+				for _, session := range sessions {
+					fmt.Printf("  %s\n", session)
+				}
+			}
+			break
+		}
+
 		sessionID := os.Args[2]
 		asJSON := len(os.Args) > 3 && os.Args[3] == "--json"
 
@@ -394,11 +413,21 @@ func main() {
 		} else {
 			if err := manager.CleanupInteractive(); err != nil {
 				fmt.Printf("Error cleaning up session: %v\n", err)
-				fmt.Printf("Try: sudo ./waypoint cleanup %s --force\n", sessionID)
+				fmt.Printf("Try: sudo waypoint cleanup %s --force\n", sessionID)
 				os.Exit(1)
 			}
 		}
 		fmt.Printf("Session '%s' cleaned up successfully\n", sessionID)
+
+	case "info":
+		if len(os.Args) > 4 {
+			fmt.Println("Usage: info [session [checkpoint-id]]")
+			os.Exit(1)
+		}
+		if err := printInfo(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error collecting info: %v\n", err)
+			os.Exit(1)
+		}
 
 	case "version", "--version", "-v":
 		fmt.Printf("waypoint version %s\n", Version)

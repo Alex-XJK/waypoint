@@ -1,4 +1,4 @@
-# Waypoint
+# <img src="./docs/Waypoint-logo-notext.png" height="30" /> Waypoint
 
 A lightweight checkpoint/restore tool that captures both filesystem and memory state with minimal overhead. 
 Built on top of CRIU and OverlayFS for fast, isolated process state management.
@@ -14,6 +14,7 @@ on minimal overhead by directly orchestrating existing kernel features and redes
 ### Key Features
 
 - **Hybrid State Capture**: Combines filesystem (OverlayFS) and memory (CRIU) checkpointing
+- **Parallel Forking**: Non-destructively materialize many live, independently mutable forks from one immutable checkpoint
 - **Terminal Session Support**: Preserves live terminal sessions and their state across checkpoints
 - **Multi-Session Support**: Concurrent usage by multiple applications with isolated sessions
 - **Minimal Overhead**: Direct system calls without unnecessary container abstractions
@@ -63,15 +64,46 @@ See [our architecture decision record](./docs/tech_selection_note.md) for more d
 
 ## Installation 🔧
 
-### Prerequisites
+Waypoint can be installed either through the project setup targets or manually.
+For full details, see [Installing Waypoint](./docs/INSTALL.md).
+
+### Scripted Setup (Recommended)
+
+This path uses the repository `Makefile` to install system packages, build the
+binaries, install the CLI/helper pair, and run a root-level host check.
+
+```bash
+git clone https://github.com/Alex-XJK/waypoint.git
+cd waypoint
+
+# Ubuntu/Debian helper for host packages, CRIU, and Go. This mutates system state.
+sudo make deps-ubuntu
+
+make build
+make test
+sudo make install
+sudo make check
+
+waypoint version
+```
+
+If you do not want to use `make`, the `./setup` script provides equivalent
+commands, such as `./setup build`, `sudo ./setup install`, and
+`sudo ./setup check`.
+
+### Manual Installation
+
+#### Prerequisites
 
 - Linux system with root privileges
-- CRIU installed and configured
+- CRIU installed and configured, including the `criu` and `crit` commands
 - OverlayFS support (most modern Linux distributions)
 - Go 1.25 or the version listed in `go.mod` (for building from source)
-- Optional: `buildah` for the build from Dockerfile approach (since v0.5.0)
+- Host utilities used by Waypoint: `mount`, `umount`, `findmnt`, `lsof`, `fuser`, `ps`, `bash`, and `ldd`
+- Optional: `buildah`, `rsync`, and `gpgv` for the build from Dockerfile approach (since v0.5.0)
 
-### Install Go (just for reference)
+#### Install Go (just for reference)
+
 ```bash
 # Install Go (version 1.25.0)
 wget https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
@@ -89,7 +121,7 @@ source ~/.bashrc
 go version
 ```
 
-### Install CRIU
+#### Install CRIU
 
 ```bash
 # Ubuntu/Debian
@@ -100,20 +132,27 @@ sudo apt-get install criu
 sudo criu check
 ```
 
-### Build from Source
+#### Build from Source
 
 ```bash
 git clone https://github.com/Alex-XJK/waypoint.git
 cd waypoint
-go build -o waypoint cmd/waypoint/main.go
-go build -o bash_init cmd/bash-init/main.go
+go build -o waypoint ./cmd/waypoint
+go build -o bash_init ./cmd/bash-init
 ```
 
-### Check Waypoint Version
+#### Check Waypoint Version
 
 ```bash
 ./waypoint version
 # Output: waypoint version v0.6.0
+```
+
+You can also run the root-level host check from the setup script after manual
+installation:
+
+```bash
+sudo ./setup check
 ```
 
 ## Usage 🗂
@@ -192,7 +231,7 @@ in his TBench integration for v0.2.0.
 
 ### 2. Run Your Application
 
-#### 2.1. Manual Execution
+#### 2.1. Manual Execution (not recommended)
 
 The simplest way is to just run your application in the provided work directory.
 
@@ -202,48 +241,73 @@ cd /tmp/waypoint-sessions/a1b2c3d4e5f6g7h8/work
 # Note the PID, e.g., 1234
 ```
 
-#### 2.2. Execute Shell Commands
+#### 2.2. Execute Shell Commands in a Fork
 
-Since v0.3.0, you can also execute shell commands directly in the managed environment.
-
-Since v0.5.0, if you used the `--shell` option during initialization or the `build` command, we provide you with an isolated
-shell session in the managed environment. You can directly run your bash commands there without worrying about the workspace isolation.
+Initializing with `--shell` (or using `build`) gives you a live, isolated shell
+called the `main` fork. You run commands in a fork with `exec`, and the fork
+keeps its shell state (cwd, environment variables, background jobs) across calls:
 
 ```bash
-sudo ./waypoint exec a1b2c3d4e5f6g7h8 cat hello_world.txt
+sudo ./waypoint exec a1b2c3d4e5f6g7h8 main -- cat hello_world.txt
+sudo ./waypoint exec a1b2c3d4e5f6g7h8 main -- 'cd /app; export ENV_VAR=start'
 ```
 
-Note that the `exec` command can be used all the time, regardless of whether you started a shell session or not.
+Everything after `--` is a single bash command line. `exec` exits with the
+command's own exit code, so it composes like `ssh`/`docker exec`. Commands on
+the same fork serialize; commands on different forks run concurrently.
 
-If you have a shell session, the `exec` command will execute using a long-running shell session, and will be able to preserve
-state across multiple `exec` calls and also across checkpoints.
-If you don't have a shell session, the `exec` will simply help you execute the command in the correct workspace.
+### 3. Checkpoint a Fork
 
-### 3. Create Checkpoints
+A checkpoint is an immutable snapshot of a fork's filesystem and memory. Use
+`checkpoint` to snapshot the `main` fork into a named checkpoint:
 
 ```bash
-sudo ./waypoint create a1b2c3d4e5f6g7h8 checkpoint-name 1234
+sudo ./waypoint checkpoint a1b2c3d4e5f6g7h8 checkpoint-name
 ```
 
-Special options:
-- Since v0.2.0, if you want to create a checkpoint without the memory state, you can set the PID to `-1`. 
-  - However, this should only be used if you are sure that the application does not relate to the managed directory, or you are not running any application at all and simply want to capture the filesystem state.
-- Since v0.5.0, if you did not provide a PID during checkpoint creation, we will automatically checkpoint the long-running shell session (if it exists). 
-  - This is especially useful when you start a shell session with `--shell` or the `build` command, as you can simply checkpoint the shell session without worrying about the PID.
+### 4. Fork and Snapshot
 
-### 4. Restore From Checkpoint
+`fork` materializes a live, writable instance from any checkpoint. Fork the same
+checkpoint several times to explore divergent branches in parallel — each fork
+gets its own private copy-on-write filesystem and its own process tree:
 
 ```bash
-sudo ./waypoint restore a1b2c3d4e5f6g7h8 checkpoint-name
+sudo ./waypoint fork a1b2c3d4e5f6g7h8 checkpoint-name --id f1
+sudo ./waypoint fork a1b2c3d4e5f6g7h8 checkpoint-name --id f2
 ```
 
-### 5. List Available Checkpoints
+`snapshot` seals a live fork's current state into a new checkpoint (which can
+itself be forked again — recursive checkpointing is ordinary), and `destroy`
+tears a fork down:
 
 ```bash
+sudo ./waypoint snapshot a1b2c3d4e5f6g7h8 f2 checkpoint-name-2
+sudo ./waypoint destroy a1b2c3d4e5f6g7h8 f1
+```
+
+### 5. List Available Sessions, Checkpoints, and Forks
+
+```bash
+sudo ./waypoint list
 sudo ./waypoint list a1b2c3d4e5f6g7h8
+sudo ./waypoint list a1b2c3d4e5f6g7h8 --json
 ```
 
-### 6. Clean Up Session
+Without a session ID, `list` shows all recorded session IDs. With a session ID,
+it shows that session's checkpoints and its live forks; add `--json` for the
+stable machine-readable shape.
+
+### 6. Inspect System, Session, and Checkpoint Info
+
+```bash
+sudo ./waypoint info
+sudo ./waypoint info a1b2c3d4e5f6g7h8
+sudo ./waypoint info a1b2c3d4e5f6g7h8 checkpoint-name
+```
+
+The `info` command prints JSON for system/configuration details, a specific session, or a specific checkpoint.
+
+### 7. Clean Up Session
 
 ```bash
 sudo ./waypoint cleanup a1b2c3d4e5f6g7h8
@@ -255,50 +319,11 @@ For debugging, set `preserve_session_on_cleanup` to `true` in the config file, o
 
 ## Demo 🎥
 
-- **Direct CLI Usage** – Using waypoint directly from the terminal: https://youtu.be/fbNlGyIndjc
-- **StateFork Integration** – Using waypoint as a backend inside StateFork’s interactive shell: https://youtu.be/oe8ONkqr2a8
+- **Direct CLI Usage** – Using waypoint directly from the terminal: https://youtu.be/bdo0th40yrE
 
 ## Example Workflow 🧩
 
-### Example 1: Checkpointing a Simulator Application
-```bash
-# Initialize environment
-sudo ./waypoint init /home/user/myproject
-## Environment initialized!
-## Session ID: abc123def456
-## Work in this directory: /tmp/waypoint-sessions/abc123def456/work
-##
-## Save the session ID for future operations!
-
-# Run application in managed directory
-cd /tmp/waypoint-sessions/abc123def456/work
-./my-simulator --config config.json &
-## [1] 5678
-
-# Create checkpoints after some computation
-sudo ./waypoint create abc123def456 simulation-step-100 5678
-## Checkpoint 'simulation-step-100' created successfully
-
-# Continue running, create another checkpoint
-sudo ./waypoint create abc123def456 simulation-step-200 5678
-## Checkpoint 'simulation-step-200' created successfully
-
-# List available checkpoints
-sudo ./waypoint list abc123def456
-## Available checkpoints:
-##   simulation-step-100
-##   simulation-step-200
-
-# Restore to earlier state
-sudo ./waypoint restore abc123def456 simulation-step-100
-## Checkpoint 'simulation-step-100' restored, new PID: 5678
-
-# Clean up when done
-sudo ./waypoint cleanup abc123def456
-## Session 'abc123def456' cleaned up successfully
-```
-
-### Example 2: Checkpointing with a Shell Session
+### Parallel Forking with a Shell Session
 ```bash
 # Initialize environment using a Dockerfile
 sudo ./waypoint build /home/docker-tasks/context
@@ -311,67 +336,62 @@ sudo ./waypoint build /home/docker-tasks/context
 ##
 ## Save the session ID for future operations!
 
-# Run some commands in the provided shell session
-sudo ./waypoint exec abc123def456 cd /app
-sudo ./waypoint exec abc123def456 export ENV_VAR=start
+# Build up some hidden shell state in the main fork
+sudo ./waypoint exec abc123def456 main -- 'cd /app; export ENV_VAR=start'
 
-# Create a checkpoint of the shell session
-sudo ./waypoint create abc123def456 before-run
+# Checkpoint the main fork into an immutable checkpoint
+sudo ./waypoint checkpoint abc123def456 before-run
 ## Checkpoint 'before-run' created successfully
 
-# Continue running some commands
-sudo ./waypoint exec abc123def456 "echo VALUE: \$ENV_VAR PWD: \$(pwd)"
-## VALUE: start PWD: /app
-sudo ./waypoint exec abc123def456 ./run-app.sh
-sudo ./waypoint exec abc123def456 export ENV_VAR=finished
-sudo ./waypoint exec abc123def456 cd ./results
-sudo ./waypoint exec abc123def456 ls
-## (Output from ls, e.g., result1.txt result2.txt)
+# Fork the checkpoint twice to explore two branches in parallel
+sudo ./waypoint fork abc123def456 before-run --id runA
+sudo ./waypoint fork abc123def456 before-run --id runB
 
-# Create another checkpoint
-sudo ./waypoint create abc123def456 after-run
-## Checkpoint 'after-run' created successfully
+# Each fork inherits the state, then diverges independently
+sudo ./waypoint exec abc123def456 runA -- './run-app.sh --mode fast; export ENV_VAR=finished-A'
+sudo ./waypoint exec abc123def456 runB -- './run-app.sh --mode slow; export ENV_VAR=finished-B'
 
-# Continue running some commands
-sudo ./waypoint exec abc123def456 "echo VALUE: \$ENV_VAR PWD: \$(pwd)"
-## VALUE: finished PWD: /app/results
+sudo ./waypoint exec abc123def456 runA -- 'echo VALUE: $ENV_VAR PWD: $(pwd)'
+## VALUE: finished-A PWD: /app
+sudo ./waypoint exec abc123def456 runB -- 'echo VALUE: $ENV_VAR PWD: $(pwd)'
+## VALUE: finished-B PWD: /app
 
-# Restore to earlier state
-sudo ./waypoint restore abc123def456 before-run
-## Checkpoint 'before-run' restored, new PID: 123456
-sudo ./waypoint exec abc123def456 "echo VALUE: \$ENV_VAR PWD: \$(pwd)"
-## VALUE: start PWD: /app
+# Recursively snapshot runA's diverged state into a new checkpoint
+sudo ./waypoint snapshot abc123def456 runA after-run-A
+## Fork 'runA' snapshotted as checkpoint 'after-run-A'
 
-# Clean up when done
+# Inspect the checkpoint/fork DAG
+sudo ./waypoint list abc123def456
+
+# Clean up when done (kills forks, unmounts overlays, removes the session)
 sudo ./waypoint cleanup abc123def456
 ```
 
 ## Directory Structure 🗃
 
 ```
-/custom/path/waypoint-sessions/   # Configured sessions directory
-    ├── a1b2c3d4e5f6g7h8/           # App A's session
-    │   ├── current/                # Current OverlayFS mounts
-    │   │   ├── upper/              # Overlay upper directory
-    │   │   └── work/               # Overlay work directory
-    │   ├── ckpt-1/                 # Checkpoint ckpt-1
-    │   │   ├── upper/
-    │   │   └── criu/               # CRIU image files
-    │   │       └── *.img
-    │   ├── metadata/               # Checkpoint metadata
-    │   │   └── ckpt-1.json         # "Metadata" for ckpt-1
-    │   ├── temp/                   # Internal temporary files (e.g., for shell socket and logs)
-    │   └── work/                   # App A works here (Overlay merged view)
-    └── x9y8z7w6v5u4t3s2/           # App B's session
-     	├── current/
-    	├── ckpt-a/
-     	├── metadata/
-     	├── temp/
-      	└── work/
-  
- /tmp/waypoint-sessions-info/     # Global session registry
-    ├── a1b2c3d4e5f6g7h8.json       # "SessionInfo" for App A
-    └── x9y8z7w6v5u4t3s2.json       # "SessionInfo" for App B
+/custom/path/waypoint-sessions/    # Configured sessions directory
+    └── abc123def456/               # A session
+        ├── checkpoints/            # Immutable checkpoint DAG nodes
+        │   └── before-run/
+        │       ├── upper/          # Sealed, immutable filesystem delta
+        │       └── criu/           # CRIU memory image (+ dump.log)
+        │           └── *.img
+        ├── forks/                  # Live, mutable fork instances
+        │   ├── main/               # The main fork (from init --shell)
+        │   │   ├── fork.json       # Live fork record
+        │   │   ├── upper/  work/   # This fork's private CoW layers
+        │   │   └── restore.log
+        │   ├── runA/
+        │   └── runB/
+        ├── metadata/               # Checkpoint metadata
+        │   └── before-run.json     # "Metadata" for the before-run checkpoint
+        ├── locks/                  # Session/fork flocks
+        ├── temp/                   # Shell socket + logs
+        └── work/                   # Canonical merged mountpoint (per-fork)
+
+/tmp/waypoint-sessions-info/       # Global session registry
+    └── abc123def456.json           # "SessionInfo" for the session above
 ```
 
 ## Technical Details ⌨️
@@ -379,22 +399,21 @@ sudo ./waypoint cleanup abc123def456
 ![Technical Architecture Diagram](./docs/waypoint-v060.drawio.png)
 
 ### OverlayFS Initialization
-- **Lower Layer**: Original workspace (read-only)
-- **Upper Layer**: Application changes (copy-on-write)
-- **Work Layer** (`~/current/work/`): Temporary storage for OverlayFS internal operations
-- **Merges** (`~/work/`): Combines upper and lower layers for the application to see
+- **Lower Layers**: The original workspace plus every parent checkpoint's sealed upper layer (read-only)
+- **Upper Layer**: This fork's private changes (copy-on-write)
+- **Work Layer** (`forks/<fork>/work/`): Temporary storage for OverlayFS internal operations
+- **Merged View** (`work/`): Combines the fork's upper with the lower layers for the process to see
 
-### Checkpoint Snapshot
-- **CRIU Checkpoint**: Dumps process memory, file descriptors, and execution state
-- **OverlayFS Checkpoint**: Archives current upper and work layers to be immutable snapshots
-- **OverlayFS Recreation**: Creates new upper and work layers for continued application execution
-- **CRIU Resume**: Continues process execution with new OverlayFS mounts
-- **Metadata Management**: Stores checkpoint metadata for tracking and restoration
+### Snapshot (fork → checkpoint)
+- **CRIU Dump**: Dumps the fork's process memory, file descriptors, and execution state
+- **Seal Upper**: Moves the fork's upper layer into the checkpoint as an immutable, shareable delta
+- **Rebase**: Gives the fork fresh upper/work layers stacked on the new checkpoint and resumes it
+- **Metadata Management**: Records the checkpoint's `ParentID` and resolved `LayerIDs` chain
 
-### Restoration
-- **Clean Slate**: Stops the current process and unmounts the existing OverlayFS
-- **OverlayFS Restoration**: Restores upper and work layers from the selected checkpoint snapshot
-- **CRIU Restore**: Restores process memory and execution state from the checkpoint
+### Fork (checkpoint → live fork)
+- **Non-destructive**: The source checkpoint is immutable, so one checkpoint can be forked many times
+- **Private Overlay**: Each fork mounts its own overlay (checkpoint layers + a private upper) in its own mount namespace
+- **CRIU Restore**: Rebuilds the fork's process tree from the checkpoint's memory image, detached and concurrent
 
 ### Session Isolation
 Each session gets:

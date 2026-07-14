@@ -72,13 +72,15 @@ Two binaries, one library:
 ## File-by-file (`pkg/waypoint`)
 
 - `manager.go` — the `Manager` handle and everything session-level:
-  configuration (`loadConfig`: env/file overrides for sessions dir, bash_init
-  path), `NewManagerWithSession` (mint a session), `LoadManager` (rehydrate one
-  by ID), the global session registry under `/tmp/waypoint-sessions-info/`, the
-  on-disk layout (path helpers), `flock`-based `withSessionLock` /
-  `withForkLock` (cross-process, because each CLI invocation is a separate
-  process), `atomicWriteFile`, and `ListSession` / `SessionListing` (the stable
-  `list --json` shape).
+  `NewManagerWithSession` (mint a session), `LoadManager` (rehydrate one by ID),
+  the global session registry under `/tmp/waypoint-sessions-info/`
+  (`LoadSessionInfo`, `ListSessions`), the on-disk layout (path helpers),
+  `flock`-based `withSessionLock` / `withForkLock` (cross-process, because each
+  CLI invocation is a separate process), `atomicWriteFile`, and
+  `ListSession` / `SessionListing` (the stable `list --json` shape).
+- `config.go` — configuration loading (`loadConfig`: env/file overrides for
+  sessions dir and bash_init path, each tracked back to its source) and
+  `LoadConfigInfo` / `ConfigInfo` for the `info` command.
 - `checkpoint.go` — immutable checkpoints: `Metadata` (checkpoint record:
   `ParentID`, `LayerIDs`, `PID`, `Status`) and its JSON persistence, plus the
   `Materializer` interface + `CRIUMaterializer`:
@@ -93,14 +95,14 @@ Two binaries, one library:
   the fork's socket, send a length-prefixed command, parse the
   `WP2 <status> <code>` response with v1 fallback). Server half lives in
   `cmd/bash-init`.
-- `criu.go` — every criu(8) interaction: `EnsureCriuCompatible` (refuses to
-  run on ARM64 PAC hosts with CRIU < 4.0; see the PAC story in
-  `parallel-fork-runtime-bugs.md`); `createMemoryCheckpoint` (the `criu dump`
-  command, including the `--external mnt[...]:waypoint-work` mapping so CRIU
-  treats the overlay as externally managed); and the restore side —
+- `criu.go` — every criu(8) interaction: `createMemoryCheckpoint` (the
+  `criu dump` command, including the `--external mnt[...]:waypoint-work` mapping
+  so CRIU treats the overlay as externally managed); and the restore side —
   `runRestoreHelper` / `RunForkRestoreChildFromArgs` / `restoreForkChild`
   re-exec into fresh mount/net/IPC namespaces, mount this fork's overlay at
-  the canonical path, and `criu restore` the image.
+  the canonical path, and `criu restore` the image. Host compatibility (criu
+  present, recent enough, kernel features, the ARM64 PAC / CRIU-4.0 rule) is
+  validated out of band by `./setup check`, not at runtime.
 - `overlay.go` — the CoW layer: `InitEnvironment` (first overlay mount for
   `main`), the single `mountOverlay` used both on the host and inside a
   restore child's namespace, runtime pseudo-fs mounts (`/proc`, `/sys`), and

@@ -254,12 +254,6 @@ func PrepareNetworkDeps(rootfs string) error {
 // StartShell launches a new chroot-embedded bash_init process at the given workDir.
 // On success, it updates the session info with the shell PID and socket path for later use.
 func (m *Manager) StartShell(workDir string) (int, string, error) {
-	// The shell exists to be checkpointed; refuse to start it on a host
-	// whose criu cannot restore what we dump.
-	if err := EnsureCriuCompatible(); err != nil {
-		return ShellNotEnabled, "", err
-	}
-
 	// Locate bash_init binary and stage it inside the overlay
 	bashInitSrc := DefaultBashInitSrc
 	if _, err := os.Stat(bashInitSrc); os.IsNotExist(err) {

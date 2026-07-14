@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -45,83 +44,8 @@ type SessionInfo struct {
 const SkipMemoryCheckpoint = -1 // Checkpoint has no memory image
 const ShellNotEnabled = 0       // Shell is not enabled for this session
 
-// SessionInfoDir is the fixed-path global store of SessionInfo records.
-const SessionInfoDir = "/tmp/waypoint-sessions-info"
-
-// Configuration defaults. loadConfig may override them from WAYPOINT_*
-// environment variables or a config.json file.
-var (
-	// DefaultSessionsDir is the default directory for storing checkpoint sessions.
-	DefaultSessionsDir = "/tmp/waypoint-sessions"
-	// DefaultBashInitSrc is the default source path for the bash_init binary used for shell sessions.
-	DefaultBashInitSrc = "./bash_init"
-	// PreserveSessionOnCleanup skips final removal after cleanup unmounts and kills resources.
-	PreserveSessionOnCleanup = false
-)
-
-type config struct {
-	SessionsDir              string `json:"sessions_dir,omitempty"`
-	BashInitSrc              string `json:"bash_init_src,omitempty"`
-	PreserveSessionOnCleanup bool   `json:"preserve_session_on_cleanup,omitempty"`
-}
-
-// loadConfig applies configuration onto the defaults above. Per field, a
-// WAYPOINT_* environment variable wins over the config file, which wins over
-// the built-in default.
-func loadConfig() {
-	var cfg config
-	if path := findConfigFile(); path != "" {
-		if data, err := os.ReadFile(path); err == nil {
-			_ = json.Unmarshal(data, &cfg)
-		}
-	}
-
-	if v := os.Getenv("WAYPOINT_SESSIONS_DIR"); v != "" {
-		DefaultSessionsDir = v
-	} else if cfg.SessionsDir != "" {
-		DefaultSessionsDir = cfg.SessionsDir
-	}
-	if v := os.Getenv("WAYPOINT_BASH_INIT_SRC"); v != "" {
-		DefaultBashInitSrc = v
-	} else if cfg.BashInitSrc != "" {
-		DefaultBashInitSrc = cfg.BashInitSrc
-	}
-	if v := os.Getenv("WAYPOINT_PRESERVE_SESSION_ON_CLEANUP"); v != "" {
-		if parsed, err := strconv.ParseBool(v); err == nil {
-			PreserveSessionOnCleanup = parsed
-		}
-	} else {
-		PreserveSessionOnCleanup = cfg.PreserveSessionOnCleanup
-	}
-}
-
-// findConfigFile returns the config file path by precedence: explicit
-// WAYPOINT_CONFIG, config.json next to the executable, user config
-// ($XDG_CONFIG_HOME/waypoint/config.json or ~/.waypoint/config.json),
-// then /etc/waypoint/config.json.
-func findConfigFile() string {
-	if p := os.Getenv("WAYPOINT_CONFIG"); p != "" {
-		return p
-	}
-
-	var candidates []string
-	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "config.json"))
-	}
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		candidates = append(candidates, filepath.Join(xdg, "waypoint", "config.json"))
-	} else if home, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates, filepath.Join(home, ".waypoint", "config.json"))
-	}
-	candidates = append(candidates, "/etc/waypoint/config.json")
-
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	return ""
-}
+// Configuration lives in config.go (SessionInfoDir, DefaultSessionsDir,
+// DefaultBashInitSrc, PreserveSessionOnCleanup, and loadConfig).
 
 // NewManagerWithSession creates a new manager with a random session ID.
 func NewManagerWithSession() (*Manager, string, error) {
@@ -215,6 +139,32 @@ func loadSessionInfo(sessionID string) (*SessionInfo, error) {
 	var sessionInfo SessionInfo
 	err = json.Unmarshal(data, &sessionInfo)
 	return &sessionInfo, err
+}
+
+// LoadSessionInfo returns persisted information for a checkpoint session.
+func LoadSessionInfo(sessionID string) (*SessionInfo, error) {
+	return loadSessionInfo(sessionID)
+}
+
+// ListSessions returns all session IDs recorded in the global session store.
+func ListSessions() ([]string, error) {
+	files, err := os.ReadDir(SessionInfoDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+
+	var sessions []string
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+		sessions = append(sessions, strings.TrimSuffix(file.Name(), ".json"))
+	}
+	sort.Strings(sessions)
+	return sessions, nil
 }
 
 func removeSessionInfo(sessionID string) error {

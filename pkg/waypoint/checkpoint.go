@@ -85,6 +85,23 @@ func (m *Manager) loadMetadata(checkpointID string) (*Metadata, error) {
 	return &metadata, err
 }
 
+// LoadCheckpointMetadata returns persisted metadata for a session checkpoint
+// without needing a live Manager.
+func LoadCheckpointMetadata(sessionID, checkpointID string) (*Metadata, error) {
+	sessionInfo, err := loadSessionInfo(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(sessionInfo.BaseDir, "metadata", checkpointID+".json"))
+	if err != nil {
+		return nil, err
+	}
+
+	var metadata Metadata
+	err = json.Unmarshal(data, &metadata)
+	return &metadata, err
+}
+
 func (m *Manager) LoadCheckpoint(checkpointID string) (*Checkpoint, error) {
 	metadata, err := m.loadMetadata(checkpointID)
 	if err != nil {
@@ -100,9 +117,6 @@ func (m *Manager) LoadCheckpoint(checkpointID string) (*Checkpoint, error) {
 
 // ForkCheckpoint materializes a new live fork from a checkpoint.
 func (m *Manager) ForkCheckpoint(checkpointID string, spec ForkSpec) (*Fork, error) {
-	if err := EnsureCriuCompatible(); err != nil {
-		return nil, err
-	}
 	ckpt, err := m.LoadCheckpoint(checkpointID)
 	if err != nil {
 		return nil, err
@@ -113,9 +127,6 @@ func (m *Manager) ForkCheckpoint(checkpointID string, spec ForkSpec) (*Fork, err
 // SnapshotFork turns a live fork into a new checkpoint, then resumes the fork
 // on top of it.
 func (m *Manager) SnapshotFork(forkID, checkpointID string) (*Checkpoint, error) {
-	if err := EnsureCriuCompatible(); err != nil {
-		return nil, err
-	}
 	var ckpt *Checkpoint
 	err := m.withForkLock(forkID, func() error {
 		f, err := m.loadFork(forkID)
