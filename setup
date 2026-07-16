@@ -75,7 +75,10 @@ build() {
   (
     cd "$ROOT_DIR"
     "$GO" build -trimpath -o "$BIN_DIR/waypoint" ./cmd/waypoint
-    "$GO" build -trimpath -o "$BIN_DIR/bash_init" ./cmd/bash-init
+    # bash_init is staged into the session rootfs and re-execs there as PID 1.
+    # A dynamic build then needs its ELF loader and libs copied in alongside it;
+    # a static one just runs. Build it static to remove that failure mode.
+    CGO_ENABLED=0 "$GO" build -trimpath -o "$BIN_DIR/bash_init" ./cmd/bash-init
   )
   ok "built $BIN_DIR/waypoint"
   ok "built $BIN_DIR/bash_init"
