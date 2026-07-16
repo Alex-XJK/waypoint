@@ -2,6 +2,7 @@ package waypoint
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -67,6 +68,27 @@ func LoadConfigInfo() ConfigInfo {
 			Source: PreserveSessionOnCleanupConfig,
 		},
 	}
+}
+
+// maxUnixSocketPath is the longest dialable unix socket path: sun_path holds
+// 108 bytes including the trailing NUL.
+const maxUnixSocketPath = 107
+
+// validateSessionsDir fails fast when the sessions dir is so deep that the
+// host-side shell socket dial path would exceed the unix sun_path limit.
+// The host dials /proc/<pid>/root/<sessionsDir>/<16hex>/temp/shell_<16hex>.sock
+// (see socketPathThroughProcRoot); past the limit the dial fails much later
+// with an opaque "connect: invalid argument". scripts/bench.sh applies the
+// same check on its side — keep the numbers and message in sync.
+func validateSessionsDir(dir string) error {
+	procRootPrefix := len("/proc/1234567/root") // worst-case 7-digit pid
+	sessionSuffix := len("/0123456789abcdef/temp/shell_0123456789abcdef.sock")
+	worstCase := procRootPrefix + len(filepath.Clean(dir)) + sessionSuffix
+	if worstCase > maxUnixSocketPath {
+		return fmt.Errorf("sessions dir %s is too deep — worst-case socket path %d chars > %d (unix sun_path limit); use a shorter sessions dir (WAYPOINT_SESSIONS_DIR or sessions_dir in config.json)",
+			dir, worstCase, maxUnixSocketPath)
+	}
+	return nil
 }
 
 // loadConfig loads custom configuration.

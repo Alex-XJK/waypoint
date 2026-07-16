@@ -56,6 +56,10 @@ func NewManagerWithSession() (*Manager, string, error) {
 
 	loadConfig()
 
+	if err := validateSessionsDir(DefaultSessionsDir); err != nil {
+		return nil, "", err
+	}
+
 	manager := newManager(filepath.Join(DefaultSessionsDir, sessionID))
 	manager.sessionID = sessionID
 	manager.shellPid = ShellNotEnabled
