@@ -27,8 +27,18 @@ This project thrives thanks to the efforts and expertise of the following people
 - Pioneered several trial implementations (currently in progress and not yet on main branch).
 
 
+## Environment Build Workflow
+
+### Tianle Zhou
+
+- Designed the original Buildah-based environment build workflow in the TBench integration, which informed Waypoint's v0.5.0 Dockerfile-based `build` command.
+
+
 ## Usability and Robustness Improvements
-/
+
+### Andy Tiancheng Ge
+
+- Fixed the Dockerfile image-tag sanitization issue for unusual build-context directory names.
 
 
 ## Advisors

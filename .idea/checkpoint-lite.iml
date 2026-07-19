@@ -5,7 +5,12 @@
       <configuration sdkName="venv 3.11 (StateFork)" />
     </facet>
   </component>
-  <component name="Go" enabled="true" />
+  <component name="Go" enabled="true">
+    <buildTags>
+      <option name="os" value="linux" />
+      <option name="goVersion" value="1.25" />
+    </buildTags>
+  </component>
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$" />
     <orderEntry type="inheritedJdk" />

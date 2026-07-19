@@ -66,7 +66,7 @@ See [our architecture decision record](./docs/tech_selection_note.md) for more d
 Waypoint can be installed either through the project setup targets or manually.
 For full details, see [Installing Waypoint](./docs/INSTALL.md).
 
-### Scripted Setup (Recommended)
+### Scripted Setup (Recommended, since v0.6.1)
 
 This path uses the repository `Makefile` to install system packages, build the
 binaries, install the CLI/helper pair, and run a root-level host check.
@@ -143,8 +143,8 @@ go build -o bash_init ./cmd/bash-init
 #### Check Waypoint Version
 
 ```bash
-./waypoint version
-# Output: waypoint version v0.6.0
+waypoint version
+# Output: waypoint version v0.6.1
 ```
 
 You can also run the root-level host check from the setup script after manual
@@ -183,7 +183,7 @@ Configuration takes effect in the following order of precedence:
 Create a managed environment for your application:
 
 ```bash
-sudo ./waypoint init /path/to/your/workspace
+sudo waypoint init /path/to/your/workspace
 ```
 
 Output:
@@ -208,7 +208,7 @@ You can alternatively build a sandbox environment directly with the `build` comm
 This will set up a sandboxed environment with the provided Dockerfile and start a bash session in it.
 
 ```bash
-sudo ./waypoint build /path/to/your/Dockerfile-directory
+sudo waypoint build /path/to/your/Dockerfile-directory
 ```
 
 Output:
@@ -248,7 +248,7 @@ Since v0.5.0, if you used the `--shell` option during initialization or the `bui
 shell session in the managed environment. You can directly run your bash commands there without worrying about the workspace isolation.
 
 ```bash
-sudo ./waypoint exec a1b2c3d4e5f6g7h8 cat hello_world.txt
+sudo waypoint exec a1b2c3d4e5f6g7h8 cat hello_world.txt
 ```
 
 Note that the `exec` command can be used all the time, regardless of whether you started a shell session or not.
@@ -259,7 +259,7 @@ If you don't have a shell session, the `exec` will simply help you execute the c
 ### 3. Create Checkpoints
 
 ```bash
-sudo ./waypoint create a1b2c3d4e5f6g7h8 checkpoint-name 1234
+sudo waypoint create a1b2c3d4e5f6g7h8 checkpoint-name 1234
 ```
 
 Special options:
@@ -271,14 +271,14 @@ Special options:
 ### 4. Restore From Checkpoint
 
 ```bash
-sudo ./waypoint restore a1b2c3d4e5f6g7h8 checkpoint-name
+sudo waypoint restore a1b2c3d4e5f6g7h8 checkpoint-name
 ```
 
 ### 5. List Available Sessions and Checkpoints
 
 ```bash
-sudo ./waypoint list
-sudo ./waypoint list a1b2c3d4e5f6g7h8
+sudo waypoint list
+sudo waypoint list a1b2c3d4e5f6g7h8
 ```
 
 Without a session ID, `list` shows all recorded session IDs. With a session ID, it shows checkpoints for that session.
@@ -286,9 +286,9 @@ Without a session ID, `list` shows all recorded session IDs. With a session ID, 
 ### 6. Inspect System, Session, and Checkpoint Info
 
 ```bash
-sudo ./waypoint info
-sudo ./waypoint info a1b2c3d4e5f6g7h8
-sudo ./waypoint info a1b2c3d4e5f6g7h8 checkpoint-name
+sudo waypoint info
+sudo waypoint info a1b2c3d4e5f6g7h8
+sudo waypoint info a1b2c3d4e5f6g7h8 checkpoint-name
 ```
 
 The `info` command prints JSON for system/configuration details, a specific session, or a specific checkpoint.
@@ -296,7 +296,7 @@ The `info` command prints JSON for system/configuration details, a specific sess
 ### 7. Clean Up Session
 
 ```bash
-sudo ./waypoint cleanup a1b2c3d4e5f6g7h8
+sudo waypoint cleanup a1b2c3d4e5f6g7h8
 ```
 If this basic version of the cleanup command fails, **waypoint** will automatically suggest further actions. You can use:
 - `--force` to forcefully remove and unmount all related resources.
@@ -312,7 +312,7 @@ For debugging, set `preserve_session_on_cleanup` to `true` in the config file, o
 ### Checkpointing with a Shell Session
 ```bash
 # Initialize environment using a Dockerfile
-sudo ./waypoint build /home/docker-tasks/context
+sudo waypoint build /home/docker-tasks/context
 ## STEP 1/3: FROM ubuntu-24-04:latest
 ## (Some build output from buildah...)
 ## Sandbox environment built successfully!
@@ -323,38 +323,38 @@ sudo ./waypoint build /home/docker-tasks/context
 ## Save the session ID for future operations!
 
 # Run some commands in the provided shell session
-sudo ./waypoint exec abc123def456 cd /app
-sudo ./waypoint exec abc123def456 export ENV_VAR=start
+sudo waypoint exec abc123def456 cd /app
+sudo waypoint exec abc123def456 export ENV_VAR=start
 
 # Create a checkpoint of the shell session
-sudo ./waypoint create abc123def456 before-run
+sudo waypoint create abc123def456 before-run
 ## Checkpoint 'before-run' created successfully
 
 # Continue running some commands
-sudo ./waypoint exec abc123def456 "echo VALUE: \$ENV_VAR PWD: \$(pwd)"
+sudo waypoint exec abc123def456 "echo VALUE: \$ENV_VAR PWD: \$(pwd)"
 ## VALUE: start PWD: /app
-sudo ./waypoint exec abc123def456 ./run-app.sh
-sudo ./waypoint exec abc123def456 export ENV_VAR=finished
-sudo ./waypoint exec abc123def456 cd ./results
-sudo ./waypoint exec abc123def456 ls
+sudo waypoint exec abc123def456 ./run-app.sh
+sudo waypoint exec abc123def456 export ENV_VAR=finished
+sudo waypoint exec abc123def456 cd ./results
+sudo waypoint exec abc123def456 ls
 ## (Output from ls, e.g., result1.txt result2.txt)
 
 # Create another checkpoint
-sudo ./waypoint create abc123def456 after-run
+sudo waypoint create abc123def456 after-run
 ## Checkpoint 'after-run' created successfully
 
 # Continue running some commands
-sudo ./waypoint exec abc123def456 "echo VALUE: \$ENV_VAR PWD: \$(pwd)"
+sudo waypoint exec abc123def456 "echo VALUE: \$ENV_VAR PWD: \$(pwd)"
 ## VALUE: finished PWD: /app/results
 
 # Restore to earlier state
-sudo ./waypoint restore abc123def456 before-run
+sudo waypoint restore abc123def456 before-run
 ## Checkpoint 'before-run' restored, new PID: 123456
-sudo ./waypoint exec abc123def456 "echo VALUE: \$ENV_VAR PWD: \$(pwd)"
+sudo waypoint exec abc123def456 "echo VALUE: \$ENV_VAR PWD: \$(pwd)"
 ## VALUE: start PWD: /app
 
 # Clean up when done
-sudo ./waypoint cleanup abc123def456
+sudo waypoint cleanup abc123def456
 ```
 
 ## Directory Structure 🗃
