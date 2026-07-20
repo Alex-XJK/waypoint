@@ -55,7 +55,7 @@ Our tool needs to:
 #### Rust
 **Strengths:** Memory safety, zero-cost abstractions, excellent performance. It could be one of the best long-term solutions.
 **Limitations:** Steeper learning curve for the team; longer development time for initial prototype
-**Current reality:** I am not familiar with Rust...
+**Current reality:** At the time of selection, the team had limited Rust experience, making initial development riskier.
 
 
 ## Technical Decision Factors
