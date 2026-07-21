@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.1 — Setup Workflow and CLI Inspection
+**Installation polish, release automation, and small usability fixes**
+- Added `setup` script for building, installing, checking, uninstalling, and cleaning Waypoint.
+- Added an Ubuntu/Debian dependency helper and host check workflow for CRIU, OverlayFS, and related system utilities.
+- Extended `list` to show all recorded sessions when no session ID is provided.
+- Added `info` to inspect system configuration, host dependencies, sessions, and checkpoint metadata as JSON.
+- Fixed Dockerfile/buildah image builds for context directory names that need image-tag sanitization.
+
 ## v0.6.0 — Waypoint Rename
 **Project rename and public identity update**
 - Renamed the project from **Checkpoint-lite** to **Waypoint**. Older blog posts, videos, and public announcements may still use the Checkpoint-lite name.
