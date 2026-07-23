@@ -33,6 +33,16 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string, extraArgs ...
 		"-t", strconv.Itoa(pid),
 		"-D", criuPath,
 		"--tcp-established",
+		"--manage-cgroups=ignore",
+		// Node 22 keeps inotify watches and unlinked-but-open files (e.g. the
+		// bundled mock-api's working files). --force-irmap lets CRIU resolve
+		// inotify watches via the inode reverse-map when the path is gone, and
+		// --link-remap lets it dump deleted files that still have open fds.
+		// --file-locks lets lock-holding processes be checkpointed. Without
+		// these, dumping the shop process tree fails.
+		"--force-irmap",
+		"--link-remap",
+		"--file-locks",
 		"--ghost-limit", "8388608",
 		"-vv", "-o", "dump.log",
 	}
@@ -145,6 +155,8 @@ func restoreForkChild(f *Fork) error {
 		"restore",
 		"--images-dir", f.CriuPath,
 		"--tcp-established",
+		"--manage-cgroups=ignore",
+		"--file-locks",
 		"--restore-detached",
 		"--pidfile", f.PidFile,
 		// The images dir is shared by all forks of a checkpoint, so anything

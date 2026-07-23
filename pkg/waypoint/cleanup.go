@@ -179,7 +179,7 @@ func processExists(pid int) bool {
 }
 
 // killProcess terminates a process gracefully (SIGTERM), escalating to
-// SIGKILL if it does not exit within a second.
+// SIGKILL if it does not exit within the grace period.
 func killProcess(pid int) error {
 	if !processExists(pid) {
 		return nil
@@ -196,7 +196,9 @@ func killProcess(pid int) error {
 		}
 	}
 
-	for i := 0; i < 10; i++ {
+	// Wait for the process to terminate (up to 5 seconds); CRIU needs the
+	// checkpointed task to disappear before its resources can be reused.
+	for i := 0; i < 50; i++ {
 		if !processExists(pid) {
 			return nil
 		}

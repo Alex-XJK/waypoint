@@ -23,12 +23,22 @@ This project thrives thanks to the efforts and expertise of the following people
 
 ### Danielle Gillai
 
-- Led initial designs and experimentation on concurrent forking approaches.
-- Pioneered several trial implementations (currently in progress and not yet on main branch).
+- Led early design and experimentation on concurrent forking support.
+- Prototyped filesystem-only and CRIU-ns fork paths, helping clarify the terminal-session challenges that shaped later fork designs.
+
+
+## Environment Build Workflow
+
+### Tianle Zhou
+
+- Designed the original Buildah-based environment build workflow in the TBench integration, which informed Waypoint's v0.5.0 Dockerfile-based `build` command.
 
 
 ## Usability and Robustness Improvements
-/
+
+### Andy Tiancheng Ge
+
+- Fixed the Dockerfile image-tag sanitization issue for generated or unusual build-context directory names.
 
 
 ## Advisors
