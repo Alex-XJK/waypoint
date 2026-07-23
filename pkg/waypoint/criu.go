@@ -162,6 +162,13 @@ func restoreForkChild(f *Fork) error {
 	cmd.Dir = f.RootDir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+
+	// Hold the images lock shared for the whole restore so the tmpfs->disk
+	// flusher (exclusive) cannot repoint and delete images mid-read.
+	if unlock, err := lockImages(filepath.Dir(f.CriuPath), false); err == nil {
+		defer unlock()
+	}
+
 	criuStart := time.Now()
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("criu restore failed: %w\n%s", err, stderr.String())

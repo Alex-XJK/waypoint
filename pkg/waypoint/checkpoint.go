@@ -270,7 +270,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 		} else if !os.IsNotExist(err) {
 			return err
 		}
-		if err := os.MkdirAll(ckptCriu, 0o755); err != nil {
+		if _, err := m.prepareCheckpointImagesDir(checkpointID); err != nil {
 			return err
 		}
 		return m.saveMetadata(checkpointID, metadata)
@@ -298,6 +298,13 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 	breakdown := &SnapshotBreakdown{DumpMs: durMs(time.Since(dumpStart))}
 	if ds, err := readCriuDumpStats(filepath.Join(ckptCriu, "stats-dump")); err == nil {
 		breakdown.Dump = ds
+	}
+	if TmpfsImages {
+		// Persist the tmpfs images in the background; forks meanwhile read
+		// them straight from tmpfs through the criu symlink.
+		if err := m.spawnImageFlusher(checkpointID); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: image flush not started for %s (images stay on tmpfs): %v\n", checkpointID, err)
+		}
 	}
 
 	sealStart := time.Now()

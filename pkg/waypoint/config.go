@@ -25,12 +25,26 @@ var (
 	// PreserveSessionOnCleanup skips final removal after cleanup unmounts and kills resources.
 	PreserveSessionOnCleanup       = false
 	PreserveSessionOnCleanupConfig = "default"
+
+	// TmpfsImages makes checkpoint dumps write their CRIU images to a tmpfs
+	// dir (fast, no writeback storm) with an async flush to the durable
+	// checkpoint dir; checkpoints/<ckpt>/criu is a symlink either way, so
+	// all consumers see one stable path. Until a checkpoint's flush
+	// completes, a host reboot loses its images.
+	TmpfsImages       = false
+	TmpfsImagesConfig = "default"
+
+	// TmpfsImagesDir is the tmpfs root holding per-session image dirs.
+	TmpfsImagesDir       = "/dev/shm/waypoint"
+	TmpfsImagesDirConfig = "default"
 )
 
 type config struct {
 	SessionsDir              string `json:"sessions_dir,omitempty"`
 	BashInitSrc              string `json:"bash_init_src,omitempty"`
 	PreserveSessionOnCleanup bool   `json:"preserve_session_on_cleanup,omitempty"`
+	TmpfsImages              bool   `json:"tmpfs_images,omitempty"`
+	TmpfsImagesDir           string `json:"tmpfs_images_dir,omitempty"`
 }
 
 // ConfigValue reports an effective configuration value and where it came from.
@@ -45,6 +59,8 @@ type ConfigInfo struct {
 	SessionsDir              ConfigValue `json:"sessions_dir"`
 	BashInitSrc              ConfigValue `json:"bash_init_src"`
 	PreserveSessionOnCleanup ConfigValue `json:"preserve_session_on_cleanup"`
+	TmpfsImages              ConfigValue `json:"tmpfs_images"`
+	TmpfsImagesDir           ConfigValue `json:"tmpfs_images_dir"`
 }
 
 // LoadConfigInfo loads custom configuration and returns the effective values.
@@ -66,6 +82,14 @@ func LoadConfigInfo() ConfigInfo {
 		PreserveSessionOnCleanup: ConfigValue{
 			Value:  PreserveSessionOnCleanup,
 			Source: PreserveSessionOnCleanupConfig,
+		},
+		TmpfsImages: ConfigValue{
+			Value:  TmpfsImages,
+			Source: TmpfsImagesConfig,
+		},
+		TmpfsImagesDir: ConfigValue{
+			Value:  TmpfsImagesDir,
+			Source: TmpfsImagesDirConfig,
 		},
 	}
 }
@@ -116,6 +140,16 @@ func loadConfig() {
 			PreserveSessionOnCleanup = parsed
 			PreserveSessionOnCleanupConfig = "env:WAYPOINT_PRESERVE_SESSION_ON_CLEANUP"
 		}
+	}
+	if v := os.Getenv("WAYPOINT_TMPFS_IMAGES"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			TmpfsImages = parsed
+			TmpfsImagesConfig = "env:WAYPOINT_TMPFS_IMAGES"
+		}
+	}
+	if v := os.Getenv("WAYPOINT_TMPFS_DIR"); v != "" {
+		TmpfsImagesDir = v
+		TmpfsImagesDirConfig = "env:WAYPOINT_TMPFS_DIR"
 	}
 
 	// 2) Config file path determination
@@ -183,6 +217,14 @@ func loadConfig() {
 				if os.Getenv("WAYPOINT_PRESERVE_SESSION_ON_CLEANUP") == "" {
 					PreserveSessionOnCleanup = cfg.PreserveSessionOnCleanup
 					PreserveSessionOnCleanupConfig = configSource
+				}
+				if cfg.TmpfsImages && os.Getenv("WAYPOINT_TMPFS_IMAGES") == "" {
+					TmpfsImages = cfg.TmpfsImages
+					TmpfsImagesConfig = configSource
+				}
+				if cfg.TmpfsImagesDir != "" && os.Getenv("WAYPOINT_TMPFS_DIR") == "" {
+					TmpfsImagesDir = cfg.TmpfsImagesDir
+					TmpfsImagesDirConfig = configSource
 				}
 			}
 		}

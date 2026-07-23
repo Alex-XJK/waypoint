@@ -61,6 +61,12 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "__waypoint_flush_images":
+		if err := waypoint.RunImageFlushFromArgs(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+
 	case "init":
 		if len(os.Args) < 3 {
 			fmt.Println("Usage: init <work-directory> [--quiet] [--shell]")

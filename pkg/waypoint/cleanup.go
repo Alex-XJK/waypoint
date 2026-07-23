@@ -44,6 +44,8 @@ func (m *Manager) Cleanup() error {
 		_ = unix.Unmount(m.workOverlay, 0) // might already be unmounted
 	}
 
+	m.removeTmpfsImages()
+
 	if PreserveSessionOnCleanup {
 		fmt.Printf("Preserving session directory and session info for %s\n", m.sessionID)
 		return nil
@@ -89,6 +91,8 @@ func (m *Manager) CleanupForce() error {
 		fmt.Printf("Warning: Failed to force unmount: %v\n", err)
 	}
 
+	m.removeTmpfsImages()
+
 	if PreserveSessionOnCleanup {
 		fmt.Printf("Preserving session directory and session info for %s\n", m.sessionID)
 		return nil
@@ -106,6 +110,17 @@ func (m *Manager) CleanupForce() error {
 	}
 
 	return nil
+}
+
+// removeTmpfsImages drops this session's tmpfs image dirs (checkpoints not
+// yet — or never — flushed to disk). Best-effort: the dir may not exist.
+func (m *Manager) removeTmpfsImages() {
+	if m.sessionID == "" {
+		return
+	}
+	if err := os.RemoveAll(m.sessionTmpfsDir()); err != nil {
+		fmt.Printf("Warning: failed to remove tmpfs images dir: %v\n", err)
+	}
 }
 
 // CleanupInteractive tries the graceful cleanup, then prints troubleshooting

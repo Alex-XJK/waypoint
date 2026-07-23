@@ -73,6 +73,8 @@ func NewManagerWithSession() (*Manager, string, error) {
 
 // LoadManager loads an existing manager by session ID.
 func LoadManager(sessionID string) (*Manager, error) {
+	loadConfig() // session paths come from the registry; this resolves behavior flags (e.g. TmpfsImages)
+
 	sessionInfo, err := loadSessionInfo(sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load session: %w", err)
