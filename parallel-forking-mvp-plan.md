@@ -47,7 +47,7 @@ Preferred MVP interface:
 ```bash
 waypoint init <rootfs> --shell [--quiet]
 waypoint checkpoint <session> <checkpoint-id>
-waypoint fork <session> <checkpoint-id> [--id <fork-id>] [--n K] [--lazy-pages]
+waypoint fork <session> <checkpoint-id> [--id <fork-id>] [--n K]
 waypoint exec <session> <fork-id> -- <command>
 waypoint snapshot <session> <fork-id> <checkpoint-id>
 waypoint destroy <session> <fork-id>

@@ -197,14 +197,13 @@ func main() {
 
 	case "fork":
 		if len(os.Args) < 4 {
-			fmt.Println("Usage: fork <session> <checkpoint-id> [--id ID] [--n K] [--lazy-pages]")
+			fmt.Println("Usage: fork <session> <checkpoint-id> [--id ID] [--n K]")
 			os.Exit(1)
 		}
 		sessionID := os.Args[2]
 		checkpointID := os.Args[3]
 		count := 1
 		forkID := ""
-		lazyPages := false
 		for i := 4; i < len(os.Args); i++ {
 			switch os.Args[i] {
 			case "--id":
@@ -226,8 +225,6 @@ func main() {
 				}
 				count = parsed
 				i++
-			case "--lazy-pages":
-				lazyPages = true
 			default:
 				fmt.Printf("Error: unknown flag: %s\n", os.Args[i])
 				os.Exit(1)
@@ -244,7 +241,7 @@ func main() {
 			os.Exit(1)
 		}
 		for i := 0; i < count; i++ {
-			spec := waypoint.ForkSpec{LazyPages: lazyPages}
+			spec := waypoint.ForkSpec{}
 			if forkID != "" {
 				spec.ID = forkID
 			}

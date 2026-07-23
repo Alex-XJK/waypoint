@@ -52,7 +52,6 @@ type Fork struct {
 	CreatedAt        int64      `json:"created_at"`
 	RestoreDuration  string     `json:"restore_duration,omitempty"`
 	Status           ForkStatus `json:"status"`
-	LazyPages        bool       `json:"lazy_pages,omitempty"`
 	// RestoreBreakdown is the phase timing of this fork's most recent
 	// restore (instrumentation; see criustats.go).
 	RestoreBreakdown *RestoreBreakdown `json:"restore_breakdown,omitempty"`
@@ -150,7 +149,6 @@ func newForkRecord(m *Manager, checkpointID string, metadata *Metadata, spec For
 		PidFile:          filepath.Join(rootDir, "restore.pid"),
 		CreatedAt:        time.Now().Unix(),
 		Status:           ForkStatusStarting,
-		LazyPages:        spec.LazyPages,
 	}, nil
 }
 

@@ -153,9 +153,6 @@ func restoreForkChild(f *Fork) error {
 		"--work-dir", f.RootDir,
 		"-vv", "-o", f.LogPath,
 	}
-	if f.LazyPages {
-		args = append(args, "--lazy-pages")
-	}
 	if f.MountPoint != "" {
 		args = append(args, "-r", f.MountPoint)
 		args = append(args, "--external", fmt.Sprintf("mnt[waypoint-work]:%s", f.MountPoint))

@@ -52,8 +52,7 @@ type Checkpoint struct {
 
 // ForkSpec describes a fork to be materialized.
 type ForkSpec struct {
-	ID        string
-	LazyPages bool
+	ID string
 }
 
 // Materializer converts checkpoints to live forks and back. CRIU is the only
