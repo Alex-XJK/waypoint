@@ -37,6 +37,15 @@ var (
 	// TmpfsImagesDir is the tmpfs root holding per-session image dirs.
 	TmpfsImagesDir       = "/dev/shm/waypoint"
 	TmpfsImagesDirConfig = "default"
+
+	// PhaseStats enables phase-level latency instrumentation: each fork
+	// restore and checkpoint assembles a timing breakdown (from CRIU's
+	// stats-dump / stats-restore images and our own wall clocks), persists
+	// it in fork.json / checkpoint metadata, and the CLI prints it as flat
+	// key_ms= tokens. Off by default; when on it adds a stats-image parse to
+	// every fork and snapshot.
+	PhaseStats       = false
+	PhaseStatsConfig = "default"
 )
 
 type config struct {
@@ -45,6 +54,7 @@ type config struct {
 	PreserveSessionOnCleanup bool   `json:"preserve_session_on_cleanup,omitempty"`
 	TmpfsImages              bool   `json:"tmpfs_images,omitempty"`
 	TmpfsImagesDir           string `json:"tmpfs_images_dir,omitempty"`
+	PhaseStats               bool   `json:"phase_stats,omitempty"`
 }
 
 // ConfigValue reports an effective configuration value and where it came from.
@@ -61,6 +71,7 @@ type ConfigInfo struct {
 	PreserveSessionOnCleanup ConfigValue `json:"preserve_session_on_cleanup"`
 	TmpfsImages              ConfigValue `json:"tmpfs_images"`
 	TmpfsImagesDir           ConfigValue `json:"tmpfs_images_dir"`
+	PhaseStats               ConfigValue `json:"phase_stats"`
 }
 
 // LoadConfigInfo loads custom configuration and returns the effective values.
@@ -90,6 +101,10 @@ func LoadConfigInfo() ConfigInfo {
 		TmpfsImagesDir: ConfigValue{
 			Value:  TmpfsImagesDir,
 			Source: TmpfsImagesDirConfig,
+		},
+		PhaseStats: ConfigValue{
+			Value:  PhaseStats,
+			Source: PhaseStatsConfig,
 		},
 	}
 }
@@ -150,6 +165,12 @@ func loadConfig() {
 	if v := os.Getenv("WAYPOINT_TMPFS_DIR"); v != "" {
 		TmpfsImagesDir = v
 		TmpfsImagesDirConfig = "env:WAYPOINT_TMPFS_DIR"
+	}
+	if v := os.Getenv("WAYPOINT_PHASE_STATS"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			PhaseStats = parsed
+			PhaseStatsConfig = "env:WAYPOINT_PHASE_STATS"
+		}
 	}
 
 	// 2) Config file path determination
@@ -225,6 +246,10 @@ func loadConfig() {
 				if cfg.TmpfsImagesDir != "" && os.Getenv("WAYPOINT_TMPFS_DIR") == "" {
 					TmpfsImagesDir = cfg.TmpfsImagesDir
 					TmpfsImagesDirConfig = configSource
+				}
+				if cfg.PhaseStats && os.Getenv("WAYPOINT_PHASE_STATS") == "" {
+					PhaseStats = cfg.PhaseStats
+					PhaseStatsConfig = configSource
 				}
 			}
 		}

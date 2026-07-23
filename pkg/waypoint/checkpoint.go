@@ -182,7 +182,9 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 	start := time.Now()
 	if err := m.withForkLock(f.ID, func() error {
 		bd, err := m.restoreForkAndWait(f)
-		f.RestoreBreakdown = bd // keep partial phases on failure for debugging
+		if PhaseStats {
+			f.RestoreBreakdown = bd // keep partial phases on failure for debugging
+		}
 		if err != nil {
 			f.Status = ForkStatusFailed
 			_ = m.saveFork(f)
@@ -210,13 +212,15 @@ func (m *Manager) restoreForkAndWait(f *Fork) (*RestoreBreakdown, error) {
 		return bd, err
 	}
 	bd.HelperMs = durMs(time.Since(helperStart))
-	if t, err := readChildRestoreTiming(f); err == nil {
-		bd.MountMs, bd.CriuWallMs = t.MountMs, t.CriuWallMs
-	}
-	if rs, err := readCriuRestoreStats(filepath.Join(f.RootDir, "stats-restore")); err == nil {
-		bd.CriuForkMs = rs.ForkingMs
-		bd.CriuRestoreMs = rs.RestoreMs
-		bd.PagesRestored = rs.PagesRestored
+	if PhaseStats {
+		if t, err := readChildRestoreTiming(f); err == nil {
+			bd.MountMs, bd.CriuWallMs = t.MountMs, t.CriuWallMs
+		}
+		if rs, err := readCriuRestoreStats(filepath.Join(f.RootDir, "stats-restore")); err == nil {
+			bd.CriuForkMs = rs.ForkingMs
+			bd.CriuRestoreMs = rs.RestoreMs
+			bd.PagesRestored = rs.PagesRestored
+		}
 	}
 
 	if pid, err := readPIDFile(f.PidFile); err == nil {
@@ -321,11 +325,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 		"--leave-running", "--action-script", sealScript); err != nil {
 		return fail(fmt.Errorf("memory checkpoint failed: %w", err))
 	}
-	breakdown := &SnapshotBreakdown{DumpMs: durMs(time.Since(dumpStart))}
-	if ds, err := readCriuDumpStats(filepath.Join(ckptCriu, "stats-dump")); err == nil {
-		breakdown.Dump = ds
-	}
-	breakdown.SealMs = readSealMs(sealTimeFile)
+	dumpMs := durMs(time.Since(dumpStart))
 	if TmpfsImages {
 		// Persist the tmpfs images in the background; forks meanwhile read
 		// them straight from tmpfs through the criu symlink.
@@ -338,12 +338,21 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 	f.LayerIDs = layerIDs
 	f.CriuPath = ckptCriu
 	f.Status = ForkStatusRunning
-	breakdown.TotalMs = durMs(time.Since(snapStart))
 	if err := m.saveFork(f); err != nil {
 		return fail(err)
 	}
 
-	metadata.Snapshot = breakdown
+	if PhaseStats {
+		breakdown := &SnapshotBreakdown{
+			DumpMs:  dumpMs,
+			SealMs:  readSealMs(sealTimeFile),
+			TotalMs: durMs(time.Since(snapStart)),
+		}
+		if ds, err := readCriuDumpStats(filepath.Join(ckptCriu, "stats-dump")); err == nil {
+			breakdown.Dump = ds
+		}
+		metadata.Snapshot = breakdown
+	}
 	metadata.Status = CheckpointStatusReady
 	if err := m.withSessionLock(func() error {
 		return m.saveMetadata(checkpointID, metadata)
