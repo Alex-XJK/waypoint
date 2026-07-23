@@ -26,8 +26,9 @@ import (
 
 // createMemoryCheckpoint dumps a process tree with criu. The work overlay is
 // declared as an external mount so CRIU treats it as managed by us.
+// extraArgs extend the dump command (e.g. --leave-running, --action-script).
 // Notice: cannot use '--shell-job' because of the PTY issue during restore.
-func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
+func (m *Manager) createMemoryCheckpoint(pid int, criuPath string, extraArgs ...string) error {
 	args := []string{"dump",
 		"-t", strconv.Itoa(pid),
 		"-D", criuPath,
@@ -35,6 +36,7 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 		"--ghost-limit", "8388608",
 		"-vv", "-o", "dump.log",
 	}
+	args = append(args, extraArgs...)
 	if _, err := findMountID(pid, m.workOverlay); err == nil {
 		args = append(args, "--external", fmt.Sprintf("mnt[%s]:waypoint-work", m.workOverlay))
 	} else if _, err := findMountID(pid, "/"); err == nil {

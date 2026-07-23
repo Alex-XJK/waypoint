@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -273,15 +275,26 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 		if _, err := m.prepareCheckpointImagesDir(checkpointID); err != nil {
 			return err
 		}
+		// The seal script copies into this dir during the dump.
+		if err := os.MkdirAll(ckptUpper, 0o755); err != nil {
+			return err
+		}
 		return m.saveMetadata(checkpointID, metadata)
 	}); err != nil {
 		return nil, err
 	}
 
+	// fail marks the checkpoint failed. The dump runs with --leave-running,
+	// so a failure normally leaves the fork's tree alive — put it back to
+	// running unless the process is actually gone.
 	fail := func(err error) (*Checkpoint, error) {
 		metadata.Status = CheckpointStatusFailed
 		_ = m.saveMetadata(checkpointID, metadata)
-		f.Status = ForkStatusFailed
+		if unix.Kill(f.PID, 0) == nil {
+			f.Status = ForkStatusRunning
+		} else {
+			f.Status = ForkStatusFailed
+		}
 		_ = m.saveFork(f)
 		return nil, err
 	}
@@ -290,15 +303,30 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 	if err := m.saveFork(f); err != nil {
 		return fail(err)
 	}
+
+	// Non-destructive snapshot: dump with --leave-running, and seal the
+	// fork's upper by copying it (reflink where the filesystem supports it)
+	// from criu's post-dump hook — which runs while the tree is still
+	// frozen, so the sealed layer and the memory image observe the same
+	// instant. The fork itself keeps its PID, socket, mount, and upper;
+	// nothing is killed or restored. Only the fork's record rebases onto
+	// the new checkpoint (the live upper keeps accumulating and shadows the
+	// sealed copies below it in later chains).
 	snapStart := time.Now()
+	sealScript, sealTimeFile, err := writeSealScript(ckptDir, f.UpperDir, ckptUpper)
+	if err != nil {
+		return fail(err)
+	}
 	dumpStart := time.Now()
-	if err := m.createMemoryCheckpoint(f.PID, ckptCriu); err != nil {
+	if err := m.createMemoryCheckpoint(f.PID, ckptCriu,
+		"--leave-running", "--action-script", sealScript); err != nil {
 		return fail(fmt.Errorf("memory checkpoint failed: %w", err))
 	}
 	breakdown := &SnapshotBreakdown{DumpMs: durMs(time.Since(dumpStart))}
 	if ds, err := readCriuDumpStats(filepath.Join(ckptCriu, "stats-dump")); err == nil {
 		breakdown.Dump = ds
 	}
+	breakdown.SealMs = readSealMs(sealTimeFile)
 	if TmpfsImages {
 		// Persist the tmpfs images in the background; forks meanwhile read
 		// them straight from tmpfs through the criu symlink.
@@ -307,60 +335,21 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 		}
 	}
 
-	sealStart := time.Now()
-	if f.ID == MainForkID {
-		unmountRuntimeFS(f.MountPoint)
-		_ = unix.Unmount(f.MountPoint, unix.MNT_DETACH)
-	}
-
-	if err := os.Rename(f.UpperDir, ckptUpper); err != nil {
-		return fail(fmt.Errorf("seal fork upper failed: %w", err))
-	}
-	if err := os.RemoveAll(f.WorkDir); err != nil {
-		return fail(fmt.Errorf("remove old fork workdir failed: %w", err))
-	}
-	for _, dir := range []string{f.UpperDir, f.WorkDir, f.TempDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fail(fmt.Errorf("mkdir %s failed: %w", dir, err))
-		}
-	}
-	breakdown.SealMs = durMs(time.Since(sealStart))
-
 	f.BaseCheckpointID = checkpointID
 	f.LayerIDs = layerIDs
 	f.CriuPath = ckptCriu
-	f.PidFile = filepath.Join(f.RootDir, "restore.pid")
-	_ = os.Remove(f.PidFile)
-	if err := m.saveFork(f); err != nil {
-		return fail(err)
-	}
-	restoreStart := time.Now()
-	bd, err := m.restoreForkAndWait(f)
-	f.RestoreBreakdown = bd
-	if err != nil {
-		return fail(err)
-	}
-	breakdown.RestoreMs = durMs(time.Since(restoreStart))
-	breakdown.Restore = bd
-	breakdown.TotalMs = durMs(time.Since(snapStart))
 	f.Status = ForkStatusRunning
-	f.RestoreDuration = ""
+	breakdown.TotalMs = durMs(time.Since(snapStart))
 	if err := m.saveFork(f); err != nil {
 		return fail(err)
 	}
 
 	metadata.Snapshot = breakdown
-	metadata.PID = f.PID
 	metadata.Status = CheckpointStatusReady
 	if err := m.withSessionLock(func() error {
 		return m.saveMetadata(checkpointID, metadata)
 	}); err != nil {
 		return nil, err
-	}
-	if f.ID == MainForkID {
-		m.shellPid = f.PID
-		m.shellSocket = f.SocketPath
-		_ = saveSessionInfo(m.sessionID, m)
 	}
 
 	return &Checkpoint{
@@ -369,4 +358,38 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 		CriuPath: ckptCriu,
 		Metadata: &metadata,
 	}, nil
+}
+
+// writeSealScript emits the criu action script that seals a fork's upper
+// dir into the checkpoint layer during the post-dump window (tree still
+// frozen). cp -a preserves overlayfs whiteouts (char devices) and trusted.*
+// xattrs (we run as root); --reflink=auto clones data blocks on XFS/btrfs
+// and falls back to a real copy elsewhere (e.g. ext4), where large uppers
+// prolong the frozen window. The copy duration lands in timeFile (ms).
+func writeSealScript(ckptDir, upperDir, ckptUpper string) (script, timeFile string, err error) {
+	script = filepath.Join(ckptDir, "seal.sh")
+	timeFile = filepath.Join(ckptDir, "seal.ms")
+	body := fmt.Sprintf(`#!/bin/sh
+[ "$CRTOOLS_SCRIPT_ACTION" = "post-dump" ] || exit 0
+start=$(date +%%s%%N)
+cp -a --reflink=auto '%s/.' '%s/' || exit 1
+end=$(date +%%s%%N)
+echo $(( (end - start) / 1000000 )) > '%s'
+`, upperDir, ckptUpper, timeFile)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		return "", "", err
+	}
+	return script, timeFile, nil
+}
+
+func readSealMs(timeFile string) float64 {
+	data, err := os.ReadFile(timeFile)
+	if err != nil {
+		return 0
+	}
+	ms, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
+	if err != nil {
+		return 0
+	}
+	return ms
 }
