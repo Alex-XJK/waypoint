@@ -27,6 +27,9 @@ type Metadata struct {
 	CreatedFromForkID string           `json:"created_from_fork_id,omitempty"`
 	CreatedAt         int64            `json:"created_at"`
 	Status            CheckpointStatus `json:"status"`
+	// Snapshot is the phase breakdown of the snapshot that created this
+	// checkpoint (instrumentation, not part of the logical state).
+	Snapshot *SnapshotBreakdown `json:"snapshot_breakdown,omitempty"`
 }
 
 type CheckpointStatus string
@@ -177,27 +180,54 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 
 	start := time.Now()
 	if err := m.withForkLock(f.ID, func() error {
-		if err := runRestoreHelper(f); err != nil {
-			f.Status = ForkStatusFailed
-			_ = m.saveFork(f)
-			return err
-		}
-		if pid, err := readPIDFile(f.PidFile); err == nil {
-			f.PID = pid
-			f.SocketPath = socketPathThroughProcRoot(pid, f.CanonicalSocket)
-		}
-		if err := waitForForkSocket(f.SocketPath, 5*time.Second); err != nil {
+		bd, err := m.restoreForkAndWait(f)
+		f.RestoreBreakdown = bd // keep partial phases on failure for debugging
+		if err != nil {
 			f.Status = ForkStatusFailed
 			_ = m.saveFork(f)
 			return err
 		}
 		f.RestoreDuration = time.Since(start).String()
+		bd.TotalMs = durMs(time.Since(start))
 		f.Status = ForkStatusRunning
 		return m.saveFork(f)
 	}); err != nil {
 		return nil, err
 	}
 	return f, nil
+}
+
+// restoreForkAndWait runs the restore helper for f, waits for the fork's
+// shell socket, and assembles the phase breakdown from our own wall clocks,
+// the helper child's timing file, and criu's stats-restore image. The caller
+// must hold the fork lock. On error the returned breakdown carries whatever
+// phases completed.
+func (m *Manager) restoreForkAndWait(f *Fork) (*RestoreBreakdown, error) {
+	bd := &RestoreBreakdown{}
+	helperStart := time.Now()
+	if err := runRestoreHelper(f); err != nil {
+		return bd, err
+	}
+	bd.HelperMs = durMs(time.Since(helperStart))
+	if t, err := readChildRestoreTiming(f); err == nil {
+		bd.MountMs, bd.CriuWallMs = t.MountMs, t.CriuWallMs
+	}
+	if rs, err := readCriuRestoreStats(filepath.Join(f.RootDir, "stats-restore")); err == nil {
+		bd.CriuForkMs = rs.ForkingMs
+		bd.CriuRestoreMs = rs.RestoreMs
+		bd.PagesRestored = rs.PagesRestored
+	}
+
+	if pid, err := readPIDFile(f.PidFile); err == nil {
+		f.PID = pid
+		f.SocketPath = socketPathThroughProcRoot(pid, f.CanonicalSocket)
+	}
+	sockStart := time.Now()
+	if err := waitForForkSocket(f.SocketPath, 5*time.Second); err != nil {
+		return bd, err
+	}
+	bd.SockWaitMs = durMs(time.Since(sockStart))
+	return bd, nil
 }
 
 func (c *CRIUMaterializer) Snapshot(f *Fork, id string) (*Checkpoint, error) {
@@ -260,10 +290,17 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 	if err := m.saveFork(f); err != nil {
 		return fail(err)
 	}
+	snapStart := time.Now()
+	dumpStart := time.Now()
 	if err := m.createMemoryCheckpoint(f.PID, ckptCriu); err != nil {
 		return fail(fmt.Errorf("memory checkpoint failed: %w", err))
 	}
+	breakdown := &SnapshotBreakdown{DumpMs: durMs(time.Since(dumpStart))}
+	if ds, err := readCriuDumpStats(filepath.Join(ckptCriu, "stats-dump")); err == nil {
+		breakdown.Dump = ds
+	}
 
+	sealStart := time.Now()
 	if f.ID == MainForkID {
 		unmountRuntimeFS(f.MountPoint)
 		_ = unix.Unmount(f.MountPoint, unix.MNT_DETACH)
@@ -280,6 +317,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 			return fail(fmt.Errorf("mkdir %s failed: %w", dir, err))
 		}
 	}
+	breakdown.SealMs = durMs(time.Since(sealStart))
 
 	f.BaseCheckpointID = checkpointID
 	f.LayerIDs = layerIDs
@@ -289,22 +327,22 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 	if err := m.saveFork(f); err != nil {
 		return fail(err)
 	}
-	if err := runRestoreHelper(f); err != nil {
+	restoreStart := time.Now()
+	bd, err := m.restoreForkAndWait(f)
+	f.RestoreBreakdown = bd
+	if err != nil {
 		return fail(err)
 	}
-	if pid, err := readPIDFile(f.PidFile); err == nil {
-		f.PID = pid
-		f.SocketPath = socketPathThroughProcRoot(pid, f.CanonicalSocket)
-	}
-	if err := waitForForkSocket(f.SocketPath, 5*time.Second); err != nil {
-		return fail(err)
-	}
+	breakdown.RestoreMs = durMs(time.Since(restoreStart))
+	breakdown.Restore = bd
+	breakdown.TotalMs = durMs(time.Since(snapStart))
 	f.Status = ForkStatusRunning
 	f.RestoreDuration = ""
 	if err := m.saveFork(f); err != nil {
 		return fail(err)
 	}
 
+	metadata.Snapshot = breakdown
 	metadata.PID = f.PID
 	metadata.Status = CheckpointStatusReady
 	if err := m.withSessionLock(func() error {

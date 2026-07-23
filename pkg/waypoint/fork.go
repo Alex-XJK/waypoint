@@ -53,6 +53,9 @@ type Fork struct {
 	RestoreDuration  string     `json:"restore_duration,omitempty"`
 	Status           ForkStatus `json:"status"`
 	LazyPages        bool       `json:"lazy_pages,omitempty"`
+	// RestoreBreakdown is the phase timing of this fork's most recent
+	// restore (instrumentation; see criustats.go).
+	RestoreBreakdown *RestoreBreakdown `json:"restore_breakdown,omitempty"`
 }
 
 // --- fork record persistence ---

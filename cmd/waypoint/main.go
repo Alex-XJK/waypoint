@@ -179,11 +179,15 @@ func main() {
 			os.Exit(1)
 		}
 
-		if _, err := manager.SnapshotFork(waypoint.MainForkID, checkpointID); err != nil {
+		ckpt, err := manager.SnapshotFork(waypoint.MainForkID, checkpointID)
+		if err != nil {
 			fmt.Printf("Error creating checkpoint: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("Checkpoint '%s' created successfully\n", checkpointID)
+		if ckpt.Metadata != nil && ckpt.Metadata.Snapshot != nil {
+			fmt.Printf("phases %s\n", ckpt.Metadata.Snapshot)
+		}
 
 	case "fork":
 		if len(os.Args) < 4 {
@@ -243,7 +247,11 @@ func main() {
 				fmt.Printf("Error creating fork: %v\n", err)
 				os.Exit(1)
 			}
-			fmt.Printf("%s pid=%d socket=%s duration=%s\n", f.ID, f.PID, f.SocketPath, f.RestoreDuration)
+			line := fmt.Sprintf("%s pid=%d socket=%s duration=%s", f.ID, f.PID, f.SocketPath, f.RestoreDuration)
+			if f.RestoreBreakdown != nil {
+				line += " " + f.RestoreBreakdown.String()
+			}
+			fmt.Println(line)
 		}
 
 	case "fork-exec":
@@ -301,11 +309,15 @@ func main() {
 			fmt.Printf("Error loading session: %v\n", err)
 			os.Exit(1)
 		}
-		if _, err := manager.SnapshotFork(forkID, checkpointID); err != nil {
+		ckpt, err := manager.SnapshotFork(forkID, checkpointID)
+		if err != nil {
 			fmt.Printf("Error snapshotting fork: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("Fork '%s' snapshotted as checkpoint '%s'\n", forkID, checkpointID)
+		if ckpt.Metadata != nil && ckpt.Metadata.Snapshot != nil {
+			fmt.Printf("phases %s\n", ckpt.Metadata.Snapshot)
+		}
 
 	case "exec":
 		if len(os.Args) < 6 || os.Args[4] != "--" {

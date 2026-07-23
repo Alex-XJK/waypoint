@@ -9,6 +9,7 @@ package waypoint
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -118,13 +119,25 @@ func RunForkRestoreChildFromArgs(args []string) error {
 	return restoreForkChild(f)
 }
 
+// restoreTimingFile is where the restore child leaves its phase timings for
+// the parent (the helper's stdout is reserved for error reporting).
+const restoreTimingFile = "restore-timing.json"
+
+// childRestoreTiming is the helper child's share of the restore breakdown.
+type childRestoreTiming struct {
+	MountMs    float64 `json:"mount_ms"`
+	CriuWallMs float64 `json:"criu_wall_ms"`
+}
+
 func restoreForkChild(f *Fork) error {
+	mountStart := time.Now()
 	if err := prepareForkMountNamespace(f); err != nil {
 		return err
 	}
 	if err := bringLoopbackUp(); err != nil {
 		return err
 	}
+	timing := childRestoreTiming{MountMs: durMs(time.Since(mountStart))}
 
 	args := []string{
 		"restore",
@@ -132,9 +145,10 @@ func restoreForkChild(f *Fork) error {
 		"--tcp-established",
 		"--restore-detached",
 		"--pidfile", f.PidFile,
-		// Absolute path: criu resolves relative -o against the images dir,
-		// which is shared by all forks of a checkpoint and would make
-		// concurrent restores clobber one another's logs.
+		// The images dir is shared by all forks of a checkpoint, so anything
+		// criu writes by default must be redirected per fork: logs via an
+		// absolute -o path, stats-restore via --work-dir.
+		"--work-dir", f.RootDir,
 		"-vv", "-o", f.LogPath,
 	}
 	if f.LazyPages {
@@ -148,18 +162,38 @@ func restoreForkChild(f *Fork) error {
 	cmd.Dir = f.RootDir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	criuStart := time.Now()
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("criu restore failed: %w\n%s", err, stderr.String())
 	}
+	timing.CriuWallMs = durMs(time.Since(criuStart))
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if pid, err := readPIDFile(f.PidFile); err == nil && pid > 0 {
+			if data, err := json.Marshal(timing); err == nil {
+				_ = os.WriteFile(filepath.Join(f.RootDir, restoreTimingFile), data, 0o644)
+			}
 			return nil
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 	return fmt.Errorf("criu restore did not write pidfile %s", f.PidFile)
+}
+
+// readChildRestoreTiming loads (and consumes) the timing file the restore
+// child left behind; stale files from a previous restore of the same fork
+// are prevented by the removal here.
+func readChildRestoreTiming(f *Fork) (childRestoreTiming, error) {
+	path := filepath.Join(f.RootDir, restoreTimingFile)
+	var t childRestoreTiming
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return t, err
+	}
+	_ = os.Remove(path)
+	err = json.Unmarshal(data, &t)
+	return t, err
 }
 
 // bringLoopbackUp raises lo inside the fresh network namespace so restored
