@@ -39,24 +39,193 @@ func (m *Manager) killProcess(pid int) error {
 		return fmt.Errorf("failed to retrieve process %d: %w", pid, err)
 	}
 
+	// Ask politely first. SIGTERM practically never fails against a live
+	// process, so escalation has to be driven by the process still being alive
+	// after the grace period rather than by this call returning an error.
 	if err := process.Signal(syscall.SIGTERM); err != nil {
-		// If graceful termination fails, try SIGKILL
 		if err := process.Signal(syscall.SIGKILL); err != nil {
 			return fmt.Errorf("failed to kill process %d: %w", pid, err)
 		}
 	}
 
-	// Wait for process to terminate (up to 5 seconds). CRIU restore needs
-	// the checkpointed task IDs to disappear before it can reuse them.
-	for i := 0; i < 50; i++ {
-		if !m.processExists(pid) {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
+	// Wait for process to terminate. CRIU restore needs the checkpointed task
+	// IDs to disappear before it can reuse them.
+	if m.waitForExit(pid, processExitTimeout) {
+		return nil
 	}
 
-	// If still running, force kill
-	return process.Signal(syscall.SIGKILL)
+	// Still alive after the grace period: escalate, then wait again. Returning
+	// as soon as SIGKILL is delivered would let callers unmount while the
+	// process still holds the overlay as its root or cwd.
+	if err := process.Signal(syscall.SIGKILL); err != nil {
+		if m.processGone(pid) {
+			return nil
+		}
+		return fmt.Errorf("failed to force kill process %d: %w", pid, err)
+	}
+	if !m.waitForExit(pid, processExitTimeout) {
+		return fmt.Errorf("process %d is still alive after SIGKILL", pid)
+	}
+
+	return nil
+}
+
+// waitForExit polls until pid is gone or timeout elapses, reporting whether it
+// actually went away.
+func (m *Manager) waitForExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if m.processGone(pid) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(processPollInterval)
+	}
+}
+
+// processGone reports whether pid has released the resources teardown cares
+// about. A zombie counts as gone: it holds no mounts or file descriptors and
+// only leaves the process table once its parent reaps it, which never happens
+// for the orphaned children cleanup kills. Callers that need the PID number
+// itself to be free (CRIU restore) must check /proc separately.
+func (m *Manager) processGone(pid int) bool {
+	if !m.processExists(pid) {
+		return true
+	}
+	state, err := readProcStatusField(filepath.Join("/proc", strconv.Itoa(pid), "status"), "State")
+	if err != nil {
+		// Disappeared between the two checks, or unreadable; assume still there.
+		return os.IsNotExist(err)
+	}
+	return strings.HasPrefix(state, "Z")
+}
+
+// killProcessTree terminates pid and everything currently descending from it.
+// bash_init starts its inner bash with Setsid, so that child forms its own
+// session and survives a plain kill of the parent, staying alive with the
+// overlay as its root and keeping the mount busy forever.
+func (m *Manager) killProcessTree(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+
+	pids, err := collectProcessTree(pid)
+	if err != nil {
+		// Fall back to killing just the root process.
+		return m.killProcess(pid)
+	}
+
+	// Deepest first, so a parent cannot spawn a replacement mid-teardown.
+	var failures []string
+	for i := len(pids) - 1; i >= 0; i-- {
+		if err := m.killProcess(pids[i]); err != nil {
+			failures = append(failures, fmt.Sprintf("%d (%v)", pids[i], err))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("failed to kill process tree of %d: %s", pid, strings.Join(failures, ", "))
+	}
+
+	return nil
+}
+
+// collectProcessTree returns root followed by every process descending from it,
+// breadth-first. The scan has to happen before anything is killed: once a parent
+// dies its children are reparented to init and the relationship is lost.
+func collectProcessTree(root int) ([]int, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan /proc: %w", err)
+	}
+
+	children := make(map[int][]int)
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		ppid, err := readProcStatusInt(filepath.Join("/proc", entry.Name(), "status"), "PPid")
+		if err != nil {
+			continue
+		}
+		children[ppid] = append(children[ppid], pid)
+	}
+
+	ordered := []int{root}
+	seen := map[int]struct{}{root: {}}
+	for i := 0; i < len(ordered); i++ {
+		for _, child := range children[ordered[i]] {
+			if _, dup := seen[child]; dup {
+				continue
+			}
+			seen[child] = struct{}{}
+			ordered = append(ordered, child)
+		}
+	}
+
+	return ordered, nil
+}
+
+// selfAncestry returns the current process and every process it descends from.
+func selfAncestry() map[int]struct{} {
+	ancestry := make(map[int]struct{})
+	for pid := os.Getpid(); pid > 1; {
+		if _, dup := ancestry[pid]; dup {
+			break // Defensive: a cycle should be impossible.
+		}
+		ancestry[pid] = struct{}{}
+		ppid, err := readProcStatusInt(filepath.Join("/proc", strconv.Itoa(pid), "status"), "PPid")
+		if err != nil {
+			break
+		}
+		pid = ppid
+	}
+	return ancestry
+}
+
+// findProcessesRootedIn returns PIDs whose root, cwd, or executable lives under
+// dir. Those are exactly the processes that keep an overlay mount busy. Unlike
+// `lsof +D` this reads four symlinks per process instead of walking the session
+// tree, which matters because a built rootfs puts a full distro under baseDir.
+func (m *Manager) findProcessesRootedIn(dir string) ([]int, error) {
+	if strings.TrimSpace(dir) == "" {
+		return nil, nil
+	}
+
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan /proc: %w", err)
+	}
+
+	// Never kill ourselves or anything we descend from: a user running cleanup
+	// from a directory inside the session would otherwise lose their own shell.
+	protected := selfAncestry()
+
+	var pids []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		if _, skip := protected[pid]; skip {
+			continue
+		}
+		for _, link := range []string{"root", "cwd", "exe"} {
+			target, err := os.Readlink(filepath.Join("/proc", entry.Name(), link))
+			if err != nil {
+				continue
+			}
+			if target == dir || strings.HasPrefix(target, dir+string(os.PathSeparator)) {
+				pids = append(pids, pid)
+				break
+			}
+		}
+	}
+
+	sort.Ints(pids)
+	return pids, nil
 }
 
 // prepareCheckpointRestore clears any live tasks that would block CRIU from
@@ -188,9 +357,18 @@ func (m *Manager) findConflictingCheckpointTasks(taskIDs []int) ([]string, error
 }
 
 func readProcStatusInt(statusPath, field string) (int, error) {
+	value, err := readProcStatusField(statusPath, field)
+	if err != nil {
+		// Returned unwrapped so callers can still use os.IsNotExist.
+		return 0, err
+	}
+	return strconv.Atoi(value)
+}
+
+func readProcStatusField(statusPath, field string) (string, error) {
 	data, err := os.ReadFile(statusPath)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 
 	prefix := field + ":"
@@ -198,11 +376,10 @@ func readProcStatusInt(statusPath, field string) (int, error) {
 		if !strings.HasPrefix(line, prefix) {
 			continue
 		}
-		value := strings.TrimSpace(strings.TrimPrefix(line, prefix))
-		return strconv.Atoi(value)
+		return strings.TrimSpace(strings.TrimPrefix(line, prefix)), nil
 	}
 
-	return 0, fmt.Errorf("field %s not found in %s", field, statusPath)
+	return "", fmt.Errorf("field %s not found in %s", field, statusPath)
 }
 
 // killProcessesUsingDirectory kills processes that have files open in our directory

@@ -60,8 +60,12 @@ func (m *Manager) mountOverlay(lowerDir []string, upperDir, workDir, mountPoint 
 	// Tear them down before replacing the overlay mount.
 	m.unmountRuntimeFS(mountPoint)
 
-	// Unmount if already mounted
-	exec.Command("umount", mountPoint).Run()
+	// Unmount if already mounted. This must not be best-effort: mounting on top
+	// of a mountpoint that failed to unmount stacks a second overlay on the same
+	// path, and every later teardown only ever peels off the topmost one.
+	if err := m.unmountAll(mountPoint); err != nil {
+		return fmt.Errorf("failed to unmount existing overlay at %s: %w", mountPoint, err)
+	}
 
 	// Mount overlay
 	options := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", strings.Join(lowerDir, ":"), upperDir, workDir)
@@ -72,11 +76,100 @@ func (m *Manager) mountOverlay(lowerDir []string, upperDir, workDir, mountPoint 
 	}
 
 	if err := m.mountRuntimeFS(mountPoint); err != nil {
-		_ = exec.Command("umount", mountPoint).Run()
+		_ = m.unmountAll(mountPoint)
 		return fmt.Errorf("mount runtime filesystems failed: %w", err)
 	}
 
 	return nil
+}
+
+// mountPointCount reports how many times path appears as a mount target in the
+// current mount namespace. Stacked mounts on the same directory each count once,
+// which is what makes it possible to tell "unmounted" from "one layer down".
+func mountPointCount(path string) (int, error) {
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return 0, fmt.Errorf("failed to read mountinfo: %w", err)
+	}
+
+	count := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		// Field 5 (1-indexed) of a mountinfo line is the mount point.
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		if unescapeMountField(fields[4]) == path {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// unescapeMountField decodes the octal escapes the kernel writes into mountinfo
+// paths for characters that would otherwise break the field split.
+func unescapeMountField(field string) string {
+	replacer := strings.NewReplacer(
+		`\040`, " ",
+		`\011`, "\t",
+		`\012`, "\n",
+		`\134`, `\`,
+	)
+	return replacer.Replace(field)
+}
+
+// isMountPoint reports whether path currently has anything mounted on it.
+func isMountPoint(path string) bool {
+	count, err := mountPointCount(path)
+	return err == nil && count > 0
+}
+
+// unmountAll unmounts every mount stacked on mountPoint, topmost first, until the
+// path is no longer a mount target. Unlike a single `umount`, it converges when
+// overlays have been stacked by earlier failed teardowns.
+func (m *Manager) unmountAll(mountPoint string) error {
+	if strings.TrimSpace(mountPoint) == "" {
+		return nil
+	}
+
+	for i := 0; i < maxMountLayers; i++ {
+		count, err := mountPointCount(mountPoint)
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return nil
+		}
+		if err := unix.Unmount(mountPoint, 0); err != nil {
+			// EINVAL means it is not a mountpoint after all, so we are done.
+			if err == syscall.EINVAL {
+				return nil
+			}
+			return fmt.Errorf("unmount %s failed: %w", mountPoint, err)
+		}
+	}
+
+	return fmt.Errorf("unmount %s: still mounted after %d layers", mountPoint, maxMountLayers)
+}
+
+// waitForMountCountBelow waits until mountPoint appears fewer than target times in
+// the mount table. Lazy unmounts detach asynchronously, so the mount entry does
+// not disappear the moment the call returns.
+func waitForMountCountBelow(mountPoint string, target int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		count, err := mountPointCount(mountPoint)
+		if err != nil {
+			return err
+		}
+		if count < target {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("lazy unmount of %s did not settle within %s", mountPoint, timeout)
+		}
+		time.Sleep(processPollInterval)
+	}
 }
 
 func (m *Manager) mountRuntimeFS(mountPoint string) error {
@@ -148,24 +241,51 @@ func (m *Manager) forceUnmountOverlays() error {
 	return nil
 }
 
-// forceUnmount attempts to unmount with increasing force
+// forceUnmount attempts to unmount with increasing force, peeling off every
+// layer stacked on mountPoint rather than just the topmost one.
 func (m *Manager) forceUnmount(mountPoint string) error {
+	if strings.TrimSpace(mountPoint) == "" {
+		return nil
+	}
 	fmt.Printf("Attempting to unmount [%s]...\n", mountPoint)
+
+	for i := 0; i < maxMountLayers; i++ {
+		count, err := mountPointCount(mountPoint)
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return nil
+		}
+		if err := m.forceUnmountOneLayer(mountPoint, count); err != nil {
+			return err
+		}
+	}
+
+	return fmt.Errorf("unmount %s: still mounted after %d layers", mountPoint, maxMountLayers)
+}
+
+// forceUnmountOneLayer removes a single mount layer, escalating from a plain
+// unmount to a forced one and finally to a lazy detach. `count` is the number of
+// layers observed before the attempt, used to confirm a lazy detach completed.
+func (m *Manager) forceUnmountOneLayer(mountPoint string, count int) error {
 	// Try normal unmount first
-	cmd := exec.Command("umount", mountPoint)
-	if err := cmd.Run(); err == nil {
+	if err := unix.Unmount(mountPoint, 0); err == nil {
 		return nil
 	}
 
-	// Try lazy unmount
-	cmd = exec.Command("umount", "-l", mountPoint)
-	if err := cmd.Run(); err == nil {
+	// Try force unmount (mainly helps unresponsive network filesystems)
+	if err := exec.Command("umount", "-f", mountPoint).Run(); err == nil {
 		return nil
 	}
 
-	// Try force unmount
-	cmd = exec.Command("umount", "-f", mountPoint)
-	return cmd.Run()
+	// Lazy unmount as the last resort. It detaches asynchronously, so waiting is
+	// what keeps callers from deleting the directory out from under a mount that
+	// has not actually gone away yet.
+	if err := unix.Unmount(mountPoint, unix.MNT_DETACH); err != nil {
+		return fmt.Errorf("lazy unmount %s failed: %w", mountPoint, err)
+	}
+	return waitForMountCountBelow(mountPoint, count, unmountSettleTimeout)
 }
 
 // findMountsInDirectory finds all mount points within our session directory

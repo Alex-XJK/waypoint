@@ -98,8 +98,12 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 
 	// Unmount runtime pseudo filesystems first, then overlay mount.
 	m.unmountRuntimeFS(m.workOverlay)
-	// Unmount current overlay to ensure filesystem consistency
-	exec.Command("umount", m.workOverlay).Run()
+	// Unmount current overlay to ensure filesystem consistency. The rename below
+	// moves this overlay's upperdir and workdir, so it cannot proceed while any
+	// layer is still mounted.
+	if err := m.unmountAll(m.workOverlay); err != nil {
+		return fmt.Errorf("failed to unmount current overlay: %w", err)
+	}
 
 	// Rename "~/current/" to "~/<checkpointID>/"
 	currentDir := filepath.Join(m.baseDir, "current")
@@ -173,8 +177,11 @@ func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
 
 	// Unmount runtime pseudo filesystems first, then overlay mount.
 	m.unmountRuntimeFS(m.workOverlay)
-	// Unmount current overlay for future remount
-	exec.Command("umount", m.workOverlay).Run()
+	// Unmount current overlay for future remount. Wiping upper/work below while
+	// a layer is still mounted would corrupt that overlay.
+	if err := m.unmountAll(m.workOverlay); err != nil {
+		return 0, fmt.Errorf("failed to unmount current overlay: %w", err)
+	}
 
 	// Clear current upper and work directories
 	upperDir := filepath.Join(m.baseDir, "current", "upper")
@@ -234,22 +241,36 @@ func (m *Manager) Cleanup() error {
 
 	// Cleanup shell related resources if shell enabled
 	if m.shellPid != ShellNotEnabled {
-		if err := m.killProcess(m.shellPid); err != nil {
+		if err := m.killProcessTree(m.shellPid); err != nil {
 			fmt.Printf("Warning: Failed to kill shell process: %v\n", err)
-		} else {
-			// Remove the socket file if it exists
-			if m.shellSocket != "" {
-				// Ignore errors - might already be removed
-				os.Remove(m.shellSocket)
+		}
+		// Remove the socket file if it exists. Done regardless of the kill
+		// result so a preserved session never advertises a dead endpoint.
+		if m.shellSocket != "" {
+			// Ignore errors - might already be removed
+			os.Remove(m.shellSocket)
+		}
+	}
+
+	// Anything still rooted in the session directory (restored checkpoint tasks,
+	// stray chrooted shells) holds the overlay busy and has to go first.
+	if pids, err := m.findProcessesRootedIn(m.baseDir); err != nil {
+		fmt.Printf("Warning: Failed to scan for processes using %s: %v\n", m.baseDir, err)
+	} else {
+		for _, pid := range pids {
+			if err := m.killProcess(pid); err != nil {
+				fmt.Printf("Warning: Failed to kill process %d using session directory: %v\n", pid, err)
 			}
 		}
 	}
 
-	// Unmount overlay
+	// Unmount overlay. This must not be best-effort: removing baseDir underneath
+	// a live mount strands the mount and reports a success that never happened.
 	if m.workOverlay != "" {
 		m.unmountRuntimeFS(m.workOverlay)
-		cmd := exec.Command("umount", m.workOverlay)
-		cmd.Run() // Ignore errors - might already be unmounted
+		if err := m.unmountAll(m.workOverlay); err != nil {
+			return fmt.Errorf("failed to unmount work overlay: %w", err)
+		}
 	}
 
 	if PreserveSessionOnCleanup {

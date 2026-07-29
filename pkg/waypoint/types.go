@@ -2,6 +2,8 @@ package waypoint
 
 // All structs, constants, and interfaces
 
+import "time"
+
 // Manager manages runtime checkpoint sessions, the main struct.
 type Manager struct {
 	baseDir       string   // Base directory for this session, e.g., /tmp/waypoint-sessions/a1b2c3d4e5f6g7h8
@@ -45,6 +47,24 @@ const ShellNotEnabled = 0       // Shell is not enabled for this session
 const PidNotProvided = -2       // PID not provided for checkpointing
 
 const SessionInfoDir = "/tmp/waypoint-sessions-info"
+
+// Teardown tuning knobs
+
+// processExitTimeout is how long to wait for a signalled process to disappear
+// before escalating (or giving up).
+const processExitTimeout = 5 * time.Second
+
+// processPollInterval is the polling granularity used while waiting on a process
+// or a mount to go away.
+const processPollInterval = 100 * time.Millisecond
+
+// unmountSettleTimeout is how long to wait for a lazy unmount to actually detach.
+const unmountSettleTimeout = 5 * time.Second
+
+// maxMountLayers bounds how many stacked mounts we try to peel off a single
+// mountpoint. Overlays can be stacked on the same path when an unmount fails and
+// the mount is retried, so teardown has to loop rather than unmount once.
+const maxMountLayers = 64
 
 // The below section declares configuration variables.
 // Those variables can be overridden by configuration.
