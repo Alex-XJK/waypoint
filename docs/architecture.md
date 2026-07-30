@@ -86,13 +86,8 @@ Two binaries, one library:
   `Materializer` interface + `CRIUMaterializer`:
   - `Materialize` — checkpoint -> new live fork (allocate record under the
     session lock, then restore under the fork lock).
-  - `snapshotFork` — non-destructive snapshot: dump the fork with
-    `--leave-running`; a criu post-dump action script copies the fork's
-    upper into the checkpoint layer (reflink where the fs supports it)
-    while the tree is still frozen, so filesystem and memory observe the
-    same instant. The fork keeps its PID, socket, mount, and upper — only
-    its record rebases onto the new checkpoint (the live upper keeps
-    accumulating and shadows the sealed copies in later chains).
+  - `snapshotFork` — dump the fork, seal its upper into a checkpoint, rebase the
+    fork onto the new checkpoint.
 - `fork.go` — live forks: the `Fork` record (paths, socket, PID, status) and
   its persistence; `newForkRecord` (a fresh fork off a checkpoint),
   `saveMainFork` (record `main` after `init --shell`), `DestroyFork`; and the
