@@ -87,7 +87,10 @@ Two binaries, one library:
   - `Materialize` — checkpoint -> new live fork (allocate record under the
     session lock, then restore under the fork lock).
   - `snapshotFork` — dump the fork, seal its upper into a checkpoint, rebase the
-    fork onto the new checkpoint.
+    fork onto the new checkpoint. With park (`snapshot --park` / `ParkFork`),
+    skip the re-restore and release the fork instead: the node survives only as
+    the checkpoint (cheapest persist; revive later with `fork`). `main` cannot
+    be parked.
 - `fork.go` — live forks: the `Fork` record (paths, socket, PID, status) and
   its persistence; `newForkRecord` (a fresh fork off a checkpoint),
   `saveMainFork` (record `main` after `init --shell`), `DestroyFork`; and the

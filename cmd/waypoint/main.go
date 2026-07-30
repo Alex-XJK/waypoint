@@ -41,7 +41,7 @@ func main() {
 		fmt.Println("  checkpoint <session> <checkpoint-id>         - Snapshot main fork")
 		fmt.Println("  fork <session> <checkpoint-id> [--id ID] [--n K] - Materialize live fork(s)")
 		fmt.Println("  exec <session> <fork-id> -- <command>        - Execute command in a fork")
-		fmt.Println("  snapshot <session> <fork-id> <checkpoint-id> - Snapshot a live fork")
+		fmt.Println("  snapshot <session> <fork-id> <checkpoint-id> [--park] - Snapshot a live fork (--park: don't resume it)")
 		fmt.Println("  create <session> <checkpoint-id>             - Legacy alias for checkpoint")
 		fmt.Println("  fork-exec <session> <fork-id> <command>      - Legacy alias for exec")
 		fmt.Println("  destroy <session> <fork-id>                  - Destroy a live fork")
@@ -299,25 +299,41 @@ func main() {
 		fmt.Printf("Fork '%s' destroyed successfully\n", forkID)
 
 	case "snapshot":
-		if len(os.Args) != 5 {
-			fmt.Println("Usage: snapshot <session> <fork-id> <checkpoint-id>")
+		park := false
+		args := []string{}
+		for _, a := range os.Args[2:] {
+			if a == "--park" {
+				park = true
+			} else {
+				args = append(args, a)
+			}
+		}
+		if len(args) != 3 {
+			fmt.Println("Usage: snapshot <session> <fork-id> <checkpoint-id> [--park]")
 			os.Exit(1)
 		}
-		sessionID := os.Args[2]
-		forkID := os.Args[3]
-		checkpointID := os.Args[4]
+		sessionID, forkID, checkpointID := args[0], args[1], args[2]
 
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
 			fmt.Printf("Error loading session: %v\n", err)
 			os.Exit(1)
 		}
-		ckpt, err := manager.SnapshotFork(forkID, checkpointID)
+		var ckpt *waypoint.Checkpoint
+		if park {
+			ckpt, err = manager.ParkFork(forkID, checkpointID)
+		} else {
+			ckpt, err = manager.SnapshotFork(forkID, checkpointID)
+		}
 		if err != nil {
 			fmt.Printf("Error snapshotting fork: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Fork '%s' snapshotted as checkpoint '%s'\n", forkID, checkpointID)
+		if park {
+			fmt.Printf("Fork '%s' parked as checkpoint '%s'\n", forkID, checkpointID)
+		} else {
+			fmt.Printf("Fork '%s' snapshotted as checkpoint '%s'\n", forkID, checkpointID)
+		}
 		if ckpt.Metadata != nil && ckpt.Metadata.Snapshot != nil {
 			fmt.Printf("phases %s\n", ckpt.Metadata.Snapshot)
 		}

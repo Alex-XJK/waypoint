@@ -141,6 +141,29 @@ func (m *Manager) SnapshotFork(forkID, checkpointID string) (*Checkpoint, error)
 	return ckpt, err
 }
 
+// ParkFork turns a live fork into a new checkpoint and releases the fork
+// instead of resuming it: the dump already stopped the tree, its upper is
+// sealed as the checkpoint's delta layer, and the fork's runtime dirs are
+// removed. The node survives only as the checkpoint and can be revived later
+// with ForkCheckpoint (any fork ID, including the parked one, is free again).
+// This is the cheapest persist operation — no re-restore leg — intended for
+// leaving a search-tree node that won't continue running.
+func (m *Manager) ParkFork(forkID, checkpointID string) (*Checkpoint, error) {
+	if forkID == MainForkID {
+		return nil, fmt.Errorf("cannot park %s: the session needs a live main fork", MainForkID)
+	}
+	var ckpt *Checkpoint
+	err := m.withForkLock(forkID, func() error {
+		f, err := m.loadFork(forkID)
+		if err != nil {
+			return err
+		}
+		ckpt, err = m.snapshotFork(f, checkpointID, true)
+		return err
+	})
+	return ckpt, err
+}
+
 func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, error) {
 	m := c.manager
 	if ckpt == nil || ckpt.Metadata == nil {
@@ -234,13 +257,15 @@ func (m *Manager) restoreForkAndWait(f *Fork) (*RestoreBreakdown, error) {
 }
 
 func (c *CRIUMaterializer) Snapshot(f *Fork, id string) (*Checkpoint, error) {
-	return c.manager.snapshotFork(f, id)
+	return c.manager.snapshotFork(f, id, false)
 }
 
-// snapshotFork dumps the fork's process tree, seals its upper dir into the
-// new checkpoint's layer, rebases the fork onto that checkpoint, and restores
-// it. The caller must hold the fork lock.
-func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error) {
+// snapshotFork dumps the fork's process tree and seals its upper dir into the
+// new checkpoint's layer. With park=false it then rebases the fork onto that
+// checkpoint and restores it; with park=true the fork is released instead
+// (the dump already stopped the tree) and only the checkpoint remains. The
+// caller must hold the fork lock.
+func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkpoint, error) {
 	if checkpointID == "" || checkpointID == "current" {
 		return nil, fmt.Errorf("invalid checkpoint ID: %s", checkpointID)
 	}
@@ -249,6 +274,9 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 	}
 	if f.PID <= 0 {
 		return nil, fmt.Errorf("fork %s has no live PID", f.ID)
+	}
+	if park && f.ID == MainForkID {
+		return nil, fmt.Errorf("cannot park %s: the session needs a live main fork", MainForkID)
 	}
 
 	layerIDs := append(append([]string(nil), f.LayerIDs...), checkpointID)
@@ -316,6 +344,41 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string) (*Checkpoint, error
 	if err := os.Rename(f.UpperDir, ckptUpper); err != nil {
 		return fail(fmt.Errorf("seal fork upper failed: %w", err))
 	}
+
+	if park {
+		// The dump already stopped the tree and the checkpoint now owns the
+		// memory image and the sealed delta layer; discard the fork's runtime
+		// remains instead of re-restoring it. A cleanup failure doesn't fail
+		// the park — the checkpoint is already durable.
+		_ = os.Remove(f.SocketPath)
+		if err := os.RemoveAll(f.RootDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: parked fork %s left runtime dir behind: %v\n", f.ID, err)
+		}
+		if PhaseStats {
+			breakdown := &SnapshotBreakdown{
+				DumpMs:  dumpMs,
+				SealMs:  durMs(time.Since(sealStart)),
+				TotalMs: durMs(time.Since(snapStart)),
+			}
+			if ds, err := readCriuDumpStats(filepath.Join(ckptCriu, "stats-dump")); err == nil {
+				breakdown.Dump = ds
+			}
+			metadata.Snapshot = breakdown
+		}
+		metadata.Status = CheckpointStatusReady
+		if err := m.withSessionLock(func() error {
+			return m.saveMetadata(checkpointID, metadata)
+		}); err != nil {
+			return nil, err
+		}
+		return &Checkpoint{
+			ID:       checkpointID,
+			Dir:      ckptDir,
+			CriuPath: ckptCriu,
+			Metadata: &metadata,
+		}, nil
+	}
+
 	if err := os.RemoveAll(f.WorkDir); err != nil {
 		return fail(fmt.Errorf("remove old fork workdir failed: %w", err))
 	}
