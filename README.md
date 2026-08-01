@@ -144,7 +144,7 @@ go build -o bash_init ./cmd/bash-init
 
 ```bash
 waypoint version
-# Output: waypoint version v0.6.1
+# Output: waypoint version v0.6.2
 ```
 
 You can also run the root-level host check from the setup script after manual
@@ -273,6 +273,8 @@ Special options:
 ```bash
 sudo waypoint restore a1b2c3d4e5f6g7h8 checkpoint-name
 ```
+
+Since v0.6.2, `restore` waits for CRIU to finish restoring the process before returning, so an immediate follow-up `exec` does not race process restoration.
 
 ### 5. List Available Sessions and Checkpoints
 
@@ -405,7 +407,7 @@ sudo waypoint cleanup abc123def456
 ### Restoration
 - **Clean Slate**: Stops the current process and unmounts the existing OverlayFS
 - **OverlayFS Restoration**: Restores upper and work layers from the selected checkpoint snapshot
-- **CRIU Restore**: Restores process memory and execution state from the checkpoint
+- **CRIU Restore**: Restores process memory and execution state from the checkpoint and waits for CRIU to complete before reporting success
 
 ### Session Isolation
 Each session gets:
