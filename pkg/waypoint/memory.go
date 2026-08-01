@@ -18,13 +18,8 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 		"-D", criuPath,
 		"--tcp-established",
 		"--manage-cgroups=ignore",
-		// Node 22 keeps inotify watches and unlinked-but-open files (e.g. the
-		// bundled mock-api's working files). --force-irmap lets CRIU resolve
-		// inotify watches via the inode reverse-map when the path is gone, and
-		// --link-remap lets it dump deleted files that still have open fds.
-		// Without both, dumping the shop process tree fails.
-		"--force-irmap",
-		"--link-remap",
+		"--force-irmap", // resolve inotify watches via the inode reverse-map when the path is gone
+		"--link-remap",  // dump deleted files that still have open fds
 		"--file-locks",
 		"--ghost-limit", "8388608",
 		"-vv", "-o", "dump.log",
@@ -50,8 +45,9 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 }
 
 func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
-	// Use CRIU to restore the process. --restore-detached makes CRIU exit
-	// after a successful restore, so waypoint can report real failures.
+	// Use CRIU to restore the process.
+	// Notice: Cannot use '--shell-job' because it will try to attach to the original PTY, which does not exist anymore.
+	// --restore-detached makes CRIU exit after a successful restore, so waypoint can report real failures.
 	cmd := exec.Command(
 		"criu", "restore",
 		"--images-dir", criuPath,

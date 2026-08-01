@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.2 — CRIU Compatibility and Restore Readiness
+**Synchronous restore completion and broader workload support**
+- Made CRIU restore synchronous so `restore` returns only after the restored process is ready for immediate follow-up commands.
+- Added CRIU support for checkpointing and restoring processes that hold file locks.
+- Added inode reverse-map and deleted-file remapping support for Node.js workloads with inotify watches and unlinked-but-open files.
+- Improved cgroup handling and restore preparation to reduce process-ID reuse conflicts.
+
 ## v0.6.1 — Setup Workflow and CLI Inspection
 **Installation polish, release automation, and small usability fixes**
 - Added `setup` script for building, installing, checking, uninstalling, and cleaning Waypoint.

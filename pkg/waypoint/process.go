@@ -46,8 +46,7 @@ func (m *Manager) killProcess(pid int) error {
 		}
 	}
 
-	// Wait for process to terminate (up to 5 seconds). CRIU restore needs
-	// the checkpointed task IDs to disappear before it can reuse them.
+	// Wait for process to terminate (up to 5 seconds).
 	for i := 0; i < 50; i++ {
 		if !m.processExists(pid) {
 			return nil
