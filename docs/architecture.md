@@ -27,7 +27,9 @@ Fork     = a live, mutable instance of one checkpoint   (a running shell)
   own restored shell + control socket. Many can run at once from one checkpoint.
 - **`main`** is just the first fork, created by `init --shell`.
 - **snapshot** seals a live fork into a new checkpoint and rebases the fork
-  onto it — this is what makes recursive forking ordinary.
+  onto it — this is what makes recursive forking ordinary. The CLI's
+  `checkpoint <session> <id>` is shorthand for snapshotting `main`;
+  `fork --n K` materializes K forks off one checkpoint in one command.
 
 ## Component map
 
@@ -65,7 +67,7 @@ Two binaries, one library:
 
 | Binary | Role |
 |---|---|
-| `cmd/waypoint` | The CLI. Thin argv dispatch over the `waypoint` package. Also hosts the hidden `__waypoint_restore_fork_child` re-exec entry point. |
+| `cmd/waypoint` | The CLI. Thin argv dispatch over the `waypoint` package. Also hosts the hidden re-exec entry points: `__waypoint_restore_fork_child` (namespaced restore helper) and `__waypoint_flush_images` (background tmpfs-image flusher). |
 | `cmd/bash-init` | The in-container shell supervisor. Staged inside each session's overlay, checkpointed and restored as part of every fork. See `docs/exec-protocol.md`. |
 | `pkg/waypoint` | Everything else: session/checkpoint/fork lifecycle, CRIU and OverlayFS plumbing, locking. |
 
@@ -78,9 +80,11 @@ Two binaries, one library:
   `flock`-based `withSessionLock` / `withForkLock` (cross-process, because each
   CLI invocation is a separate process), `atomicWriteFile`, and
   `ListSession` / `SessionListing` (the stable `list --json` shape).
-- `config.go` — configuration loading (`loadConfig`: env/file overrides for
-  sessions dir and bash_init path, each tracked back to its source) and
-  `LoadConfigInfo` / `ConfigInfo` for the `info` command.
+- `config.go` — configuration loading (`loadConfig`: env/file overrides, each
+  tracked back to its source) and `LoadConfigInfo` / `ConfigInfo` for the
+  `info` command. Knobs: sessions dir, bash_init path,
+  `preserve_session_on_cleanup`, `tmpfs_images` + `tmpfs_images_dir` (see
+  `imagestore.go`), and `phase_stats` (see `criustats.go`).
 - `checkpoint.go` — immutable checkpoints: `Metadata` (checkpoint record:
   `ParentID`, `LayerIDs`, `PID`, `Status`) and its JSON persistence, plus the
   `Materializer` interface + `CRIUMaterializer`:
@@ -111,6 +115,16 @@ Two binaries, one library:
   restore child's namespace, runtime pseudo-fs mounts (`/proc`, `/sys`), and
   `overlayLowerDirs` (turn a `LayerIDs` chain into ordered overlay lowerdirs:
   newest checkpoint first, original rootfs last).
+- `imagestore.go` — the `tmpfs_images` fast path: `prepareCheckpointImagesDir`
+  makes `checkpoints/<ckpt>/criu` a symlink into a tmpfs dir the dump writes
+  to; `spawnImageFlusher` / `RunImageFlushFromArgs` / `FlushCheckpointImages`
+  copy the images to `checkpoints/<ckpt>/criu.disk` in the background and
+  atomically repoint the symlink; an images `flock` keeps restores and the
+  flusher from racing. With the flag off, `criu` is a plain directory.
+- `criustats.go` — the `phase_stats` instrumentation: `RestoreBreakdown` /
+  `SnapshotBreakdown` (persisted in fork.json / checkpoint metadata, printed
+  as flat `key_ms=` tokens) and a minimal protobuf-varint parser for CRIU's
+  `stats-dump` / `stats-restore` images.
 - `cleanup.go` — the three `Cleanup*` variants (graceful, forced, interactive),
   process existence/kill helpers, and the force-cleanup crew
   (`lsof`/`fuser`/`findmnt`-based).
@@ -124,18 +138,23 @@ Two binaries, one library:
 /tmp/waypoint-sessions/<session>/
   work/                     canonical merged mountpoint (mounted per-fork,
                               differently, in each fork's mount namespace)
+  temp/
+    shell_<session>.sock    canonical control-socket path (main's; each fork
+    shell_<session>.log       has its own socket at this path inside its ns)
   metadata/<ckpt>.json      checkpoint DAG nodes
   checkpoints/<ckpt>/
     upper/                  sealed, immutable filesystem delta
-    criu/                   CRIU memory image (+ dump.log)
+    criu/                   CRIU memory image (+ dump.log); with tmpfs_images
+                              a symlink (tmpfs first, criu.disk/ once flushed)
   forks/<fork>/
     fork.json               live fork record
-    upper/  work/           this fork's private CoW layers
+    upper/  work/  temp/    this fork's private CoW layers + socket dir
     lock                    per-fork flock
     restore.log restore.pid
   locks/session.lock        session-wide flock
 
 /tmp/waypoint-sessions-info/<session>.json   global registry (find a session)
+/dev/shm/waypoint/<session>/<ckpt>/          tmpfs images (tmpfs_images only)
 ```
 
 Overlay lowerdir order for a fork on checkpoint chain `[A,B,C]`:
@@ -144,6 +163,165 @@ Overlay lowerdir order for a fork on checkpoint chain `[A,B,C]`:
 lowerdir = C/upper : B/upper : A/upper : <original rootfs>   (highest prio left)
 upperdir = forks/<fork>/upper      (private, writable)
 ```
+
+## How the tree evolves
+
+The layout above is a steady-state snapshot. What makes the design legible is
+how few filesystem operations ever mutate it: every command is some
+combination of *make empty dirs*, *mount an overlay*, *criu dump/restore*, and
+exactly one `rename(2)`. Below, one session (`S`) walks through the whole
+lifecycle. `(empty)` marks a directory that exists but has no entries; `◄` marks
+what changed in that step.
+
+### Step 1 — `init <rootfs> --shell`: one fork, zero checkpoints
+
+```
+/tmp/waypoint-sessions/S/
+├── work/                        ◄ overlay MOUNTED here (host mount, main only)
+│                                    lowerdir = <rootfs>
+│                                    upperdir = forks/main/upper
+│                                    workdir  = forks/main/work
+├── temp/
+│   ├── shell_S.sock             ◄ main's control socket (canonical path)
+│   └── shell_S.log
+├── metadata/                    (empty — no checkpoints yet)
+├── checkpoints/                 (empty)
+├── forks/
+│   └── main/
+│       ├── fork.json            ◄ PID + socket of the running shell
+│       ├── upper/               ◄ every write the shell makes lands here
+│       ├── work/                  (overlayfs scratch space)
+│       └── temp/
+└── locks/session.lock
+
+/tmp/waypoint-sessions-info/S.json   ◄ global registry entry
+```
+
+`main` is an ordinary fork that happens to have no base checkpoint: its
+`LayerIDs` is empty, so its overlay is just `rootfs + main/upper`. The shell
+runs *inside* the mounted `work/` tree (pivot_root), so `work/` is both the
+mountpoint and the root the checkpointed process believes is `/`.
+
+### Step 2 — `snapshot S main A`: seal main's delta, rebase main onto it
+
+The core move is a single atomic rename — the fork's upper dir *becomes* the
+checkpoint's layer. Nothing is copied.
+
+```
+1. criu dump main's tree     ─────►  checkpoints/A/criu/   (memory image)
+2. unmount work/                     (main's host mount only)
+3. rename forks/main/upper   ─────►  checkpoints/A/upper   ◄ THE seal (rename(2))
+4. recreate forks/main/{upper,work,temp} empty
+5. criu restore main from A          (in fresh namespaces; work/ now mounts
+                                      lowerdir = A/upper : <rootfs>)
+```
+
+```
+/tmp/waypoint-sessions/S/
+├── work/                        (mounted per-fork in namespaces from here on)
+├── metadata/
+│   └── A.json                   ◄ {ParentID:"", LayerIDs:["A"], PID, Status:ready}
+├── checkpoints/
+│   └── A/
+│       ├── upper/               ◄ was forks/main/upper — now sealed, immutable
+│       └── criu/                ◄ CRIU image + dump.log
+└── forks/
+    └── main/
+        ├── fork.json            ◄ rebased: BaseCheckpointID=A, LayerIDs=[A]
+        ├── upper/               ◄ fresh + empty — main's writes start over
+        ├── work/                  (recreated)
+        └── temp/
+```
+
+### Step 3 — `fork S A --id f1`: a second live instance of A
+
+Forking touches only `forks/` — checkpoints are never written after sealing.
+
+```
+/tmp/waypoint-sessions/S/
+├── checkpoints/
+│   └── A/  upper/ criu/         (untouched, shared read-only by main and f1)
+└── forks/
+    ├── main/  ...               (still running, unaffected)
+    └── f1/                      ◄ all new
+        ├── fork.json
+        ├── upper/               ◄ f1's private writes (empty at birth)
+        ├── work/
+        ├── temp/
+        │   └── shell_S.sock     ◄ f1's own socket, reached via /proc/<pid>/root/...
+        ├── restore.log
+        └── restore.pid
+```
+
+Both forks mount an overlay at the *same canonical path* `<session>/work` — but
+each in its own mount namespace, so the mounts don't collide:
+
+```
+main's namespace:  work = main/upper  over  A/upper  over  rootfs
+f1's   namespace:  work = f1/upper    over  A/upper  over  rootfs
+                                            ~~~~~~~~~~~~~~~~~~~~~ shared, read-only
+```
+
+### Step 4 — `snapshot S f1 B`: recursive forking is just step 2 again
+
+```
+f1/upper ──rename──► checkpoints/B/upper      metadata/B.json:
+f1 rebased: LayerIDs=[A,B], fresh empty upper   ParentID: A
+                                                LayerIDs: [A, B]
+```
+
+Now the checkpoint DAG and the layer chains diverge per branch:
+
+```
+        (rootfs)
+           │
+           A ──── main still runs on [A]        work = main/upper : A/upper : rootfs
+           │
+           B ──── f1 now runs on [A,B]          work = f1/upper : B/upper : A/upper : rootfs
+```
+
+### Step 5 — `snapshot S f1 C --park`: persist without resuming
+
+Park is steps 1–3 of a snapshot, then deletion instead of restore:
+
+```
+1. criu dump f1            ─────►  checkpoints/C/criu/
+2. rename f1/upper         ─────►  checkpoints/C/upper
+3. rm -rf forks/f1/                ◄ fork record, socket, logs — all gone
+```
+
+```
+├── metadata/    A.json  B.json  C.json      (C: ParentID=B, LayerIDs=[A,B,C])
+├── checkpoints/ A/      B/      C/          ◄ C is now the ONLY trace of f1
+└── forks/       main/                       ◄ f1 has left the registry
+```
+
+The node survives purely as data. `fork S C --id f2` later revives it —
+which is just step 3, so the revived fork gets a new empty upper on chain
+`[A,B,C]`. (`main` can't be parked; the session needs one live fork.)
+
+### Invariants worth internalizing
+
+- **`checkpoints/<id>/upper` is written exactly once** — by the rename that
+  sealed it. After that it only ever appears on the read-only side of
+  overlay mounts. Deleting a checkpoint that others chain on would corrupt
+  every descendant, which is why nodes are immutable DAG entries.
+- **A fork's cost is its delta.** `forks/<id>/upper` starts empty on every
+  fork *and* after every snapshot; history lives in the sealed layers.
+- **The DAG is the filesystem.** `metadata/*.json` (`ParentID`) is the edge
+  list; `checkpoints/*/upper` are the nodes' payloads; a fork's `LayerIDs` is
+  a root-to-node path through the DAG, applied left-to-right (oldest at the
+  bottom) as overlay lowerdirs.
+- **`work/` is a name, not a place.** After the first snapshot, nothing is
+  mounted there in the host namespace; each fork mounts its own overlay at
+  that canonical path privately, so CRIU images (which bake in absolute
+  paths) stay valid for every fork.
+
+One refinement when `tmpfs_images` is enabled: `checkpoints/<ckpt>/criu` is a
+*symlink*, first to a tmpfs dir the dump writes into (fast), then — after a
+background flusher copies the images — atomically repointed at
+`checkpoints/<ckpt>/criu.disk` (durable). Restores follow the symlink either
+way; see `imagestore.go`.
 
 ## Three flows end to end
 
@@ -162,7 +340,6 @@ CLI (main.go)
          workdir  = forks/main/work
        mount runtime pseudo-fs under the merged root (/proc, /sys)
   -> Manager.StartShell(<session>/work)     (build.go)
-       EnsureCriuCompatible                 (criu.go)
        copy host bash_init -> <session>/work/.waypoint/bash_init
        stage bash_init runtime deps if dynamic
        verify /bin/bash exists; stage bash's runtime deps when possible
@@ -212,10 +389,9 @@ view in its own mount namespace.
 ```
 CLI (main.go)
   -> Manager.ForkCheckpoint            (checkpoint.go)
-       EnsureCriuCompatible            (criu.go)
        LoadCheckpoint A                (metadata + paths)
        CRIUMaterializer.Materialize:
-         withSessionLock: newForkRecord + mkdir upper/work + save fork.json
+         withSessionLock: newForkRecord + mkdir upper/work/temp + save fork.json
          withForkLock:
            runRestoreHelper -> re-exec `__waypoint_restore_fork_child`
              new NEWNS|NEWNET|NEWIPC namespaces          (restoreForkChild)
