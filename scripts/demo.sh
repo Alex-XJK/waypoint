@@ -233,7 +233,10 @@ assert_absent   "parked fork's runtime dir is gone" "$(fork_dir p1)"
 assert_exists   "P's layer has the parked delta"    "$(ck_upper P)/root/parked.txt"
 assert_exists   "P has CRIU images"                 "$(ck_criu P)"
 OUT="$("$W" list "$SESSION" --json 2>&1)"
-assert_not_contains "parked fork no longer listed" '"p1"' "$OUT"
+# checkpoint P legitimately records created_from_fork_id="p1"; only the live
+# forks section must be free of the parked fork
+FORKS_OUT="$(printf '%s\n' "$OUT" | sed -n '/"forks"/,$p')"
+assert_not_contains "parked fork no longer listed" '"p1"' "$FORKS_OUT"
 assert_contains     "parked checkpoint is listed"  '"P"'  "$OUT"
 # revive under the same (now free) fork ID
 run "$W fork $SESSION P --id p1"
