@@ -9,7 +9,7 @@ package main
 // Exec protocol (v2, "WP2"):
 //
 //	request:  <decimal payload length>\n<payload bytes>
-//	response: WP2 <ok|timeout|dead> <exit-code>\n<raw output until close>
+//	response: WP2 <ok|timeout|dead|output_limit|request_too_large> <exit-code>\n<raw output until close>
 //
 // "dead" means the shell process is gone (the command ran `exit`, or it
 // crashed); the fork is no longer usable and bash_init exits shortly after.
@@ -23,7 +23,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -48,6 +47,12 @@ const completionFifoGuestPath = "/.waypoint/exec.done"
 // lifetime by disconnecting (which terminates the foreground process group),
 // so this is a backstop, not a policy.
 const execTimeout = 24 * time.Hour
+
+const (
+	maxRequestHeaderBytes = 32
+	maxCommandBytes       = 1 << 20  // 1 MiB
+	maxCommandOutputBytes = 16 << 20 // 16 MiB
+)
 
 func main() {
 	if len(os.Args) < 3 {
@@ -141,7 +146,7 @@ func main() {
 	}
 
 	// Drain PTY output continuously into a buffer.
-	outputBuffer := &syncBuffer{buf: &bytes.Buffer{}}
+	outputBuffer := newBoundedBuffer(maxCommandOutputBytes)
 	go drainPTY(ptyMaster, outputBuffer)
 
 	// Prove the shell executes commands and neutralize prompt output before
@@ -150,7 +155,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "shell failed startup handshake: %v\n", err)
 		os.Exit(1)
 	}
-	outputBuffer.ReadAndClear() // discard rc-file/prompt noise from startup
+	outputBuffer.Reset() // discard rc-file/prompt noise from startup
 
 	// Create Unix domain socket for command communication
 	os.Remove(socketPath) // Clean up old socket
@@ -292,18 +297,15 @@ func awaitCompletion(completions <-chan string, nonce string, timeout time.Durat
 	}
 }
 
-func handleClient(conn net.Conn, ptyMaster *os.File, shellMutex *sync.Mutex, outputBuffer *syncBuffer, bashPID int, completions <-chan string) {
+func handleClient(conn net.Conn, ptyMaster *os.File, shellMutex *sync.Mutex, outputBuffer *boundedBuffer, bashPID int, completions <-chan string) {
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
 
 	// Read one length-prefixed command from client.
-	lenLine, err := reader.ReadString('\n')
+	payloadLen, err := readPayloadLength(reader)
 	if err != nil {
-		return
-	}
-	payloadLen, err := strconv.Atoi(strings.TrimSpace(lenLine))
-	if err != nil || payloadLen < 0 {
+		respond(conn, "request_too_large", 125, err.Error()+"\n")
 		return
 	}
 	payload := make([]byte, payloadLen)
@@ -322,7 +324,7 @@ func handleClient(conn net.Conn, ptyMaster *os.File, shellMutex *sync.Mutex, out
 
 	// Output produced between commands (background job spew) is not part of
 	// any request/response exchange; drop it.
-	outputBuffer.ReadAndClear()
+	outputBuffer.Reset()
 
 	nonce := newNonce()
 	if !strings.HasSuffix(command, "\n") {
@@ -348,6 +350,12 @@ func handleClient(conn net.Conn, ptyMaster *os.File, shellMutex *sync.Mutex, out
 	for {
 		select {
 		case <-liveness.C:
+			if outputBuffer.Exceeded() {
+				interruptShell(ptyMaster, bashPID)
+				awaitCompletion(completions, nonce, 2*time.Second)
+				respond(conn, "output_limit", 125, collectOutput(outputBuffer))
+				return
+			}
 			// The command killed the shell (e.g. `exit`): no completion is
 			// coming. Report what output we have.
 			if !shellAlive(bashPID) {
@@ -360,7 +368,12 @@ func handleClient(conn net.Conn, ptyMaster *os.File, shellMutex *sync.Mutex, out
 			if !ok {
 				continue // stale nonce or stray write to the FIFO
 			}
-			respond(conn, "ok", code, collectOutput(outputBuffer))
+			output := collectOutput(outputBuffer)
+			if outputBuffer.Exceeded() {
+				respond(conn, "output_limit", 125, output)
+				return
+			}
+			respond(conn, "ok", code, output)
 			return
 
 		case <-timeout:
@@ -393,7 +406,7 @@ func interruptShell(ptyMaster *os.File, bashPID int) {
 // collectOutput reads the buffered PTY output for the command that just
 // completed. The completion line arrives on a different fd than the PTY
 // data, so wait for the PTY to go quiet briefly to catch trailing output.
-func collectOutput(outputBuffer *syncBuffer) string {
+func collectOutput(outputBuffer *boundedBuffer) string {
 	var sb strings.Builder
 	sb.WriteString(outputBuffer.ReadAndClear())
 	deadline := time.Now().Add(250 * time.Millisecond)
@@ -589,28 +602,84 @@ func setRawishNoEcho(tty *os.File) error {
 	return unix.IoctlSetTermios(fd, unix.TCSETS, tio)
 }
 
-// syncBuffer is a thread-safe buffer
-type syncBuffer struct {
-	buf *bytes.Buffer
-	mu  sync.Mutex
+func readPayloadLength(reader *bufio.Reader) (int, error) {
+	header := make([]byte, 0, maxRequestHeaderBytes)
+	for len(header) < maxRequestHeaderBytes {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return 0, fmt.Errorf("read request header: %w", err)
+		}
+		if b == '\n' {
+			length, err := strconv.Atoi(string(header))
+			if err != nil || length < 0 {
+				return 0, fmt.Errorf("invalid request length")
+			}
+			if length > maxCommandBytes {
+				return 0, fmt.Errorf("request is %d bytes; limit is %d", length, maxCommandBytes)
+			}
+			return length, nil
+		}
+		if b < '0' || b > '9' {
+			return 0, fmt.Errorf("invalid request length")
+		}
+		header = append(header, b)
+	}
+	return 0, fmt.Errorf("request header exceeds %d bytes", maxRequestHeaderBytes)
 }
 
-func (sb *syncBuffer) Write(p []byte) (n int, err error) {
-	sb.mu.Lock()
-	defer sb.mu.Unlock()
-	return sb.buf.Write(p)
+// boundedBuffer always consumes PTY bytes so the producer cannot block, but
+// retains at most limit bytes and records truncation for the command handler.
+type boundedBuffer struct {
+	data     []byte
+	limit    int
+	captured int
+	exceeded bool
+	mu       sync.Mutex
 }
 
-func (sb *syncBuffer) ReadAndClear() string {
-	sb.mu.Lock()
-	defer sb.mu.Unlock()
-	data := sb.buf.String()
-	sb.buf.Reset()
+func newBoundedBuffer(limit int) *boundedBuffer {
+	return &boundedBuffer{data: make([]byte, 0, min(limit, 4096)), limit: limit}
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	remaining := b.limit - b.captured
+	if remaining > 0 {
+		n := min(remaining, len(p))
+		b.data = append(b.data, p[:n]...)
+		b.captured += n
+	}
+	if len(p) > remaining {
+		b.exceeded = true
+	}
+	return len(p), nil
+}
+
+func (b *boundedBuffer) ReadAndClear() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data := string(b.data)
+	b.data = b.data[:0]
 	return data
 }
 
+func (b *boundedBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.data = b.data[:0]
+	b.captured = 0
+	b.exceeded = false
+}
+
+func (b *boundedBuffer) Exceeded() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.exceeded
+}
+
 // drainPTY continuously reads from PTY and writes to buffer
-func drainPTY(ptyMaster *os.File, outputBuffer *syncBuffer) {
+func drainPTY(ptyMaster *os.File, outputBuffer *boundedBuffer) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := ptyMaster.Read(buf)

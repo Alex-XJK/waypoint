@@ -27,6 +27,11 @@ Statuses:
 - `dead` — the shell process is gone (the command ran `exit`, or bash
   crashed). The fork is unusable; `bash_init` exits shortly after, removing
   its socket, so later execs fail at dial time.
+- `request_too_large` — the request header is malformed or the payload exceeds
+  1 MiB; exit-code is 125 and the command is not sent to bash.
+- `output_limit` — command output exceeded 16 MiB; the server interrupts the
+  command, keeps draining the PTY so the shell remains synchronized, and
+  returns the retained prefix with exit-code 125.
 
 Clients must treat a response without the `WP2` header as v1 output from a
 bash_init checkpointed before this protocol existed: the whole stream is
@@ -69,13 +74,17 @@ Consequences:
   the backstop fires; the Ctrl-C sent then clears bash's continuation state.
 - **Shell death**: a liveness check turns "completion will never arrive"
   into an immediate `dead` response instead of a hang.
+- **Memory bounds**: request headers are limited to 32 bytes, command payloads
+  to 1 MiB, and retained command output to 16 MiB. The PTY drainer always
+  consumes excess bytes so a noisy child cannot block the supervisor.
 
 ## Known limitations (by design, for now)
 
 - stdout and stderr are merged: both are the same PTY.
 - Output produced by background jobs *between* commands is discarded;
   during a command it is captured as that command's output.
-- No incremental streaming; output is delivered when the command completes.
+- No incremental streaming; up to 16 MiB of output is delivered when the
+  command completes.
 - The payload is one bash input string, not an argv — quoting is the
   caller's responsibility.
 - Fully interactive programs (REPLs, pagers) block the exec until the
