@@ -145,7 +145,7 @@ go build -o bash_init ./cmd/bash-init
 
 ```bash
 ./waypoint version
-# Output: waypoint version v0.6.0
+# Output: waypoint version v0.7.0
 ```
 
 You can also run the root-level host check from the setup script after manual

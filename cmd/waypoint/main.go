@@ -15,7 +15,7 @@ import (
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
 
-var Version = "v0.6.1"
+var Version = "v0.7.0"
 
 // printExecResult writes the command output to stdout and exits with the
 // command's own exit code, so `waypoint exec` composes like ssh/docker exec.

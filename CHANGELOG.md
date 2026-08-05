@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.7.0 — Parallel Forking
+**Live forks from immutable checkpoints: run many divergent copies of one warm process tree concurrently**
+- New public model: a session holds an immutable **checkpoint DAG** plus a registry of **live forks**. `checkpoint`/`snapshot` seal a live fork into a checkpoint; `fork` materializes any checkpoint into a new live fork — including multiple concurrent forks of the same checkpoint, each in its own PID/mount/net/IPC namespaces with a private OverlayFS upper layer.
+- The `main` shell is now a first-class fork created by `init --shell`; recursive forking (fork → exec → snapshot → fork) is ordinary. The legacy destructive `restore` model has been removed.
+- New commands: `fork <session> <checkpoint> [--id ID] [--n K]`, `snapshot <session> <fork> <checkpoint>` (with `--park` to persist a fork as a checkpoint without resuming it), `destroy <session> <fork>`, and `exec <session> <fork> -- <command>`.
+- Exec protocol v2 ("WP2"): completion-FIFO-based command framing with real exit codes, plus bounded request headers (32 B), command payloads (1 MiB), and retained output (16 MiB) with explicit `request_too_large`/`output_limit` statuses.
+- Persistent shell state — environment, cwd, and running background jobs — survives checkpoint, fork, and recursive snapshot. Same-fork operations serialize via file locks; different forks run fully concurrently.
+- CRIU stabilization: PAC-aware CRIU ≥ 4.0 requirement on arm64 enforced by `setup check`, `--file-locks`, Node-friendly dump flags, pidfd release for long-lived children, PTY window-size restore, and per-fork restore logs. Fails fast when the sessions directory exceeds the Unix socket path limit.
+- Optional performance instrumentation: CRIU images on tmpfs with async flush (`WAYPOINT_TMPFS_IMAGES`) and phase-level latency stats (`WAYPOINT_PHASE_STATS`). Baseline fork latency on a minimal rootfs is ~137 ms.
+- `bash_init` is now statically linked and re-execs from inside the session overlay so CRIU can dump it reliably.
+- Testing and docs: `scripts/demo.sh` is an asserting end-to-end test of the full CLI surface; new `docs/architecture.md`, `docs/exec-protocol.md`, and `AGENTS.md`.
+
 ## v0.6.1 — Setup Workflow and CLI Inspection
 **Installation polish, release automation, and small usability fixes**
 - Added `setup` script for building, installing, checking, uninstalling, and cleaning Waypoint.
