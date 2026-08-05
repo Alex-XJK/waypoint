@@ -12,6 +12,13 @@
 - `bash_init` is now statically linked and re-execs from inside the session overlay so CRIU can dump it reliably.
 - Testing and docs: `scripts/demo.sh` is an asserting end-to-end test of the full CLI surface; new `docs/architecture.md`, `docs/exec-protocol.md`, and `AGENTS.md`.
 
+## v0.6.2 — CRIU Compatibility and Restore Readiness
+**Synchronous restore completion and broader workload support**
+- Made CRIU restore synchronous so `restore` returns only after the restored process is ready for immediate follow-up commands.
+- Added CRIU support for checkpointing and restoring processes that hold file locks.
+- Added inode reverse-map and deleted-file remapping support for Node.js workloads with inotify watches and unlinked-but-open files.
+- Improved cgroup handling and restore preparation to reduce process-ID reuse conflicts.
+
 ## v0.6.1 — Setup Workflow and CLI Inspection
 **Installation polish, release automation, and small usability fixes**
 - Added `setup` script for building, installing, checking, uninstalling, and cleaning Waypoint.

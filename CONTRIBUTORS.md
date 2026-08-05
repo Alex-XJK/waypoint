@@ -39,6 +39,7 @@ This project thrives thanks to the efforts and expertise of the following people
 ### Andy Tiancheng Ge
 
 - Fixed the Dockerfile image-tag sanitization issue for generated or unusual build-context directory names.
+- Added CRIU compatibility flags for lock-holding processes and Node.js workloads that use inotify watches or unlinked-but-open files.
 
 
 ## Advisors
