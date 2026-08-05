@@ -94,7 +94,10 @@ echo "built into $BIN"
 # ---------------------------------------------------------------------------
 say "Assemble a minimal rootfs"
 # ---------------------------------------------------------------------------
-mkdir -p "$ROOTFS"/{bin,tmp,proc,sys,dev,root}
+mkdir -p "$ROOTFS"/{bin,tmp,proc,sys,dev,root,usr}
+# The guest shell inherits the host PATH, which may list /usr/bin but not
+# /bin (or vice versa); alias them so either resolves.
+ln -sfn ../bin "$ROOTFS/usr/bin"
 for b in bash cat ls sleep mkdir rm ps grep touch; do
   p="$(command -v "$b" || true)"
   [ -n "$p" ] && [ -f "$p" ] && cp "$p" "$ROOTFS/bin/$(basename "$b")"

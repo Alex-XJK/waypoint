@@ -31,10 +31,7 @@ go.work.sum
 .env
 
 # Local examples/notes not meant for the public repo
-/examples/agent-search/
 /review.md
-/parallel-forking-mvp-plan.md
-/parallel-fork-runtime-bugs.md
 
 # Editor/IDE
 .idea/
