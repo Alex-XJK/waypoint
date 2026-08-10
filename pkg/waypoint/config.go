@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // SessionInfoDir is the fixed-path global store of SessionInfo records.
@@ -117,9 +118,13 @@ const maxUnixSocketPath = 107
 // host-side shell socket dial path would exceed the unix sun_path limit.
 // The host dials /proc/<pid>/root/<sessionsDir>/<16hex>/temp/shell_<16hex>.sock
 // (see socketPathThroughProcRoot); past the limit the dial fails much later
-// with an opaque "connect: invalid argument". scripts/bench.sh applies the
-// same check on its side — keep the numbers and message in sync.
+// with an opaque "connect: invalid argument".
 func validateSessionsDir(dir string) error {
+	// Session paths become OverlayFS lowerdir/upperdir mount options, whose
+	// syntax cannot escape these separators.
+	if strings.ContainsAny(dir, ":,") {
+		return fmt.Errorf("sessions dir %s contains ':' or ',' — not representable in OverlayFS mount options; use a different sessions dir (WAYPOINT_SESSIONS_DIR or sessions_dir in config.json)", dir)
+	}
 	procRootPrefix := len("/proc/1234567/root") // worst-case 7-digit pid
 	sessionSuffix := len("/0123456789abcdef/temp/shell_0123456789abcdef.sock")
 	worstCase := procRootPrefix + len(filepath.Clean(dir)) + sessionSuffix

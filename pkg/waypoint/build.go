@@ -38,9 +38,6 @@ func (m *Manager) BuildEnvironment(dockerfileDir string, quiet bool) (string, in
 	if err := BuildFromDockerfile(dockerfileDir, originalDir, quiet); err != nil {
 		return "", 0, fmt.Errorf("failed to build from Dockerfile: %w", err)
 	}
-	if err := PrepareNetworkDeps(originalDir); err != nil {
-		return "", 0, fmt.Errorf("failed to prepare network: %w", err)
-	}
 
 	m.originalDir = originalDir
 
@@ -50,7 +47,7 @@ func (m *Manager) BuildEnvironment(dockerfileDir string, quiet bool) (string, in
 		return "", 0, fmt.Errorf("failed to initialize overlay environment: %w", err)
 	}
 
-	// Launch new chroot-embedded bash_init in background to set up the environment
+	// Launch bash_init in the background inside fresh namespaces
 	pid, _, err := m.StartShell(workDir)
 	if err != nil {
 		return workDir, pid, fmt.Errorf("failed to start shell in environment: %w", err)
@@ -159,104 +156,62 @@ func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool) error {
 		return err
 	}
 
-	// 5. Copy rootfs -> workspace
-	if _, err := run(exec.Command(
-		"rsync", "-a",
-		rootfs+"/",
-		workspaceDir,
-	), false); err != nil {
-		if _, err := run(exec.Command(
-			"bash", "-lc",
-			fmt.Sprintf("cp -a '%s/.' '%s'", rootfs, workspaceDir),
-		), false); err != nil {
-			return fmt.Errorf("failed to copy rootfs: %w", err)
-		}
-	}
-
-	// 6. Ensure basic char devices exist
-	return prepareDevNodes(filepath.Join(workspaceDir, "dev"))
+	// 5. Copy rootfs -> workspace. The sandbox /dev (device nodes, devpts,
+	// shm) is assembled at session start by bash_init's mountDeviceRuntime.
+	return reflinkCopy(rootfs, workspaceDir)
 }
 
-// prepareDevNodes creates the minimal /dev the environment needs: a
-// world-writable sticky /dev/shm and the basic character devices.
-func prepareDevNodes(devDir string) error {
-	if err := os.MkdirAll(devDir, 0755); err != nil {
-		return fmt.Errorf("failed to create dev directory: %w", err)
-	}
-
-	// Create a mimic /dev/shm with 0x1777
-	shmDir := filepath.Join(devDir, "shm")
-	if fi, err := os.Lstat(shmDir); err == nil {
-		if !fi.IsDir() {
-			if rmErr := os.Remove(shmDir); rmErr != nil {
-				return fmt.Errorf("failed to remove existing %s: %w", shmDir, rmErr)
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("failed to stat %s: %w", shmDir, err)
-	}
-	if err := os.MkdirAll(shmDir, 0o1777); err != nil {
-		return fmt.Errorf("failed to create shm directory: %w", err)
-	}
-	if err := os.Chmod(shmDir, 0o1777); err != nil {
-		return fmt.Errorf("failed to chmod %s: %w", shmDir, err)
-	}
-	_ = os.Chown(shmDir, 0, 0)
-
-	devices := []struct {
-		name         string
-		major, minor uint32
-		perm         os.FileMode
-	}{
-		{"null", 1, 3, 0o666},
-		{"zero", 1, 5, 0o666},
-		{"random", 1, 8, 0o666},
-		{"urandom", 1, 9, 0o666},
-	}
-	for _, d := range devices {
-		if err := makeCharDevice(filepath.Join(devDir, d.name), d.major, d.minor, d.perm); err != nil {
-			return err
-		}
+// reflinkCopy copies the contents of srcDir into dstDir with cp
+// --reflink=auto: instant copy-on-write clones on reflink-capable
+// filesystems (xfs, btrfs), silently degrading to a regular copy elsewhere.
+func reflinkCopy(srcDir, dstDir string) error {
+	out, err := exec.Command("cp", "-a", "--reflink=auto", srcDir+"/.", dstDir).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("copy %s -> %s failed: %w: %s", srcDir, dstDir, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// makeCharDevice (re)creates a character device node with the given major/minor.
-func makeCharDevice(path string, major, minor uint32, perm os.FileMode) error {
-	// Remove existing non-char file
-	if fi, err := os.Lstat(path); err == nil {
-		if fi.Mode()&os.ModeDevice == 0 || fi.Mode()&os.ModeCharDevice == 0 {
-			if rmErr := os.Remove(path); rmErr != nil {
-				return fmt.Errorf("failed to remove existing %s: %w", path, rmErr)
-			}
-		}
+// StageEnvironment snapshots srcDir into the session's private original/
+// directory, which serves as the overlay lowerdir for the session's whole
+// lifetime. Sessions never use the caller's directory directly: OverlayFS
+// does not support a lower layer changing underneath a mounted overlay, so
+// the source must be immune to later edits.
+func (m *Manager) StageEnvironment(srcDir string) (string, error) {
+	absDir, err := filepath.Abs(srcDir)
+	if err != nil {
+		return "", err
 	}
-	// Create node if missing
-	if _, err := os.Lstat(path); os.IsNotExist(err) {
-		dev := unix.Mkdev(major, minor)
-		mode := uint32(unix.S_IFCHR | uint32(perm&0o777))
-		if err := unix.Mknod(path, mode, int(dev)); err != nil {
-			return fmt.Errorf("mknod %s failed (major=%d minor=%d): %w", path, major, minor, err)
-		}
+	if _, err := os.Stat(absDir); err != nil {
+		return "", fmt.Errorf("source directory not usable: %w", err)
 	}
-	// Ensure permissions are as requested (umask-safe)
-	if err := os.Chmod(path, perm); err != nil {
-		return fmt.Errorf("chmod %s failed: %w", path, err)
+	originalDir := filepath.Join(m.baseDir, "original")
+	if err := os.RemoveAll(originalDir); err != nil {
+		return "", fmt.Errorf("failed to clean original directory: %w", err)
 	}
-	// Ensure ownership root:root (best-effort)
-	_ = os.Chown(path, 0, 0)
-	return nil
+	if err := os.MkdirAll(originalDir, 0o755); err != nil {
+		return "", err
+	}
+	if err := reflinkCopy(absDir, originalDir); err != nil {
+		return "", err
+	}
+	return originalDir, nil
 }
 
+// PrepareNetworkDeps seeds minimal name-resolution files into a session
+// rootfs when the image ships none. Called by InitEnvironment against the
+// merged overlay view, so both `init` and `build` sessions get it and the
+// staged files land in the main fork's upper layer, never in the source.
 func PrepareNetworkDeps(rootfs string) error {
 	// DNS
 	if err := copyIfBlank(rootfs, "/etc/resolv.conf"); err != nil {
 		return err
 	}
 
-	// Minimal local files for name resolution
+	// Minimal local files for name resolution; "waypoint" is the sandbox
+	// hostname set by bash_init.
 	const hosts = "" +
-		"127.0.0.1 localhost\n" +
+		"127.0.0.1 localhost waypoint\n" +
 		"::1 localhost ip6-localhost ip6-loopback\n"
 	if err := writeIfBlank(filepath.Join(rootfs, "/etc/hosts"), []byte(hosts), 0o644); err != nil {
 		return err
@@ -274,7 +229,7 @@ func PrepareNetworkDeps(rootfs string) error {
 	return nil
 }
 
-// StartShell launches a new chroot-embedded bash_init process at the given workDir.
+// StartShell launches bash_init in fresh namespaces, pivoted into workDir.
 // On success, it updates the session info with the shell PID and socket path for later use.
 func (m *Manager) StartShell(workDir string) (int, string, error) {
 	// Locate bash_init binary and stage it inside the overlay
@@ -312,7 +267,7 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 
 	cmd := exec.Command(bashInitSrc, canonicalSocketPath, workDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: uintptr(unix.CLONE_NEWPID | unix.CLONE_NEWNS | unix.CLONE_NEWNET | unix.CLONE_NEWIPC),
+		Cloneflags: uintptr(unix.CLONE_NEWPID | unix.CLONE_NEWNS | unix.CLONE_NEWNET | unix.CLONE_NEWIPC | unix.CLONE_NEWUTS),
 		Setsid:     true, // new session = no controlling TTY
 	}
 	// Sessions get a fixed, OCI-style environment instead of inheriting the
@@ -418,11 +373,6 @@ func readRecentFile(path string, maxBytes int) string {
 	return string(data)
 }
 
-// --- dependency staging (ldd -> copy libs into the rootfs) ---
-
-// stageRuntimeDeps copies host-resolved shared-library dependencies of a
-// binary into the rootfs where they are missing. The binary may be a host
-// path or live inside the rootfs.
 // requireStaticBinary rejects a dynamically linked bash_init (one with an
 // ELF interpreter). Non-ELF or unreadable files pass; staging fails on
 // those with clearer errors later.

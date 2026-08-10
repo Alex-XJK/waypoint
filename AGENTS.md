@@ -26,7 +26,7 @@ Two mechanisms make this work:
   copies the rootfs and checkpoint history forms a cheap layer chain.
 
 Checkpoints form a DAG (fork → exec → snapshot → fork again is the normal loop), and
-each live fork runs isolated in its own PID/mount/net/IPC namespaces. On a minimal
+each live fork runs isolated in its own PID/mount/net/IPC/UTS namespaces. On a minimal
 rootfs a fork materializes in roughly 140 ms and a checkpoint/snapshot takes roughly
 240 ms — cheap enough to fork per candidate action.
 
@@ -47,7 +47,7 @@ Read in this order:
   - Fork = live mutable instance of one checkpoint.
   - Snapshot = live fork -> new checkpoint (`--park` persists without resuming the fork).
   - Fork = checkpoint -> live fork. Multiple concurrent forks of one checkpoint are
-    ordinary, each in its own PID/mount/net/IPC namespaces with a private overlay upper.
+    ordinary, each in its own PID/mount/net/IPC/UTS namespaces with a private overlay upper.
 - `main` is just another fork, created by `init --shell`. There is no destructive
   restore; state is always materialized as checkpoint -> new fork.
 - Fork paths must not mutate session-global `current` state.
@@ -141,9 +141,11 @@ sudo ./scripts/demo.sh
 
 A minimal test rootfs needs `/bin/bash`, its shared libraries, the ELF loader
 (`/lib64/ld-linux-x86-64.so.2` on x86-64, `/lib/ld-linux-aarch64.so.1` on arm64), plus
-`/tmp`, `/proc`, `/sys`, `/dev/null`, and any commands the test uses. The guest shell
-inherits the host PATH, so alias `usr/bin -> bin` inside the rootfs (as
-`scripts/demo.sh` does) so commands resolve under any host PATH shape.
+`/tmp`, `/proc`, `/sys`, and any commands the test uses (`/dev` is assembled at
+session start by `bash_init`). The guest shell runs with a fixed environment
+(`PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, `HOME=/root`,
+`TERM`, `LANG`) — never the invoking user's — so put commands under one of those
+standard PATH directories.
 
 ## Non-Obvious Runtime Constraints
 

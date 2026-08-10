@@ -13,6 +13,9 @@
 - Sessions start with a fixed, OCI-style environment (`PATH`, `HOME`, `TERM`, `LANG`) instead of inheriting the invoking user's shell environment (which was baked into every checkpoint); `WAYPOINT_*` plumbing vars no longer reach the guest shell.
 - Removed ldd-based "library healing" of rootfs binaries; a rootfs must ship its own libraries. Shell startup failures now surface the shell's own error output (e.g. the loader naming a missing library) in the `init` error, and `bash_init` is verified static at session start.
 - Removed host `gpgv`/Ubuntu-keyring staging from `build` — a relic of the pre-network-namespace era; sessions are loopback-only, so in-session `apt` cannot fetch packages, and Dockerfile `RUN apt-get` steps run under buildah's own networking. Images must ship their own apt tooling.
+- `init` and `build` now share one rootfs model: the source is snapshotted into the session (`cp --reflink=auto` — instant on xfs/btrfs, plain copy elsewhere) and used as the overlay lower, so editing the source dir during a session can no longer corrupt the overlay; name-resolution seeding (`/etc/hosts`, `nsswitch.conf`, resolv.conf, if the image ships none) now applies to both paths, through the merged view.
+- Sessions get their own UTS namespace with hostname `waypoint` — guests no longer report (or, as root, could rename) the host's hostname; the hostname survives CRIU restore in forks.
+- Sandbox device nodes are now created solely at session start by `bash_init` (umask-proof, works for images with an empty `/dev`); the build-time duplicate is gone, and `bash_init` refuses to run outside waypoint-provided namespaces. Session paths are validated against OverlayFS option separators (`:`/`,`).
 - Testing and docs: `scripts/demo.sh` is an asserting end-to-end test of the full CLI surface; new `docs/architecture.md`, `docs/exec-protocol.md`, and `AGENTS.md`.
 
 ## v0.6.2 — CRIU Compatibility and Restore Readiness

@@ -23,8 +23,9 @@ Fork     = a live, mutable instance of one checkpoint   (a running shell)
 
 - **Checkpoint**: sealed OverlayFS upper layer + CRIU memory image. Immutable.
   Nodes form a DAG via `ParentID`; `LayerIDs` is the resolved layer chain.
-- **Fork**: its own upper/work dirs, its own PID+mount+net+IPC namespaces, its
-  own restored shell + control socket. Many can run at once from one checkpoint.
+- **Fork**: its own upper/work dirs, its own PID+mount+net+IPC+UTS namespaces,
+  its own restored shell + control socket. Many can run at once from one
+  checkpoint.
 - **`main`** is just the first fork, created by `init --shell`.
 - **snapshot** seals a live fork into a new checkpoint and rebases the fork
   onto it — this is what makes recursive forking ordinary. The CLI's
@@ -129,11 +130,13 @@ Two binaries, one library:
   process existence/kill helpers, and the force-cleanup crew
   (`lsof`/`fuser`/`findmnt`-based).
 - `build.go` — `StartShell` (stage `bash_init` into the overlay and launch it
-  namespaced), `BuildEnvironment` / `BuildFromDockerfile` (buildah-based rootfs
-  build), `prepareDevNodes` (seed the rootfs's own `/dev`: basic char devices
-  plus a sticky `shm/` dir; `bash_init` completes it at session start — see
-  the `init --shell` walkthrough), and dependency-staging helpers (`ldd` ->
-  copy libs into rootfs).
+  namespaced), `StageEnvironment` (snapshot a source dir into the session's
+  `original/` lowerdir via `cp --reflink=auto`), `BuildEnvironment` /
+  `BuildFromDockerfile` (buildah-based rootfs build), and
+  `PrepareNetworkDeps` (seed name-resolution files, applied by
+  `InitEnvironment` through the merged view). The sandbox `/dev` is built
+  entirely at session start by `bash_init`'s `mountDeviceRuntime` — see the
+  `init --shell` walkthrough.
 
 ## On-disk layout
 
@@ -335,20 +338,32 @@ CLI (main.go)
   -> NewManagerWithSession                 (manager.go)
        mint session ID
        scaffold <sessions>/<session>/ + global session registry
-  -> Manager.InitEnvironment(rootfs)        (overlay.go)
+  -> Manager.StageEnvironment(rootfs)       (build.go)
+       snapshot rootfs -> <session>/original  (cp --reflink=auto: CoW-instant
+                                               on xfs/btrfs, plain copy
+                                               elsewhere; OverlayFS forbids a
+                                               live lower, so sessions never
+                                               use the caller's dir directly)
+  -> Manager.InitEnvironment(<session>/original)  (overlay.go)
        create forks/main/{upper,work,temp}
        mount overlay at <session>/work:
-         lowerdir = <original rootfs>
+         lowerdir = <session>/original
          upperdir = forks/main/upper
          workdir  = forks/main/work
        mount runtime pseudo-fs under the merged root (/proc, /sys)
+       seed /etc/hosts, nsswitch.conf, resolv.conf through the merged view
+         if the image ships none (lands in main's upper, source untouched)
   -> Manager.StartShell(<session>/work)     (build.go)
+       require bash_init statically linked (it re-execs inside the rootfs)
        copy host bash_init -> <session>/work/.waypoint/bash_init
-       stage bash_init runtime deps if dynamic
-       verify /bin/bash exists; stage bash's runtime deps when possible
+       verify /bin/bash exists (its libraries are the image's own problem —
+         startup failures relay the loader's error via the shell log)
        compute canonical socket:
          <session>/temp/shell_<session>.sock
-       start host bash_init in NEWPID|NEWNS|NEWNET|NEWIPC namespaces:
+       start host bash_init in NEWPID|NEWNS|NEWNET|NEWIPC|NEWUTS namespaces
+         with a fixed OCI-style guest env (PATH, HOME, TERM, LANG — never
+         the invoking user's environment, which would be baked into every
+         checkpoint):
          bash_init <canonical-socket> <session>/work
          WAYPOINT_NAMESPACED=1
          WAYPOINT_REEXEC_PATH=/.waypoint/bash_init
@@ -356,19 +371,28 @@ CLI (main.go)
        save forks/main/fork.json + session shell PID/socket
 ```
 
+(`build` reaches the same point through `BuildFromDockerfile`, which writes
+the buildah rootfs straight into `<session>/original`.)
+
 The important bootstrap happens inside `bash_init` before it starts bash:
 
 ```
-bash_init first image (loaded from the host)
+bash_init first image (loaded from the host; refuses to run outside
+waypoint-provided namespaces)
   setupNamespaceRuntime(<session>/work)       (cmd/bash-init/main.go)
     make mounts private
+    sethostname("waypoint")                   (own UTS ns; guests neither see
+                                               nor can rename the host's)
     bind-mount <session>/work onto itself     (pivot_root requires a mount)
     pivot_root(<session>/work, .waypoint-old-root)
     chdir("/")
     lazy-unmount /.waypoint-old-root
-    assemble /dev inside the session root     (mountDeviceRuntime; OCI-style)
-      mknod any missing basic char devices    (null, zero, full, random,
-                                               urandom, tty)
+    assemble /dev inside the session root     (mountDeviceRuntime; OCI-style;
+                                               sole owner — images may ship
+                                               an empty /dev)
+      mknod the basic char devices, 0666      (null, zero, full, random,
+                                               urandom, tty; replaces
+                                               image-shipped impostors)
       symlink fd/stdin/stdout/stderr          -> /proc/self/fd[/N]
       mount a private tmpfs on /dev/shm
       mount a private devpts on /dev/pts      (newinstance, ptmxmode=0666)
@@ -396,8 +420,8 @@ view in its own mount namespace.
 `/dev` is assembled the way OCI runtimes (runc et al.) do it — device nodes,
 symlinks, and per-session `devpts`/`tmpfs` mounts created inside the session's
 own CoW root — with one deliberate difference: the nodes live in the overlay
-itself (seeded by `prepareDevNodes` at build time, completed here) rather than
-on a tmpfs, so fork restores get them from the overlay lowers with no extra
+itself (created here, at session start, in main's upper) rather than on a
+tmpfs, so fork restores get them from the overlay lowers with no extra
 mount. **Never mount `devtmpfs` here.** It is a kernel-wide singleton
 superblock shared with the host's `/dev`; a private mount namespace isolates
 the mount table, not file contents, so mutations like the `/dev/ptmx` symlink
@@ -418,7 +442,9 @@ CLI (main.go)
              new NEWNS|NEWNET|NEWIPC namespaces          (restoreForkChild)
              mount f1's overlay at <session>/work        (mountOverlay)
              bring loopback up
-             criu restore --restore-detached --pidfile   (CRIU rebuilds pidns)
+             criu restore --restore-detached --pidfile   (CRIU rebuilds the
+                                                          pid and uts ns from
+                                                          the image)
            read restored PID, rewrite socket to /proc/<pid>/root/...
            dial socket until ready -> status = running
 ```

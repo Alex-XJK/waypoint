@@ -41,6 +41,13 @@ func (m *Manager) InitEnvironment(originalDir string) (string, error) {
 		return "", fmt.Errorf("failed to mount overlay: %w", err)
 	}
 
+	// Seed name-resolution files through the merged view (into main's
+	// upper) so init and build sessions behave identically.
+	if err := PrepareNetworkDeps(m.workOverlay); err != nil {
+		_ = unix.Unmount(m.workOverlay, unix.MNT_DETACH)
+		return "", fmt.Errorf("failed to prepare network deps: %w", err)
+	}
+
 	if err := updateSessionEnvironment(m.sessionID, absDir, m.workOverlay); err != nil {
 		return "", fmt.Errorf("failed to update session info: %w", err)
 	}

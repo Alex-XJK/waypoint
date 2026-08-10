@@ -28,6 +28,7 @@ say()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 run()  { printf '\033[0;90m$ %s\033[0m\n' "$*"; eval "$*"; }
 
 PASS=0; FAIL=0
+HOST_HOSTNAME="$(cat /proc/sys/kernel/hostname)"
 ok()   { PASS=$((PASS+1)); printf '   \033[0;32mok\033[0m  %s\n' "$*"; }
 bad()  { FAIL=$((FAIL+1)); printf '   \033[0;31mFAIL\033[0m %s\n' "$*"; }
 
@@ -94,10 +95,9 @@ echo "built into $BIN"
 # ---------------------------------------------------------------------------
 say "Assemble a minimal rootfs"
 # ---------------------------------------------------------------------------
-mkdir -p "$ROOTFS"/{bin,tmp,proc,sys,dev,root,usr}
-# The guest shell inherits the host PATH, which may list /usr/bin but not
-# /bin (or vice versa); alias them so either resolves.
-ln -sfn ../bin "$ROOTFS/usr/bin"
+# No /dev seeding needed: bash_init assembles the sandbox /dev at session
+# start. Commands go in /bin, which the fixed guest PATH includes.
+mkdir -p "$ROOTFS"/{bin,tmp,proc,sys,root}
 for b in bash cat ls sleep mkdir rm ps grep touch; do
   p="$(command -v "$b" || true)"
   [ -n "$p" ] && [ -f "$p" ] && cp "$p" "$ROOTFS/bin/$(basename "$b")"
@@ -110,11 +110,10 @@ for b in "$ROOTFS"/bin/*; do
     cp -n "$(readlink -f "$lib")" "$ROOTFS$lib" 2>/dev/null || true
   done
 done
-# dynamic loader + /dev/null
+# dynamic loader
 for l in /lib/ld-linux-aarch64.so.1 /lib64/ld-linux-x86-64.so.2; do
   [ -f "$l" ] && { mkdir -p "$ROOTFS$(dirname "$l")"; cp -n "$l" "$ROOTFS$l"; }
 done
-mknod "$ROOTFS/dev/null" c 1 3 2>/dev/null || true; chmod 666 "$ROOTFS/dev/null"
 echo "rootfs: $ROOTFS ($(du -sh "$ROOTFS" | cut -f1))"
 
 W="$BIN/waypoint"
@@ -142,6 +141,10 @@ OUT="$("$W" exec "$SESSION" main -- 'echo "PATH=$PATH"; export -p' 2>&1)"
 assert_contains     "guest PATH is the fixed default" "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" "$OUT"
 assert_not_contains "host env does not leak into the guest" "SUDO_USER" "$OUT"
 assert_not_contains "waypoint plumbing vars are stripped from the guest" "WAYPOINT_" "$OUT"
+
+# UTS namespace: the sandbox has its own hostname.
+OUT="$("$W" exec "$SESSION" main -- 'cat /proc/sys/kernel/hostname' 2>&1)"
+assert_contains "guest has its own hostname (UTS namespace)" "waypoint" "$OUT"
 
 # ---------------------------------------------------------------------------
 say "3. checkpoint main -> immutable checkpoint A (delta seal)"
@@ -192,6 +195,8 @@ assert_not_contains "f1 does not see f2's file"           "f2.txt" "$OUT"
 OUT="$("$W" exec "$SESSION" f2 -- 'echo GREETING=$GREETING cwd=$(pwd)' 2>&1)"; echo "$OUT"
 assert_contains "f2 kept its own divergence" "GREETING=f2-only" "$OUT"
 assert_contains "f2 kept its own cwd"        "cwd=/tmp" "$OUT"
+OUT="$("$W" exec "$SESSION" f1 -- 'cat /proc/sys/kernel/hostname' 2>&1)"
+assert_contains "fork keeps the sandbox hostname (CRIU restores the UTS ns)" "waypoint" "$OUT"
 
 # ---------------------------------------------------------------------------
 say "7. exit codes propagate"
@@ -366,6 +371,11 @@ if [ -c /dev/ptmx ] && [ ! -L /dev/ptmx ]; then
   ok "host /dev/ptmx is still a real character device"
 else
   bad "host /dev/ptmx was clobbered: $(ls -l /dev/ptmx 2>&1)"
+fi
+if [ "$(cat /proc/sys/kernel/hostname)" = "$HOST_HOSTNAME" ]; then
+  ok "host hostname unchanged"
+else
+  bad "host hostname changed: $HOST_HOSTNAME -> $(cat /proc/sys/kernel/hostname)"
 fi
 
 # ---------------------------------------------------------------------------

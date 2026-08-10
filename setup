@@ -138,8 +138,8 @@ clean() {
 
 check_command_set() {
   local status=0
-  local required=(criu crit mount umount findmnt lsof fuser ps bash ldd)
-  local optional=(buildah rsync gpgv)
+  local required=(criu crit mount umount cp findmnt lsof fuser ps bash)
+  local optional=(buildah)
 
   log "checking required host commands"
   for cmd in "${required[@]}"; do
@@ -350,12 +350,10 @@ deps_ubuntu() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     bash \
     buildah \
-    gpgv \
     lsof \
     make \
     procps \
     psmisc \
-    rsync \
     util-linux
 
   install_criu

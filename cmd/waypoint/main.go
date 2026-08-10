@@ -99,7 +99,12 @@ func main() {
 			os.Exit(1)
 		}
 
-		overlayPath, err := manager.InitEnvironment(workDir)
+		stagedDir, err := manager.StageEnvironment(workDir)
+		if err != nil {
+			fmt.Printf("Error staging environment: %v\n", err)
+			os.Exit(1)
+		}
+		overlayPath, err := manager.InitEnvironment(stagedDir)
 		if err != nil {
 			fmt.Printf("Error initializing environment: %v\n", err)
 			os.Exit(1)

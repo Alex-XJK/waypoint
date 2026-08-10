@@ -99,8 +99,8 @@ commands, such as `./setup build`, `sudo ./setup install`, and
 - CRIU installed and configured, including the `criu` and `crit` commands
 - OverlayFS support (most modern Linux distributions)
 - Go 1.25 or the version listed in `go.mod` (for building from source)
-- Host utilities used by Waypoint: `mount`, `umount`, `findmnt`, `lsof`, `fuser`, `ps`, `bash`, and `ldd`
-- Optional: `buildah`, `rsync`, and `gpgv` for the build from Dockerfile approach (since v0.5.0)
+- Host utilities used by Waypoint: `mount`, `umount`, `cp`, `findmnt`, `lsof`, `fuser`, `ps`, and `bash`
+- Optional: `buildah` for the build from Dockerfile approach (since v0.5.0)
 
 #### Install Go (just for reference)
 

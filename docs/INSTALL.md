@@ -85,10 +85,6 @@ Required for building from source:
 Optional for `waypoint build`:
 
 - `buildah`
-- `rsync`
-- `bash`
-- `ldd`
-- `gpgv`
 
 Run `sudo ./setup check`, `sudo make check`, or `sudo make doctor` to inspect the current host.
 The check requires root so it can run CRIU the same way Waypoint does. Plain `criu check` is a hard gate; `criu check --all` is reported as an advisory warning because optional missing kernel features may not affect every workload. The check is diagnostic only; it does not add a Waypoint CLI sub-command.

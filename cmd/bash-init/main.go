@@ -69,24 +69,29 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Chroot directory does not exist: %s\n", chrootDir)
 		os.Exit(1)
 	}
-	if os.Getenv("WAYPOINT_NAMESPACED") == "1" {
-		if os.Getenv("WAYPOINT_REEXECED") != "1" {
-			if err := setupNamespaceRuntime(chrootDir); err != nil {
-				fmt.Fprintf(os.Stderr, "failed to set up namespace runtime: %v\n", err)
-				os.Exit(1)
-			}
-			reexecPath := os.Getenv("WAYPOINT_REEXEC_PATH")
-			if reexecPath == "" {
-				reexecPath = "/.waypoint/bash_init"
-			}
-			env := append(os.Environ(), "WAYPOINT_REEXECED=1")
-			if err := syscall.Exec(reexecPath, []string{reexecPath, socketPath, "/"}, env); err != nil {
-				fmt.Fprintf(os.Stderr, "failed to re-exec %s: %v\n", reexecPath, err)
-				os.Exit(1)
-			}
-		}
-		chrootDir = "/"
+	// bash_init only runs inside fresh namespaces provided by waypoint
+	// (StartShell's Cloneflags). Refuse anything else: the setup below
+	// (pivot_root, sethostname) would otherwise mutate the host.
+	if os.Getenv("WAYPOINT_NAMESPACED") != "1" {
+		fmt.Fprintln(os.Stderr, "bash_init must be launched by waypoint inside fresh namespaces; refusing to run directly on the host")
+		os.Exit(1)
 	}
+	if os.Getenv("WAYPOINT_REEXECED") != "1" {
+		if err := setupNamespaceRuntime(chrootDir); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to set up namespace runtime: %v\n", err)
+			os.Exit(1)
+		}
+		reexecPath := os.Getenv("WAYPOINT_REEXEC_PATH")
+		if reexecPath == "" {
+			reexecPath = "/.waypoint/bash_init"
+		}
+		env := append(os.Environ(), "WAYPOINT_REEXECED=1")
+		if err := syscall.Exec(reexecPath, []string{reexecPath, socketPath, "/"}, env); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to re-exec %s: %v\n", reexecPath, err)
+			os.Exit(1)
+		}
+	}
+	chrootDir = "/"
 	// Reap children (the bash we spawn, plus orphans reparented to us when
 	// we are PID 1 of the namespace). We never call cmd.Wait, so this does
 	// not race with os/exec.
@@ -123,7 +128,6 @@ func main() {
 		"--noediting",
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Chroot:  chrootDir,
 		Setsid:  true,
 		Setctty: true,
 		Ctty:    0,
@@ -497,6 +501,13 @@ func setupNamespaceRuntime(chrootDir string) error {
 		return fmt.Errorf("make mount namespace private failed: %w", err)
 	}
 
+	// The session owns a fresh UTS namespace (CLONE_NEWUTS at launch), so
+	// this names only the sandbox. Without the namespace, guests would
+	// report — or as root, rename — the host's hostname.
+	if err := unix.Sethostname([]byte("waypoint")); err != nil {
+		return fmt.Errorf("set sandbox hostname failed: %w", err)
+	}
+
 	if err := pivotIntoSessionRoot(chrootDir); err != nil {
 		return err
 	}
@@ -555,16 +566,17 @@ func pivotIntoSessionRoot(newRoot string) error {
 // /dev/ptmx below — would propagate to the host and break PTY allocation
 // for every unprivileged host process (a private mount namespace isolates
 // the mount table, not the contents of a shared filesystem). Instead the
-// device nodes live in the session rootfs itself (seeded by prepareDevNodes
-// at build time, completed here), so every mutation stays in the session's
-// copy-on-write root.
+// device nodes are created here, in the session rootfs itself, so every
+// mutation stays in the session's copy-on-write root.
 func mountDeviceRuntime() error {
 	if err := os.MkdirAll("/dev", 0o755); err != nil {
 		return err
 	}
 
-	// Standard character devices; null/zero/random/urandom are normally
-	// already present in the session rootfs.
+	// Standard character devices. This is the sole owner of sandbox device
+	// nodes — images may ship none at all (e.g. Docker images with an empty
+	// /dev). The chmod is not optional: mknod is subject to umask and images
+	// ship varying modes.
 	for _, d := range []struct {
 		name         string
 		major, minor uint32
@@ -577,11 +589,20 @@ func mountDeviceRuntime() error {
 		{"tty", 5, 0},
 	} {
 		path := "/dev/" + d.name
-		if _, err := os.Lstat(path); err == nil {
-			continue
+		if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
+			// Some images ship these as symlinks or files; replace with a
+			// real node (a chmod would follow or trip on the symlink).
+			if err := os.Remove(path); err != nil {
+				return fmt.Errorf("remove non-device %s failed: %w", path, err)
+			}
 		}
-		if err := unix.Mknod(path, unix.S_IFCHR|0o666, int(unix.Mkdev(d.major, d.minor))); err != nil && err != unix.EEXIST {
-			return fmt.Errorf("mknod %s failed: %w", path, err)
+		if _, err := os.Lstat(path); err != nil {
+			if err := unix.Mknod(path, unix.S_IFCHR|0o666, int(unix.Mkdev(d.major, d.minor))); err != nil && err != unix.EEXIST {
+				return fmt.Errorf("mknod %s failed: %w", path, err)
+			}
+		}
+		if err := os.Chmod(path, 0o666); err != nil {
+			return fmt.Errorf("chmod %s failed: %w", path, err)
 		}
 	}
 
@@ -598,8 +619,20 @@ func mountDeviceRuntime() error {
 		}
 	}
 
-	// POSIX shared memory on a session-private tmpfs.
+	// POSIX shared memory on a session-private tmpfs. Older images ship
+	// /dev/shm as a symlink (e.g. -> /run/shm); replace it so the mount
+	// lands at the real path. The chmod backstops the umask-subject
+	// MkdirAll for the EBUSY (already-mounted) path; the fresh mount's
+	// mode=1777 covers the normal one.
+	if fi, err := os.Lstat("/dev/shm"); err == nil && !fi.IsDir() {
+		if err := os.Remove("/dev/shm"); err != nil {
+			return fmt.Errorf("remove non-directory /dev/shm failed: %w", err)
+		}
+	}
 	if err := os.MkdirAll("/dev/shm", 0o1777); err != nil {
+		return err
+	}
+	if err := os.Chmod("/dev/shm", 0o1777); err != nil {
 		return err
 	}
 	if err := unix.Mount("tmpfs", "/dev/shm", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=1777"); err != nil && err != syscall.EBUSY {
