@@ -533,13 +533,66 @@ func pivotIntoSessionRoot(newRoot string) error {
 	return nil
 }
 
+// mountDeviceRuntime assembles the session's /dev inside its private root.
+// devtmpfs must never be mounted here: all devtmpfs mounts share one kernel
+// superblock with the host's /dev, so file mutations — such as replacing
+// /dev/ptmx below — would propagate to the host and break PTY allocation
+// for every unprivileged host process (a private mount namespace isolates
+// the mount table, not the contents of a shared filesystem). Instead the
+// device nodes live in the session rootfs itself (seeded by prepareDevNodes
+// at build time, completed here), so every mutation stays in the session's
+// copy-on-write root.
 func mountDeviceRuntime() error {
 	if err := os.MkdirAll("/dev", 0o755); err != nil {
 		return err
 	}
-	if err := unix.Mount("devtmpfs", "/dev", "devtmpfs", unix.MS_NOSUID, "mode=755"); err != nil && err != syscall.EBUSY {
-		return fmt.Errorf("mount devtmpfs on /dev failed: %w", err)
+
+	// Standard character devices; null/zero/random/urandom are normally
+	// already present in the session rootfs.
+	for _, d := range []struct {
+		name         string
+		major, minor uint32
+	}{
+		{"null", 1, 3},
+		{"zero", 1, 5},
+		{"full", 1, 7},
+		{"random", 1, 8},
+		{"urandom", 1, 9},
+		{"tty", 5, 0},
+	} {
+		path := "/dev/" + d.name
+		if _, err := os.Lstat(path); err == nil {
+			continue
+		}
+		if err := unix.Mknod(path, unix.S_IFCHR|0o666, int(unix.Mkdev(d.major, d.minor))); err != nil && err != unix.EEXIST {
+			return fmt.Errorf("mknod %s failed: %w", path, err)
+		}
 	}
+
+	// Shell conveniences (process substitution, /dev/stdin redirections)
+	// previously inherited from the host's devtmpfs.
+	for _, l := range []struct{ link, target string }{
+		{"/dev/fd", "/proc/self/fd"},
+		{"/dev/stdin", "/proc/self/fd/0"},
+		{"/dev/stdout", "/proc/self/fd/1"},
+		{"/dev/stderr", "/proc/self/fd/2"},
+	} {
+		if err := os.Symlink(l.target, l.link); err != nil && !os.IsExist(err) {
+			return fmt.Errorf("create %s symlink failed: %w", l.link, err)
+		}
+	}
+
+	// POSIX shared memory on a session-private tmpfs.
+	if err := os.MkdirAll("/dev/shm", 0o1777); err != nil {
+		return err
+	}
+	if err := unix.Mount("tmpfs", "/dev/shm", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=1777"); err != nil && err != syscall.EBUSY {
+		return fmt.Errorf("mount tmpfs on /dev/shm failed: %w", err)
+	}
+
+	// Private PTY namespace, with its ptmx endpoint reachable at the
+	// conventional /dev/ptmx path. The symlink is created in the session's
+	// private root, so the host's /dev/ptmx is untouched.
 	if err := os.MkdirAll("/dev/pts", 0o755); err != nil {
 		return err
 	}

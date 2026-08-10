@@ -349,6 +349,19 @@ SLEEPS_AFTER="$(pgrep -fc 'sleep 600' || true)"
 SESSION=""  # already cleaned; skip the trap's cleanup
 
 # ---------------------------------------------------------------------------
+say "19. host /dev is untouched"
+# ---------------------------------------------------------------------------
+# Sessions build their /dev inside the private session root; nothing they do
+# may mutate the host's. In particular /dev/ptmx must remain a real character
+# device (5:2) — replacing it with a pts/ptmx symlink breaks forkpty(3) for
+# every unprivileged host process until reboot.
+if [ -c /dev/ptmx ] && [ ! -L /dev/ptmx ]; then
+  ok "host /dev/ptmx is still a real character device"
+else
+  bad "host /dev/ptmx was clobbered: $(ls -l /dev/ptmx 2>&1)"
+fi
+
+# ---------------------------------------------------------------------------
 say "Summary"
 # ---------------------------------------------------------------------------
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
