@@ -48,6 +48,8 @@ By default, `sudo ./setup install` installs:
 
 - `waypoint` to `/usr/local/bin/waypoint`
 - `bash_init` to `/usr/local/libexec/waypoint/bash_init`
+- Bash completion to
+  `/usr/local/share/bash-completion/completions/waypoint`
 - `/etc/waypoint/config.json` with `bash_init_src` pointing at the installed
   helper
 
@@ -60,11 +62,39 @@ PREFIX=/opt/waypoint sudo -E ./setup install
 or more specifically:
 
 ```bash
-BINDIR=/usr/bin LIBEXECDIR=/usr/libexec/waypoint sudo -E ./setup install
+BINDIR=/usr/bin LIBEXECDIR=/usr/libexec/waypoint \
+  BASH_COMPLETION_DIR=/usr/share/bash-completion/completions \
+  sudo -E ./setup install
 ```
 
 If `/etc/waypoint/config.json` already exists, the installer preserves it. Use
 `FORCE_CONFIG=1 sudo -E ./setup install` to replace it with the default config.
+
+## Bash Completion
+
+The installed completion is discovered automatically by the standard
+`bash-completion` package. Start a new Bash session after installation, then
+complete commands and host-directory arguments with Tab:
+
+```bash
+waypoint res<Tab>
+waypoint init /path/to/proj<Tab>
+```
+
+Ubuntu's standard `sudo` completion delegates to command-specific helpers, so
+completion also works after `sudo waypoint`.
+
+The helper completes subcommands, supported flags, and directory arguments for
+`init` and `build`. It intentionally does not query live Waypoint state, so
+session IDs, checkpoint IDs, PIDs, and `exec` arguments must be entered
+manually.
+
+For development, print or source the repository copy without installing it:
+
+```bash
+make completion
+source <(./setup completion)
+```
 
 ## Host Dependencies
 

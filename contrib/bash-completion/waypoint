@@ -1,0 +1,78 @@
+# Bash completion for Waypoint.
+#
+# This intentionally completes only static CLI syntax and host-directory
+# arguments. Session IDs, checkpoint IDs, PIDs, and commands or paths inside a
+# managed environment remain user-supplied.
+
+_waypoint_complete_words()
+{
+    local current="$1"
+    shift
+
+    local candidate
+    for candidate in "$@"; do
+        if [[ "$candidate" == "$current"* ]]; then
+            COMPREPLY+=("$candidate")
+        fi
+    done
+}
+
+_waypoint_complete_directories()
+{
+    local current="$1"
+
+    if declare -F _filedir >/dev/null 2>&1; then
+        # _filedir reads the dynamically scoped `cur` variable used by the
+        # bash-completion project.
+        local cur="$current"
+        _filedir -d
+        return
+    fi
+
+    # Keep the helper useful when sourced without the bash-completion package.
+    mapfile -t COMPREPLY < <(compgen -d -- "$current")
+    compopt -o filenames 2>/dev/null || true
+}
+
+_waypoint()
+{
+    local current="${COMP_WORDS[COMP_CWORD]}"
+    local command="${COMP_WORDS[1]:-}"
+    COMPREPLY=()
+
+    if (( COMP_CWORD == 1 )); then
+        _waypoint_complete_words "$current" \
+            init build create restore exec list cleanup info version \
+            --version -v
+        return
+    fi
+
+    case "$command" in
+        init)
+            if (( COMP_CWORD == 2 )); then
+                _waypoint_complete_directories "$current"
+            else
+                _waypoint_complete_words "$current" --quiet --shell
+            fi
+            ;;
+        build)
+            if (( COMP_CWORD == 2 )); then
+                _waypoint_complete_directories "$current"
+            else
+                _waypoint_complete_words "$current" --quiet
+            fi
+            ;;
+        cleanup)
+            if (( COMP_CWORD >= 3 )); then
+                _waypoint_complete_words "$current" --force
+            fi
+            ;;
+        create)
+            if (( COMP_CWORD >= 4 )); then
+                _waypoint_complete_words "$current" -1
+            fi
+            ;;
+    esac
+}
+
+complete -F _waypoint waypoint
