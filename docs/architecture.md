@@ -130,7 +130,10 @@ Two binaries, one library:
   (`lsof`/`fuser`/`findmnt`-based).
 - `build.go` — `StartShell` (stage `bash_init` into the overlay and launch it
   namespaced), `BuildEnvironment` / `BuildFromDockerfile` (buildah-based rootfs
-  build), and dependency-staging helpers (`ldd` -> copy libs into rootfs).
+  build), `prepareDevNodes` (seed the rootfs's own `/dev`: basic char devices
+  plus a sticky `shm/` dir; `bash_init` completes it at session start — see
+  the `init --shell` walkthrough), and dependency-staging helpers (`ldd` ->
+  copy libs into rootfs).
 
 ## On-disk layout
 
@@ -363,8 +366,14 @@ bash_init first image (loaded from the host)
     pivot_root(<session>/work, .waypoint-old-root)
     chdir("/")
     lazy-unmount /.waypoint-old-root
-    mount /dev, /dev/pts, /proc, /sys
-    make /dev/ptmx -> /dev/pts/ptmx
+    assemble /dev inside the session root     (mountDeviceRuntime; OCI-style)
+      mknod any missing basic char devices    (null, zero, full, random,
+                                               urandom, tty)
+      symlink fd/stdin/stdout/stderr          -> /proc/self/fd[/N]
+      mount a private tmpfs on /dev/shm
+      mount a private devpts on /dev/pts      (newinstance, ptmxmode=0666)
+      symlink /dev/ptmx -> pts/ptmx
+    mount /proc, /sys
     bring loopback up
   execve("/.waypoint/bash_init", socket, "/")
 
@@ -383,6 +392,18 @@ Now the checkpointed supervisor is `/.waypoint/bash_init` inside the overlay,
 with bash, PTY devices, the completion FIFO, and the control socket all in the 
 same session filesystem view. Every later fork can provide that same internal 
 view in its own mount namespace.
+
+`/dev` is assembled the way OCI runtimes (runc et al.) do it — device nodes,
+symlinks, and per-session `devpts`/`tmpfs` mounts created inside the session's
+own CoW root — with one deliberate difference: the nodes live in the overlay
+itself (seeded by `prepareDevNodes` at build time, completed here) rather than
+on a tmpfs, so fork restores get them from the overlay lowers with no extra
+mount. **Never mount `devtmpfs` here.** It is a kernel-wide singleton
+superblock shared with the host's `/dev`; a private mount namespace isolates
+the mount table, not file contents, so mutations like the `/dev/ptmx` symlink
+swap would propagate to the host and break `forkpty(3)` for every unprivileged
+host process until reboot. `scripts/demo.sh` asserts host `/dev/ptmx` integrity
+after every run to keep this invariant honest.
 
 ### `waypoint fork <session> A --id f1`
 
