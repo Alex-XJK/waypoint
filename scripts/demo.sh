@@ -136,6 +136,13 @@ run "$W exec $SESSION main -- 'echo base-content > /root/base.txt'"
 assert_exists "main's write lands in its upper (CoW, not the rootfs)" "$(fork_dir main)/upper/root/base.txt"
 assert_absent "the original rootfs is untouched" "$ROOTFS/root/base.txt"
 
+# The guest environment is the fixed set from StartShell, not the invoking
+# user's (host env would be baked into every checkpoint of the session).
+OUT="$("$W" exec "$SESSION" main -- 'echo "PATH=$PATH"; export -p' 2>&1)"
+assert_contains     "guest PATH is the fixed default" "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" "$OUT"
+assert_not_contains "host env does not leak into the guest" "SUDO_USER" "$OUT"
+assert_not_contains "waypoint plumbing vars are stripped from the guest" "WAYPOINT_" "$OUT"
+
 # ---------------------------------------------------------------------------
 say "3. checkpoint main -> immutable checkpoint A (delta seal)"
 # ---------------------------------------------------------------------------

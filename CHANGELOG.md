@@ -10,6 +10,9 @@
 - CRIU stabilization: PAC-aware CRIU ≥ 4.0 requirement on arm64 enforced by `setup check`, `--file-locks`, Node-friendly dump flags, pidfd release for long-lived children, PTY window-size restore, and per-fork restore logs. Fails fast when the sessions directory exceeds the Unix socket path limit.
 - Optional performance instrumentation: CRIU images on tmpfs with async flush (`WAYPOINT_TMPFS_IMAGES`) and phase-level latency stats (`WAYPOINT_PHASE_STATS`). Baseline fork latency on a minimal rootfs is ~137 ms.
 - `bash_init` is now statically linked and re-execs from inside the session overlay so CRIU can dump it reliably.
+- Sessions start with a fixed, OCI-style environment (`PATH`, `HOME`, `TERM`, `LANG`) instead of inheriting the invoking user's shell environment (which was baked into every checkpoint); `WAYPOINT_*` plumbing vars no longer reach the guest shell.
+- Removed ldd-based "library healing" of rootfs binaries; a rootfs must ship its own libraries. Shell startup failures now surface the shell's own error output (e.g. the loader naming a missing library) in the `init` error, and `bash_init` is verified static at session start.
+- Removed host `gpgv`/Ubuntu-keyring staging from `build` — a relic of the pre-network-namespace era; sessions are loopback-only, so in-session `apt` cannot fetch packages, and Dockerfile `RUN apt-get` steps run under buildah's own networking. Images must ship their own apt tooling.
 - Testing and docs: `scripts/demo.sh` is an asserting end-to-end test of the full CLI surface; new `docs/architecture.md`, `docs/exec-protocol.md`, and `AGENTS.md`.
 
 ## v0.6.2 — CRIU Compatibility and Restore Readiness

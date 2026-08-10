@@ -129,13 +129,24 @@ func main() {
 		Ctty:    0,
 	}
 	cmd.Dir = "/"
-	cmd.Env = append(os.Environ(), "TERM=xterm")
+	// The shell gets bash_init's environment (a fixed set chosen by
+	// StartShell, not the invoking user's) minus the WAYPOINT_* plumbing
+	// vars, which are bash_init implementation details.
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "WAYPOINT_") || strings.HasPrefix(kv, "TERM=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = append(env, "TERM=xterm")
 	cmd.Stdin = ptySlave
 	cmd.Stdout = ptySlave
 	cmd.Stderr = ptySlave
 
 	if err := cmd.Start(); err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "failed to start /bin/bash: %v\n", err)
+		os.Exit(1)
 	}
 
 	bashPID := cmd.Process.Pid
@@ -153,6 +164,11 @@ func main() {
 	// accepting clients: socket presence then means "shell is usable".
 	if err := initShellSession(ptyMaster, completions); err != nil {
 		fmt.Fprintf(os.Stderr, "shell failed startup handshake: %v\n", err)
+		// A shell that died on startup usually said why on the PTY (e.g. the
+		// loader naming a shared library the rootfs is missing).
+		if out := strings.TrimSpace(outputBuffer.ReadAndClear()); out != "" {
+			fmt.Fprintf(os.Stderr, "shell output:\n%s\n", out)
+		}
 		os.Exit(1)
 	}
 	outputBuffer.Reset() // discard rc-file/prompt noise from startup

@@ -2,12 +2,12 @@ package waypoint
 
 // Environment building: buildah-based rootfs builds from a Dockerfile, and
 // StartShell, which stages bash_init into the overlay and launches it in
-// fresh namespaces. Includes the ldd-based dependency-staging helpers.
+// fresh namespaces.
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/sha1"
+	"debug/elf"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -271,16 +271,6 @@ func PrepareNetworkDeps(rootfs string) error {
 		return err
 	}
 
-	// APT signature verification
-	if err := ensureBinAndDeps(rootfs, "/usr/bin/gpgv"); err != nil {
-		return err
-	}
-
-	_ = copyIfBlank(rootfs, "/usr/share/keyrings/ubuntu-archive-keyring.gpg")
-	_ = copyIfBlank(rootfs, "/usr/share/keyrings/ubuntu-archive-removed-keys.gpg")
-	_ = copyIfBlank(rootfs, "/etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg")
-	_ = copyIfBlank(rootfs, "/etc/apt/trusted.gpg.d/ubuntu-keyring-2012-cdimage.gpg")
-
 	return nil
 }
 
@@ -292,11 +282,13 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	if _, err := os.Stat(bashInitSrc); os.IsNotExist(err) {
 		return ShellNotEnabled, "", fmt.Errorf("bash_init binary not found at %s", bashInitSrc)
 	}
+	// bash_init re-execs from inside the session rootfs, where host
+	// libraries are unavailable, so it must be statically linked.
+	if err := requireStaticBinary(bashInitSrc); err != nil {
+		return ShellNotEnabled, "", err
+	}
 	if err := copyFile(bashInitSrc, filepath.Join(workDir, ".waypoint", "bash_init")); err != nil {
 		return ShellNotEnabled, "", fmt.Errorf("failed to stage bash_init in session root: %w", err)
-	}
-	if err := stageRuntimeDeps(workDir, bashInitSrc); err != nil {
-		return ShellNotEnabled, "", fmt.Errorf("failed to stage bash_init runtime dependencies: %w", err)
 	}
 
 	canonicalSocketPath := m.canonicalSocketPath()
@@ -314,22 +306,27 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	if _, err := os.Stat(bashPath); os.IsNotExist(err) {
 		return ShellNotEnabled, "", fmt.Errorf("bash pre-requisite not met: %s does not exist", bashPath)
 	}
-	// A rootfs with bash but without its shared libraries (libtinfo etc.)
-	// produces a shell that dies after startup; heal from the host when the
-	// libraries resolve there.
-	if err := stageRuntimeDeps(workDir, bashPath); err != nil {
-		return ShellNotEnabled, "", fmt.Errorf("failed to stage bash runtime dependencies: %w", err)
-	}
+	// The rootfs must ship bash's own libraries; nothing is healed from the
+	// host. A rootfs missing one fails the startup handshake, and the shell
+	// log surfaced below carries the loader's error naming the library.
 
 	cmd := exec.Command(bashInitSrc, canonicalSocketPath, workDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: uintptr(unix.CLONE_NEWPID | unix.CLONE_NEWNS | unix.CLONE_NEWNET | unix.CLONE_NEWIPC),
 		Setsid:     true, // new session = no controlling TTY
 	}
-	cmd.Env = append(os.Environ(),
+	// Sessions get a fixed, OCI-style environment instead of inheriting the
+	// invoking user's: the guest environment is process state, so anything
+	// passed here is baked into every checkpoint and fork of this session
+	// (and would make guest behavior depend on the host shell's config).
+	cmd.Env = []string{
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"HOME=/root",
+		"TERM=xterm",
+		"LANG=C.UTF-8",
 		"WAYPOINT_NAMESPACED=1",
 		"WAYPOINT_REEXEC_PATH=/.waypoint/bash_init",
-	)
+	}
 
 	// stdin -> /dev/null
 	devNull, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
@@ -359,7 +356,11 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	// Update shell PID and socket path in session info
 	m.shellPid = cmd.Process.Pid
 	m.shellSocket = socketPathThroughProcRoot(m.shellPid, canonicalSocketPath)
-	if err := waitForShellSocket(m.shellSocket, waitCh, logPath, 5*time.Second); err != nil {
+	// Must outlast bash_init's 10s startup handshake: a shell that dies on
+	// startup (e.g. a rootfs missing one of bash's libraries) is reported
+	// through the shell log, which only carries the shell's own error output
+	// once the handshake has given up.
+	if err := waitForShellSocket(m.shellSocket, waitCh, logPath, 15*time.Second); err != nil {
 		_ = cmd.Process.Kill()
 		m.shellPid = ShellNotEnabled
 		m.shellSocket = ""
@@ -422,59 +423,21 @@ func readRecentFile(path string, maxBytes int) string {
 // stageRuntimeDeps copies host-resolved shared-library dependencies of a
 // binary into the rootfs where they are missing. The binary may be a host
 // path or live inside the rootfs.
-func stageRuntimeDeps(rootfs, binaryPath string) error {
-	deps, err := lddPaths(binaryPath)
+// requireStaticBinary rejects a dynamically linked bash_init (one with an
+// ELF interpreter). Non-ELF or unreadable files pass; staging fails on
+// those with clearer errors later.
+func requireStaticBinary(path string) error {
+	f, err := elf.Open(path)
 	if err != nil {
-		return fmt.Errorf("failed to inspect %s runtime dependencies: %w", binaryPath, err)
+		return nil
 	}
-	for _, dep := range deps {
-		if err := copyIfBlank(rootfs, dep); err != nil {
-			return fmt.Errorf("failed to stage dependency %s for %s: %w", dep, binaryPath, err)
+	defer f.Close()
+	for _, p := range f.Progs {
+		if p.Type == elf.PT_INTERP {
+			return fmt.Errorf("%s is dynamically linked and cannot re-exec inside arbitrary session rootfses; rebuild it statically: CGO_ENABLED=0 go build ./cmd/bash-init", path)
 		}
 	}
 	return nil
-}
-
-func ensureBinAndDeps(rootfs, bin string) error {
-	if err := copyIfBlank(rootfs, bin); err != nil {
-		return err
-	}
-	return stageRuntimeDeps(rootfs, bin)
-}
-
-func lddPaths(bin string) ([]string, error) {
-	out, err := exec.Command("ldd", bin).CombinedOutput()
-	text := string(out)
-	if err != nil {
-		if strings.Contains(text, "not a dynamic executable") || strings.Contains(text, "statically linked") {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("ldd %s failed: %w: %s", bin, err, strings.TrimSpace(text))
-	}
-	if strings.Contains(text, "statically linked") {
-		return nil, nil
-	}
-
-	var deps []string
-	seen := map[string]bool{}
-
-	s := bufio.NewScanner(strings.NewReader(text))
-	for s.Scan() {
-		line := s.Text()
-
-		if strings.Contains(line, "not found") {
-			return nil, fmt.Errorf("ldd missing dependency: %s", strings.TrimSpace(line))
-		}
-
-		for _, f := range strings.Fields(line) {
-			if strings.HasPrefix(f, "/") && !seen[f] {
-				seen[f] = true
-				deps = append(deps, f)
-				break
-			}
-		}
-	}
-	return deps, s.Err()
 }
 
 // copyIfBlank copies a host file to the same path inside the rootfs if the
