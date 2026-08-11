@@ -32,26 +32,29 @@ const (
 )
 
 type Fork struct {
-	ID               string     `json:"id"`
-	SessionID        string     `json:"session_id"`
-	BaseCheckpointID string     `json:"base_checkpoint_id"`
-	LayerIDs         []string   `json:"layer_ids"`
-	OriginalDir      string     `json:"original_dir"`
-	RootDir          string     `json:"root_dir"`
-	UpperDir         string     `json:"upper_dir"`
-	WorkDir          string     `json:"work_dir"`
-	TempDir          string     `json:"temp_dir"`
-	CanonicalTempDir string     `json:"canonical_temp_dir"`
-	MountPoint       string     `json:"mount_point"`
-	SocketPath       string     `json:"socket_path"`
-	CanonicalSocket  string     `json:"canonical_socket"`
-	LogPath          string     `json:"log_path"`
-	CriuPath         string     `json:"criu_path"`
-	PidFile          string     `json:"pid_file"`
-	PID              int        `json:"pid"`
-	CreatedAt        int64      `json:"created_at"`
-	RestoreDuration  string     `json:"restore_duration,omitempty"`
-	Status           ForkStatus `json:"status"`
+	ID               string   `json:"id"`
+	SessionID        string   `json:"session_id"`
+	BaseCheckpointID string   `json:"base_checkpoint_id"`
+	LayerIDs         []string `json:"layer_ids"`
+	OriginalDir      string   `json:"original_dir"`
+	RootDir          string   `json:"root_dir"`
+	UpperDir         string   `json:"upper_dir"`
+	WorkDir          string   `json:"work_dir"`
+	TempDir          string   `json:"temp_dir"`
+	CanonicalTempDir string   `json:"canonical_temp_dir"`
+	MountPoint       string   `json:"mount_point"`
+	SocketPath       string   `json:"socket_path"`
+	CanonicalSocket  string   `json:"canonical_socket"`
+	LogPath          string   `json:"log_path"`
+	CriuPath         string   `json:"criu_path"`
+	PidFile          string   `json:"pid_file"`
+	PID              int      `json:"pid"`
+	// StartTime is the PID's /proc stat starttime, recorded at spawn so
+	// kills can verify the identity (PID-reuse safety). 0 = unknown.
+	StartTime       uint64     `json:"start_time,omitempty"`
+	CreatedAt       int64      `json:"created_at"`
+	RestoreDuration string     `json:"restore_duration,omitempty"`
+	Status          ForkStatus `json:"status"`
 	// RestoreBreakdown is the phase timing of this fork's most recent
 	// restore (instrumentation; see criustats.go).
 	RestoreBreakdown *RestoreBreakdown `json:"restore_breakdown,omitempty"`
@@ -169,6 +172,7 @@ func (m *Manager) saveMainFork(pid int, socketPath, canonicalSocket, logPath str
 		CanonicalSocket: canonicalSocket,
 		LogPath:         logPath,
 		PID:             pid,
+		StartTime:       m.shellStartTime,
 		CreatedAt:       time.Now().Unix(),
 		Status:          ForkStatusRunning,
 	}
@@ -188,7 +192,7 @@ func (m *Manager) DestroyFork(forkID string) error {
 			return err
 		}
 		if f.PID > 0 {
-			if err := killProcess(f.PID); err != nil {
+			if err := killTree(f.PID, f.StartTime); err != nil {
 				return err
 			}
 		}

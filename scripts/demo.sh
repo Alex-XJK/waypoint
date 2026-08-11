@@ -266,7 +266,14 @@ say "11. destroy: discard a fork (checkpoints unaffected)"
 # ---------------------------------------------------------------------------
 run "$W fork $SESSION A --id d1"
 run "$W exec $SESSION d1 -- 'echo doomed > /root/doomed.txt'"
+DESTROY_START_MS=$(( $(date +%s%N) / 1000000 ))
 run "$W destroy $SESSION d1"
+DESTROY_MS=$(( $(date +%s%N) / 1000000 - DESTROY_START_MS ))
+if [ "$DESTROY_MS" -lt 2000 ]; then
+  ok "destroy completes without a kill-grace stall (${DESTROY_MS}ms)"
+else
+  bad "destroy took ${DESTROY_MS}ms — kill-grace stall is back?"
+fi
 assert_absent "destroyed fork's dir is gone" "$(fork_dir d1)"
 assert_fails  "exec on a destroyed fork fails" "$W" exec "$SESSION" d1 -- 'echo zombie'
 assert_exists "checkpoint A is unaffected" "$(ck_upper A)/root/base.txt"

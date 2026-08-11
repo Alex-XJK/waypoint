@@ -310,6 +310,7 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 
 	// Update shell PID and socket path in session info
 	m.shellPid = cmd.Process.Pid
+	m.shellStartTime, _ = procStartTime(m.shellPid) // 0 on failure = unverified kill
 	m.shellSocket = socketPathThroughProcRoot(m.shellPid, canonicalSocketPath)
 	// Must outlast bash_init's 10s startup handshake: a shell that dies on
 	// startup (e.g. a rootfs missing one of bash's libraries) is reported
@@ -318,6 +319,7 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	if err := waitForShellSocket(m.shellSocket, waitCh, logPath, 15*time.Second); err != nil {
 		_ = cmd.Process.Kill()
 		m.shellPid = ShellNotEnabled
+		m.shellStartTime = 0
 		m.shellSocket = ""
 		return ShellNotEnabled, "", err
 	}

@@ -246,6 +246,7 @@ func (m *Manager) restoreForkAndWait(f *Fork) (*RestoreBreakdown, error) {
 
 	if pid, err := readPIDFile(f.PidFile); err == nil {
 		f.PID = pid
+		f.StartTime, _ = procStartTime(pid) // 0 on failure = unverified kill
 		f.SocketPath = socketPathThroughProcRoot(pid, f.CanonicalSocket)
 	}
 	sockStart := time.Now()
@@ -433,6 +434,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 	}
 	if f.ID == MainForkID {
 		m.shellPid = f.PID
+		m.shellStartTime = f.StartTime
 		m.shellSocket = f.SocketPath
 		_ = saveSessionInfo(m.sessionID, m)
 	}

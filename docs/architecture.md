@@ -126,9 +126,12 @@ Two binaries, one library:
   `SnapshotBreakdown` (persisted in fork.json / checkpoint metadata, printed
   as flat `key_ms=` tokens) and a minimal protobuf-varint parser for CRIU's
   `stats-dump` / `stats-restore` images.
-- `cleanup.go` — the three `Cleanup*` variants (graceful, forced, interactive),
-  process existence/kill helpers, and the force-cleanup crew
-  (`lsof`/`fuser`/`findmnt`-based).
+- `cleanup.go` — the three `Cleanup*` variants (graceful, forced, interactive)
+  and their machinery: identity-checked kills (pidfd + `/proc` start time, so
+  a recycled PID is never signaled; straight SIGKILL — namespace inits
+  discard SIGTERM, and killing the init tears down the whole tree),
+  `/proc`-walk straggler discovery, and mountinfo-driven unmounting. No
+  external binaries.
 - `build.go` — `StartShell` (stage `bash_init` into the overlay and launch it
   namespaced), `StageEnvironment` (snapshot a source dir into the session's
   `original/` lowerdir via `cp --reflink=auto`), `BuildEnvironment` /

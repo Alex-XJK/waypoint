@@ -87,6 +87,7 @@ func unescapeMountInfoPath(path string) string {
 		`\040`, " ",
 		`\011`, "\t",
 		`\012`, "\n",
+		`\134`, `\`,
 	)
 	return replacer.Replace(path)
 }

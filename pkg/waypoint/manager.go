@@ -26,18 +26,22 @@ type Manager struct {
 	sessionID   string // Unique session identifier, e.g., a1b2c3d4e5f6g7h8
 	shellPid    int    // PID of the shell process if a shell is enabled, ShellNotEnabled(=0) otherwise
 	shellSocket string // Path to the shell socket if enabled, empty otherwise
+	// shellStartTime is shellPid's /proc stat starttime, recorded at spawn
+	// so kills can verify the identity (PID-reuse safety). 0 = unknown.
+	shellStartTime uint64
 }
 
 // SessionInfo holds information about a checkpoint session.
 // It is serialized to JSON and stored in a globally known location for session tracking.
 type SessionInfo struct {
-	SessionID   string `json:"session_id"`
-	BaseDir     string `json:"base_dir"`
-	OriginalDir string `json:"original_dir"`
-	WorkOverlay string `json:"work_overlay"`
-	CreatedAt   int64  `json:"created_at"`
-	ShellPid    int    `json:"shell_pid"`
-	ShellSocket string `json:"shell_socket,omitempty"`
+	SessionID      string `json:"session_id"`
+	BaseDir        string `json:"base_dir"`
+	OriginalDir    string `json:"original_dir"`
+	WorkOverlay    string `json:"work_overlay"`
+	CreatedAt      int64  `json:"created_at"`
+	ShellPid       int    `json:"shell_pid"`
+	ShellStartTime uint64 `json:"shell_start_time,omitempty"`
+	ShellSocket    string `json:"shell_socket,omitempty"`
 }
 
 // PID values for special cases
@@ -85,6 +89,7 @@ func LoadManager(sessionID string) (*Manager, error) {
 	manager.originalDir = sessionInfo.OriginalDir
 	manager.workOverlay = sessionInfo.WorkOverlay
 	manager.shellPid = sessionInfo.ShellPid
+	manager.shellStartTime = sessionInfo.ShellStartTime
 	manager.shellSocket = sessionInfo.ShellSocket
 
 	return manager, nil
@@ -125,13 +130,14 @@ func saveSessionInfo(sessionID string, manager *Manager) error {
 	os.MkdirAll(SessionInfoDir, 0755)
 
 	sessionInfo := SessionInfo{
-		SessionID:   sessionID,
-		BaseDir:     manager.baseDir,
-		OriginalDir: manager.originalDir,
-		WorkOverlay: manager.workOverlay,
-		CreatedAt:   time.Now().Unix(),
-		ShellPid:    manager.shellPid,
-		ShellSocket: manager.shellSocket,
+		SessionID:      sessionID,
+		BaseDir:        manager.baseDir,
+		OriginalDir:    manager.originalDir,
+		WorkOverlay:    manager.workOverlay,
+		CreatedAt:      time.Now().Unix(),
+		ShellPid:       manager.shellPid,
+		ShellStartTime: manager.shellStartTime,
+		ShellSocket:    manager.shellSocket,
 	}
 	return writeSessionInfo(&sessionInfo)
 }

@@ -73,8 +73,7 @@ Required for normal operation:
 - Linux with root privileges
 - OverlayFS support
 - CRIU, including the `criu` and `crit` commands
-- `mount`, `umount`, and `findmnt`
-- `lsof`, `fuser`, and `ps` for cleanup and diagnostics
+- `cp` and `uname` (coreutils)
 - `/bin/bash` inside the workspace/rootfs when using `--shell`
 
 Required for building from source:
