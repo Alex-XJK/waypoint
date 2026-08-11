@@ -9,12 +9,16 @@ import (
 	"strings"
 )
 
-// SessionInfoDir is the fixed-path global store of SessionInfo records.
-const SessionInfoDir = "/tmp/waypoint-sessions-info"
-
 // Configuration variables and where each was resolved from ("default",
 // "env:<VAR>", or "config:<path>"). loadConfig may override them.
 var (
+	// SessionInfoDir is the global store of SessionInfo records. The default
+	// lives in /tmp, which on many distros is a tmpfs aged by
+	// systemd-tmpfiles — sessions meant to survive a reboot (suspend/resume)
+	// need this and SessionsDir on durable storage.
+	SessionInfoDir       = "/tmp/waypoint-sessions-info"
+	SessionInfoDirConfig = "default"
+
 	// DefaultSessionsDir is the default directory for storing checkpoint sessions.
 	DefaultSessionsDir       = "/tmp/waypoint-sessions"
 	DefaultSessionsDirConfig = "default"
@@ -50,6 +54,7 @@ var (
 )
 
 type config struct {
+	SessionInfoDir           string `json:"session_info_dir,omitempty"`
 	SessionsDir              string `json:"sessions_dir,omitempty"`
 	BashInitSrc              string `json:"bash_init_src,omitempty"`
 	PreserveSessionOnCleanup bool   `json:"preserve_session_on_cleanup,omitempty"`
@@ -81,7 +86,7 @@ func LoadConfigInfo() ConfigInfo {
 	return ConfigInfo{
 		SessionInfoDir: ConfigValue{
 			Value:  SessionInfoDir,
-			Source: "default",
+			Source: SessionInfoDirConfig,
 		},
 		SessionsDir: ConfigValue{
 			Value:  DefaultSessionsDir,
@@ -147,6 +152,10 @@ func loadConfig() {
 	// 3) If none found, keep defaults as set above.
 
 	// 1) Direct env var overrides
+	if v := os.Getenv("WAYPOINT_SESSION_INFO_DIR"); v != "" {
+		SessionInfoDir = v
+		SessionInfoDirConfig = "env:WAYPOINT_SESSION_INFO_DIR"
+	}
 	if v := os.Getenv("WAYPOINT_SESSIONS_DIR"); v != "" {
 		DefaultSessionsDir = v
 		DefaultSessionsDirConfig = "env:WAYPOINT_SESSIONS_DIR"
@@ -232,6 +241,10 @@ func loadConfig() {
 			var cfg config
 			if err := json.Unmarshal(data, &cfg); err == nil {
 				configSource := "config:" + cfgPath
+				if cfg.SessionInfoDir != "" && os.Getenv("WAYPOINT_SESSION_INFO_DIR") == "" {
+					SessionInfoDir = cfg.SessionInfoDir
+					SessionInfoDirConfig = configSource
+				}
 				if cfg.SessionsDir != "" && os.Getenv("WAYPOINT_SESSIONS_DIR") == "" {
 					DefaultSessionsDir = cfg.SessionsDir
 					DefaultSessionsDirConfig = configSource

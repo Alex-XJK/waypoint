@@ -163,19 +163,22 @@ You can create a configuration file to set global options. Example content:
 ```json
 {
   "sessions_dir": "/custom/path/waypoint-sessions",
+  "session_info_dir": "/custom/path/waypoint-sessions-info",
   "bash_init_src": "/custom/compiled/bash_init",
   "preserve_session_on_cleanup": false
 }
 ```
 
 Configuration takes effect in the following order of precedence:
-1. The direct environment variable `WAYPOINT_SESSIONS_DIR`, `WAYPOINT_BASH_INIT_SRC`, `WAYPOINT_PRESERVE_SESSION_ON_CLEANUP`, etc. (if set)
+1. The direct environment variable `WAYPOINT_SESSIONS_DIR`, `WAYPOINT_SESSION_INFO_DIR`, `WAYPOINT_BASH_INIT_SRC`, `WAYPOINT_PRESERVE_SESSION_ON_CLEANUP`, etc. (if set)
 2. Load from configuration file (if exists):
    - Explicit `WAYPOINT_CONFIG` environment variable
    - Binary-side config: `./config.json` (same dir as executable)
    - User config: `$XDG_CONFIG_HOME/waypoint/config.json` or `~/.waypoint/config.json`
    - System config: `/etc/waypoint/config.json`
 3. Default settings.
+
+Note: the default `sessions_dir` and `session_info_dir` live under `/tmp`, which is a tmpfs on many distros. Sessions that should survive a reboot (see `suspend`) need both configured onto durable storage.
 
 ### 1. Initialize Environment
 
@@ -307,7 +310,15 @@ sudo ./waypoint info a1b2c3d4e5f6g7h8 checkpoint-name
 
 The `info` command prints JSON for system/configuration details, a specific session, or a specific checkpoint.
 
-### 7. Clean Up Session
+### 7. Suspend Session
+
+```bash
+sudo ./waypoint suspend a1b2c3d4e5f6g7h8
+```
+
+Ends all of the session's live compute while keeping every checkpoint on disk: running forks are destroyed (their un-snapshotted divergence is discarded — `snapshot` a fork first if you want to keep its latest state), leftover processes and mounts are swept, and any tmpfs-resident CRIU images are flushed to durable disk. The session stays registered; `waypoint fork <session> <checkpoint>` resumes from any checkpoint later — even after a reboot, provided `sessions_dir` and `session_info_dir` are on durable storage (see section 0).
+
+### 8. Clean Up Session
 
 ```bash
 sudo ./waypoint cleanup a1b2c3d4e5f6g7h8

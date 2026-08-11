@@ -155,11 +155,13 @@ func loadSessionInfo(sessionID string) (*SessionInfo, error) {
 
 // LoadSessionInfo returns persisted information for a checkpoint session.
 func LoadSessionInfo(sessionID string) (*SessionInfo, error) {
+	loadConfig() // SessionInfoDir is configurable
 	return loadSessionInfo(sessionID)
 }
 
 // ListSessions returns all session IDs recorded in the global session store.
 func ListSessions() ([]string, error) {
+	loadConfig() // SessionInfoDir is configurable
 	files, err := os.ReadDir(SessionInfoDir)
 	if err != nil {
 		if os.IsNotExist(err) {

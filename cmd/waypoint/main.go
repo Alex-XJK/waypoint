@@ -46,6 +46,7 @@ func main() {
 		fmt.Println("  fork-exec <session> <fork-id> <command>      - Legacy alias for exec")
 		fmt.Println("  destroy <session> <fork-id>                  - Destroy a live fork")
 		fmt.Println("  list <session> [--json]                      - List checkpoints and forks")
+		fmt.Println("  suspend <session>                            - End all live forks; keep checkpoints on disk")
 		fmt.Println("  cleanup <session> [--force]                  - Clean up session")
 		fmt.Println("  info [session [checkpoint-id]]               - Show system, session, or checkpoint info")
 		fmt.Println("  version                                      - Show version")
@@ -425,6 +426,22 @@ func main() {
 				fmt.Printf("  %s checkpoint=%s status=%s pid=%d socket=%s\n", f.ID, f.BaseCheckpointID, f.Status, f.PID, f.SocketPath)
 			}
 		}
+
+	case "suspend":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: suspend <session>")
+			os.Exit(1)
+		}
+		manager, err := waypoint.LoadManager(os.Args[2])
+		if err != nil {
+			fmt.Printf("Error loading session: %v\n", err)
+			os.Exit(1)
+		}
+		if err := manager.Suspend(); err != nil {
+			fmt.Printf("Error suspending session: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Session '%s' suspended; checkpoints remain on disk — `waypoint fork` any of them to resume\n", os.Args[2])
 
 	case "cleanup":
 		if len(os.Args) < 3 {

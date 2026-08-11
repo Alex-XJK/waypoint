@@ -126,8 +126,11 @@ Two binaries, one library:
   `SnapshotBreakdown` (persisted in fork.json / checkpoint metadata, printed
   as flat `key_ms=` tokens) and a minimal protobuf-varint parser for CRIU's
   `stats-dump` / `stats-restore` images.
-- `cleanup.go` — the three `Cleanup*` variants (graceful, forced, interactive)
-  and their machinery: identity-checked kills (pidfd + `/proc` start time, so
+- `cleanup.go` — `Suspend` (end all live forks and sweep processes/mounts
+  while keeping the checkpoint DAG on disk and the session registered;
+  pending tmpfs images are flushed to durable disk first, as they are for
+  preserve-mode cleanup) plus the three `Cleanup*` variants (graceful,
+  forced, interactive) and their machinery: identity-checked kills (pidfd + `/proc` start time, so
   a recycled PID is never signaled; straight SIGKILL — namespace inits
   discard SIGTERM, and killing the init tears down the whole tree),
   `/proc`-walk straggler discovery, and mountinfo-driven unmounting. No

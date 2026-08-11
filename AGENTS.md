@@ -78,6 +78,7 @@ waypoint snapshot <session> <fork-id> <checkpoint-id> [--park]
 waypoint destroy <session> <fork-id>
 waypoint list [session] [--json]
 waypoint info [session [checkpoint-id]]
+waypoint suspend <session>                          # end live forks; keep checkpoints on disk (fork to resume)
 waypoint cleanup <session> [--force]
 waypoint version
 ```

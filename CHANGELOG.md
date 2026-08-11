@@ -16,6 +16,9 @@
 - `init` and `build` now share one rootfs model: the source is snapshotted into the session (`cp --reflink=auto` — instant on xfs/btrfs, plain copy elsewhere) and used as the overlay lower, so editing the source dir during a session can no longer corrupt the overlay; name-resolution seeding (`/etc/hosts`, `nsswitch.conf`, resolv.conf, if the image ships none) now applies to both paths, through the merged view.
 - Sessions get their own UTS namespace with hostname `waypoint` — guests no longer report (or, as root, could rename) the host's hostname; the hostname survives CRIU restore in forks.
 - Sandbox device nodes are now created solely at session start by `bash_init` (umask-proof, works for images with an empty `/dev`); the build-time duplicate is gone, and `bash_init` refuses to run outside waypoint-provided namespaces. Session paths are validated against OverlayFS option separators (`:`/`,`).
+- New `suspend <session>` command: ends all live forks (a cousin of `cleanup` that keeps every checkpoint on disk and the session registered), sweeps leftover processes and mounts, and flushes tmpfs-resident CRIU images to durable disk; `fork` any checkpoint later to resume. Un-snapshotted fork divergence is discarded — checkpoints are the durable state.
+- The session registry location is now configurable (`session_info_dir` / `WAYPOINT_SESSION_INFO_DIR`, same precedence as the other settings); with it and `sessions_dir` on durable storage, suspended sessions survive reboots.
+- Fixed preserve-mode cleanup deleting not-yet-flushed tmpfs images: paths that keep disk state (suspend, `preserve_session_on_cleanup`) now flush pending checkpoint images to disk first and leave tmpfs copies in place if a flush fails.
 - Testing and docs: `scripts/demo.sh` is an asserting end-to-end test of the full CLI surface; new `docs/architecture.md`, `docs/exec-protocol.md`, and `AGENTS.md`.
 
 ## v0.6.2 — CRIU Compatibility and Restore Readiness

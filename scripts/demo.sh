@@ -356,7 +356,40 @@ OUT="$("$W" info "$SESSION" D3 2>&1)"
 assert_contains "checkpoint info records DAG lineage (D3's parent is D2)" '"parent_id": "D2"' "$OUT"
 
 # ---------------------------------------------------------------------------
-say "18. cleanup leaves nothing behind"
+say "18. suspend: end all compute, keep the DAG on disk"
+# ---------------------------------------------------------------------------
+run "$W suspend $SESSION"
+MNTS="$(grep -c "$SESSION" /proc/mounts || true)"
+[ "$MNTS" -eq 0 ] && ok "no mounts after suspend" || bad "$MNTS mount(s) survived suspend"
+assert_absent "running fork destroyed by suspend" "$(fork_dir c1)"
+assert_fails  "exec on a suspended session's fork fails" "$W" exec "$SESSION" c1 -- 'echo zombie'
+assert_exists "checkpoint layers survive suspend" "$(ck_upper A)/root/base.txt"
+assert_exists "session stays registered" "/tmp/waypoint-sessions-info/$SESSION.json"
+CRIU_T="$(readlink "$(ck_criu T)" 2>/dev/null || echo not-a-symlink)"
+case "$CRIU_T" in
+  /dev/shm*) bad "checkpoint T images still on tmpfs after suspend ($CRIU_T)";;
+  *)         ok  "tmpfs images flushed to durable disk (T -> $CRIU_T)";;
+esac
+OUT="$("$W" fork "$SESSION" A --id woke 2>&1)"
+assert_contains "fork from a checkpoint resumes the suspended session" "pid=" "$OUT"
+OUT="$("$W" exec "$SESSION" woke -- 'echo GREETING=$GREETING; cat /root/base.txt' 2>&1)"
+assert_contains "resumed fork restored shell state"      "GREETING=hello-from-checkpoint" "$OUT"
+assert_contains "resumed fork restored filesystem state" "base-content" "$OUT"
+
+# Recursive forking keeps working after a suspend: diverge the resumed fork,
+# seal it, and fork the new checkpoint.
+run "$W exec $SESSION woke -- 'echo post-suspend > /root/woke.txt'"
+OUT="$("$W" snapshot "$SESSION" woke W1 2>&1)"
+assert_contains "resumed fork snapshots into a new checkpoint" "snapshotted as checkpoint" "$OUT"
+OUT="$("$W" fork "$SESSION" W1 --id woke2 2>&1)"
+assert_contains "fork of the post-suspend checkpoint works" "pid=" "$OUT"
+OUT="$("$W" exec "$SESSION" woke2 -- 'cat /root/woke.txt /root/base.txt; echo GREETING=$GREETING' 2>&1)"
+assert_contains "grandchild sees the post-suspend divergence" "post-suspend" "$OUT"
+assert_contains "grandchild sees the pre-suspend layer chain" "base-content" "$OUT"
+assert_contains "grandchild inherited shell state through both hops" "GREETING=hello-from-checkpoint" "$OUT"
+
+# ---------------------------------------------------------------------------
+say "19. cleanup leaves nothing behind"
 # ---------------------------------------------------------------------------
 run "$W cleanup $SESSION --force"
 MNTS="$(grep -c "$SESSION" /proc/mounts || true)"
@@ -368,7 +401,7 @@ SLEEPS_AFTER="$(pgrep -fc 'sleep 600' || true)"
 SESSION=""  # already cleaned; skip the trap's cleanup
 
 # ---------------------------------------------------------------------------
-say "19. host /dev is untouched"
+say "20. host /dev is untouched"
 # ---------------------------------------------------------------------------
 # Sessions build their /dev inside the private session root; nothing they do
 # may mutate the host's. In particular /dev/ptmx must remain a real character

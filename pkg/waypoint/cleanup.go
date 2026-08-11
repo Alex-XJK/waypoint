@@ -40,17 +40,48 @@ func (m *Manager) Cleanup() error {
 
 	unmountAll(sessionMounts(m.baseDir))
 
-	m.removeTmpfsImages()
-
 	if PreserveSessionOnCleanup {
+		m.preserveTmpfsImages()
 		fmt.Printf("Preserving session directory and session info for %s\n", m.sessionID)
 		return nil
 	}
+	m.removeTmpfsImages()
 
 	if err := os.RemoveAll(m.baseDir); err != nil {
 		return fmt.Errorf("failed to remove session directory: %w", err)
 	}
 	return removeSessionInfo(m.sessionID)
+}
+
+// Suspend ends all of a session's live compute while leaving every durable
+// artifact on disk: running forks are destroyed (their processes killed and
+// their un-snapshotted divergence discarded — checkpoints are the only
+// durable state; snapshot first to keep a fork's latest state), stragglers
+// and mounts are swept, and pending tmpfs images are flushed to disk so the
+// checkpoint DAG survives a reboot. The session stays registered; any
+// checkpoint can be forked again later.
+func (m *Manager) Suspend() error {
+	loadConfig()
+
+	if forks, err := m.ListForks(); err == nil {
+		for _, f := range forks {
+			switch f.Status {
+			case ForkStatusRunning, ForkStatusStarting, ForkStatusSnapshot:
+				if err := m.DestroyFork(f.ID); err != nil {
+					fmt.Printf("Warning: failed to destroy fork %s: %v\n", f.ID, err)
+				}
+			}
+		}
+	}
+	m.killStragglers()
+	unmountAll(sessionMounts(m.baseDir))
+
+	m.preserveTmpfsImages()
+
+	m.shellPid = ShellNotEnabled
+	m.shellStartTime = 0
+	m.shellSocket = ""
+	return saveSessionInfo(m.sessionID, m)
 }
 
 // CleanupForce tears the session down even when processes or mounts are
@@ -73,12 +104,12 @@ func (m *Manager) CleanupForce() error {
 	fmt.Println("Unmounting session mounts...")
 	unmountAll(sessionMounts(m.baseDir))
 
-	m.removeTmpfsImages()
-
 	if PreserveSessionOnCleanup {
+		m.preserveTmpfsImages()
 		fmt.Printf("Preserving session directory and session info for %s\n", m.sessionID)
 		return nil
 	}
+	m.removeTmpfsImages()
 
 	fmt.Println("Removing session directory...")
 	if err := m.removeDirectoryWithRetry(); err != nil {
@@ -92,6 +123,42 @@ func (m *Manager) CleanupForce() error {
 	}
 
 	return nil
+}
+
+// flushAllCheckpointImages synchronously flushes every checkpoint whose
+// CRIU images still live on tmpfs to its durable criu.disk dir (a no-op per
+// checkpoint that is already on disk).
+func (m *Manager) flushAllCheckpointImages() error {
+	entries, err := os.ReadDir(filepath.Join(m.baseDir, "checkpoints"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var firstErr error
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if err := m.FlushCheckpointImages(e.Name()); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("checkpoint %s: %w", e.Name(), err)
+		}
+	}
+	return firstErr
+}
+
+// preserveTmpfsImages makes checkpoint images durable on paths that keep the
+// session's disk state (suspend, preserve-mode cleanup): flush everything to
+// disk, and only then drop the session's tmpfs dir. If a flush fails, the
+// tmpfs copies are left in place — still restorable until reboot — instead
+// of being deleted out from under their checkpoints.
+func (m *Manager) preserveTmpfsImages() {
+	if err := m.flushAllCheckpointImages(); err != nil {
+		fmt.Printf("Warning: could not flush all checkpoint images to disk; leaving tmpfs copies in place: %v\n", err)
+		return
+	}
+	m.removeTmpfsImages()
 }
 
 // removeTmpfsImages drops this session's tmpfs image dirs (checkpoints not
