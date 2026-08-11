@@ -32,6 +32,8 @@ go.work.sum
 
 # Local examples/notes not meant for the public repo
 /review.md
+/review-latent-bugs.md
+/examples/agent-search/
 
 # Editor/IDE
 .idea/

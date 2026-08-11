@@ -138,7 +138,9 @@ sudo criu check
 git clone https://github.com/Alex-XJK/waypoint.git
 cd waypoint
 go build -o waypoint ./cmd/waypoint
-go build -o bash_init ./cmd/bash-init
+# bash_init re-execs inside arbitrary session rootfses, so it must be built
+# statically; waypoint refuses a dynamically linked bash_init at session start.
+CGO_ENABLED=0 go build -o bash_init ./cmd/bash-init
 ```
 
 #### Check Waypoint Version
