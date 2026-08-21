@@ -83,6 +83,37 @@ func main() {
 		Ctty:    0,
 	}
 	cmd.Dir = "/"
+	cmd.Env = append(cmd.Environ(),
+		// Pagers: stream output directly instead of waiting for navigation input.
+		"PAGER=cat",
+		"GIT_PAGER=cat",
+		"SYSTEMD_PAGER=cat",
+
+		// Editors: return immediately instead of opening an interactive editor.
+		"EDITOR=true",
+		"VISUAL=true",
+		"GIT_EDITOR=true",
+		"GIT_SEQUENCE_EDITOR=true",
+
+		// Git authentication: fail instead of prompting; accept new SSH host keys.
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=/bin/true",
+		"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+
+		// Debian tools: disable prompts and report restarts without performing them.
+		"DEBIAN_FRONTEND=noninteractive",
+		"NEEDRESTART_MODE=l",
+
+		// opam 2.0 uses OPAMYES; newer releases prefer OPAMCONFIRMLEVEL.
+		"OPAMYES=1",
+		"OPAMCONFIRMLEVEL=unsafe-yes",
+
+		// Python/pip: emit output promptly and disable prompts or dynamic UI.
+		"PYTHONUNBUFFERED=1",
+		"PIP_NO_INPUT=1",
+		"PIP_DISABLE_PIP_VERSION_CHECK=1",
+		"PIP_PROGRESS_BAR=off",
+	)
 	cmd.Stdin = ptySlave
 	cmd.Stdout = ptySlave
 	cmd.Stderr = ptySlave
