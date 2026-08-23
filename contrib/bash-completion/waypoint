@@ -1,8 +1,8 @@
 # Bash completion for Waypoint.
 #
-# This intentionally completes only static CLI syntax and host-directory
-# arguments. Session IDs, checkpoint IDs, PIDs, and commands or paths inside a
-# managed environment remain user-supplied.
+# Session and checkpoint candidates are queried through the existing `list`
+# command. PIDs and commands or paths inside a managed environment remain
+# user-supplied.
 
 _waypoint_complete_words()
 {
@@ -34,6 +34,59 @@ _waypoint_complete_directories()
     compopt -o filenames 2>/dev/null || true
 }
 
+_waypoint_query_list()
+{
+    # Use the executable as entered by the user, including an explicit path.
+    # `command` avoids invoking a same-named alias or shell function. Do not
+    # elevate here: completion must never display a password prompt.
+    local waypoint_command="${COMP_WORDS[0]:-waypoint}"
+    command "$waypoint_command" list "$@"
+}
+
+_waypoint_complete_list_output()
+{
+    local current="$1"
+    local expected_header="$2"
+    shift 2
+
+    local output
+    if ! output="$(_waypoint_query_list "$@" 2>/dev/null)"; then
+        return 0
+    fi
+
+    local line candidate
+    local first_line=1
+    while IFS= read -r line; do
+        if (( first_line )); then
+            first_line=0
+            [[ "$line" == "$expected_header" ]] || return 0
+            continue
+        fi
+
+        [[ "$line" == "  "* ]] || continue
+        candidate="${line:2}"
+        [[ -n "$candidate" ]] || continue
+        if [[ "$candidate" == "$current"* ]]; then
+            COMPREPLY+=("$candidate")
+        fi
+    done <<< "$output"
+}
+
+_waypoint_complete_sessions()
+{
+    _waypoint_complete_list_output "$1" "Available sessions:"
+}
+
+_waypoint_complete_checkpoints()
+{
+    local current="$1"
+    local session="$2"
+    [[ -n "$session" ]] || return 0
+
+    _waypoint_complete_list_output "$current" "Available checkpoints:" \
+        "$session"
+}
+
 _waypoint()
 {
     local current="${COMP_WORDS[COMP_CWORD]}"
@@ -63,13 +116,38 @@ _waypoint()
             fi
             ;;
         cleanup)
-            if (( COMP_CWORD >= 3 )); then
+            if (( COMP_CWORD == 2 )); then
+                _waypoint_complete_sessions "$current"
+            elif (( COMP_CWORD >= 3 )); then
                 _waypoint_complete_words "$current" --force
             fi
             ;;
         create)
-            if (( COMP_CWORD >= 4 )); then
+            if (( COMP_CWORD == 2 )); then
+                _waypoint_complete_sessions "$current"
+            elif (( COMP_CWORD >= 4 )); then
                 _waypoint_complete_words "$current" -1
+            fi
+            ;;
+        restore)
+            if (( COMP_CWORD == 2 )); then
+                _waypoint_complete_sessions "$current"
+            elif (( COMP_CWORD == 3 )); then
+                _waypoint_complete_checkpoints "$current" \
+                    "${COMP_WORDS[2]}"
+            fi
+            ;;
+        info)
+            if (( COMP_CWORD == 2 )); then
+                _waypoint_complete_sessions "$current"
+            elif (( COMP_CWORD == 3 )); then
+                _waypoint_complete_checkpoints "$current" \
+                    "${COMP_WORDS[2]}"
+            fi
+            ;;
+        exec|list)
+            if (( COMP_CWORD == 2 )); then
+                _waypoint_complete_sessions "$current"
             fi
             ;;
     esac

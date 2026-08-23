@@ -85,9 +85,12 @@ Ubuntu's standard `sudo` completion delegates to command-specific helpers, so
 completion also works after `sudo waypoint`.
 
 The helper completes subcommands, supported flags, and directory arguments for
-`init` and `build`. It intentionally does not query live Waypoint state, so
-session IDs, checkpoint IDs, PIDs, and `exec` arguments must be entered
-manually.
+`init` and `build`. It also uses the existing `waypoint list` command to
+complete session IDs for commands that take a session. For `restore` and
+`info`, it uses `waypoint list <session>` to complete existing checkpoint IDs.
+The new checkpoint ID accepted by `create`, PIDs, and `exec` arguments remain
+user-supplied. Live-state completion is best effort: failed or unrecognized
+`list` output produces no candidates and never interrupts the command line.
 
 For development, print or source the repository copy without installing it:
 
