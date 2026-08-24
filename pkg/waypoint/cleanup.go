@@ -417,9 +417,23 @@ func sessionMounts(baseDir string) []string {
 			mounts = append(mounts, mp)
 		}
 	}
-	// Longest path = deepest mount, unmount first
-	sort.Slice(mounts, func(i, j int) bool { return len(mounts[i]) > len(mounts[j]) })
+	sortMountsDeepestFirst(mounts)
 	return mounts
+}
+
+// sortMountsDeepestFirst orders mount points so no parent is unmounted before
+// its submounts. Depth is the number of separators, not the path length:
+// siblings like /a/bbbbbbbb and /a/b/c sort the wrong way round by length.
+// Equal depths fall back to reverse lexicographic order so the sweep is
+// deterministic.
+func sortMountsDeepestFirst(mounts []string) {
+	sort.Slice(mounts, func(i, j int) bool {
+		di, dj := strings.Count(mounts[i], "/"), strings.Count(mounts[j], "/")
+		if di != dj {
+			return di > dj
+		}
+		return mounts[i] > mounts[j]
+	})
 }
 
 // unmountAll unmounts the given mount points in order, escalating EBUSY to a
