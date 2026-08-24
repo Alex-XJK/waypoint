@@ -229,6 +229,74 @@ func PrepareNetworkDeps(rootfs string) error {
 	return nil
 }
 
+// baseGuestEnv is the fixed, OCI-style environment every session starts with.
+// It deliberately does not inherit the invoking user's: the guest environment
+// is process state, so anything here is baked into every checkpoint and fork
+// of the session, and inheriting would make guest behavior depend on whoever
+// happened to run `waypoint init`.
+var baseGuestEnv = []string{
+	"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+	"HOME=/root",
+	"TERM=xterm",
+	"LANG=C.UTF-8",
+}
+
+// unattendedGuestEnv keeps interactive tooling from stalling a session that
+// has nobody on the other end. A fork's shell is driven over a socket, so a
+// pager waiting for a keypress or apt waiting for a confirmation does not
+// merely look wrong — it hangs the command until the exec timeout.
+//
+// These belong in the session's fixed environment rather than in bash_init's
+// inherited one: they are part of what a checkpoint captures, so every fork
+// and every recursive snapshot must see exactly the same set.
+var unattendedGuestEnv = []string{
+	// Pagers: stream output directly instead of waiting for navigation input.
+	"PAGER=cat",
+	"GIT_PAGER=cat",
+	"SYSTEMD_PAGER=cat",
+
+	// Editors: return immediately instead of opening an interactive editor.
+	"EDITOR=true",
+	"VISUAL=true",
+	"GIT_EDITOR=true",
+	"GIT_SEQUENCE_EDITOR=true",
+
+	// Git authentication: fail instead of prompting; accept new SSH host keys.
+	"GIT_TERMINAL_PROMPT=0",
+	"GIT_ASKPASS=/bin/true",
+	"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+
+	// Debian tools: disable prompts and report restarts without performing them.
+	"DEBIAN_FRONTEND=noninteractive",
+	"NEEDRESTART_MODE=l",
+
+	// opam 2.0 uses OPAMYES; newer releases prefer OPAMCONFIRMLEVEL.
+	"OPAMYES=1",
+	"OPAMCONFIRMLEVEL=unsafe-yes",
+
+	// Python/pip: emit output promptly and disable prompts or dynamic UI.
+	"PYTHONUNBUFFERED=1",
+	"PIP_NO_INPUT=1",
+	"PIP_DISABLE_PIP_VERSION_CHECK=1",
+	"PIP_PROGRESS_BAR=off",
+}
+
+// waypointPlumbingEnv is bash_init's own configuration. bash_init strips
+// every WAYPOINT_* variable before handing the environment to the shell, so
+// these never reach the guest.
+var waypointPlumbingEnv = []string{
+	"WAYPOINT_NAMESPACED=1",
+	"WAYPOINT_REEXEC_PATH=/.waypoint/bash_init",
+}
+
+// sessionEnv assembles the environment bash_init is launched with.
+func sessionEnv() []string {
+	env := make([]string, 0, len(baseGuestEnv)+len(unattendedGuestEnv)+len(waypointPlumbingEnv))
+	env = append(env, baseGuestEnv...)
+	env = append(env, unattendedGuestEnv...)
+	return append(env, waypointPlumbingEnv...)
+}
+
 // StartShell launches bash_init in fresh namespaces, pivoted into workDir.
 // On success, it updates the session info with the shell PID and socket path for later use.
 func (m *Manager) StartShell(workDir string) (int, string, error) {
@@ -271,17 +339,8 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 		Setsid:     true, // new session = no controlling TTY
 	}
 	// Sessions get a fixed, OCI-style environment instead of inheriting the
-	// invoking user's: the guest environment is process state, so anything
-	// passed here is baked into every checkpoint and fork of this session
-	// (and would make guest behavior depend on the host shell's config).
-	cmd.Env = []string{
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"HOME=/root",
-		"TERM=xterm",
-		"LANG=C.UTF-8",
-		"WAYPOINT_NAMESPACED=1",
-		"WAYPOINT_REEXEC_PATH=/.waypoint/bash_init",
-	}
+	// invoking user's; see sessionEnv and the vars it assembles.
+	cmd.Env = sessionEnv()
 
 	// stdin -> /dev/null
 	devNull, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
