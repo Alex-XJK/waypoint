@@ -177,6 +177,16 @@ assert_contains     "guest PATH is the fixed default" "PATH=/usr/local/sbin:/usr
 assert_not_contains "host env does not leak into the guest" "SUDO_USER" "$OUT"
 assert_not_contains "waypoint plumbing vars are stripped from the guest" "WAYPOINT_" "$OUT"
 
+# Unattended defaults: a fork's shell is driven over a socket, so a pager or
+# an apt confirmation prompt hangs the command rather than just looking odd.
+# Echoed explicitly rather than read out of `export -p`, which quotes values.
+OUT="$("$W" exec "$SESSION" main -- 'echo "PAGER=$PAGER GIT_PAGER=$GIT_PAGER EDITOR=$EDITOR GIT_TERMINAL_PROMPT=$GIT_TERMINAL_PROMPT GIT_ASKPASS=$GIT_ASKPASS DEBIAN_FRONTEND=$DEBIAN_FRONTEND NEEDRESTART_MODE=$NEEDRESTART_MODE OPAMYES=$OPAMYES OPAMCONFIRMLEVEL=$OPAMCONFIRMLEVEL PIP_NO_INPUT=$PIP_NO_INPUT PIP_PROGRESS_BAR=$PIP_PROGRESS_BAR PYTHONUNBUFFERED=$PYTHONUNBUFFERED"' 2>&1)"
+for v in PAGER=cat GIT_PAGER=cat EDITOR=true GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
+         DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l OPAMYES=1 OPAMCONFIRMLEVEL=unsafe-yes \
+         PIP_NO_INPUT=1 PIP_PROGRESS_BAR=off PYTHONUNBUFFERED=1; do
+  assert_contains "guest gets $v" "$v" "$OUT"
+done
+
 # UTS namespace: the sandbox has its own hostname.
 OUT="$("$W" exec "$SESSION" main -- 'cat /proc/sys/kernel/hostname' 2>&1)"
 assert_contains "guest has its own hostname (UTS namespace)" "waypoint" "$OUT"
@@ -223,6 +233,10 @@ say "6. forks inherit state, then diverge without touching each other"
 OUT="$("$W" exec "$SESSION" f1 -- 'echo f1 GREETING=$GREETING cwd=$(pwd); cat /root/base.txt' 2>&1)"; echo "$OUT"
 assert_contains "f1 inherited shell state" "GREETING=hello-from-checkpoint" "$OUT"
 assert_contains "f1 inherited fs state"    "base-content" "$OUT"
+# The unattended defaults are process state like any other variable, so they
+# must ride through the dump/restore rather than being re-applied per fork.
+OUT="$("$W" exec "$SESSION" f1 -- 'echo "P=$PAGER D=$DEBIAN_FRONTEND G=$GIT_TERMINAL_PROMPT"' 2>&1)"
+assert_contains "unattended defaults survive checkpoint -> fork" "P=cat D=noninteractive G=0" "$OUT"
 run "$W exec $SESSION f2 -- 'GREETING=f2-only; cd /tmp; echo f2-file > /root/f2.txt'"
 OUT="$("$W" exec "$SESSION" f1 -- 'echo GREETING=$GREETING cwd=$(pwd); ls /root' 2>&1)"; echo "$OUT"
 assert_contains     "f1's shell state is untouched by f2" "GREETING=hello-from-checkpoint" "$OUT"
@@ -439,10 +453,11 @@ OUT="$("$W" snapshot "$SESSION" woke W1 2>&1)"
 assert_contains "resumed fork snapshots into a new checkpoint" "snapshotted as checkpoint" "$OUT"
 OUT="$("$W" fork "$SESSION" W1 --id woke2 2>&1)"
 assert_contains "fork of the post-suspend checkpoint works" "pid=" "$OUT"
-OUT="$("$W" exec "$SESSION" woke2 -- 'cat /root/woke.txt /root/base.txt; echo GREETING=$GREETING' 2>&1)"
+OUT="$("$W" exec "$SESSION" woke2 -- 'cat /root/woke.txt /root/base.txt; echo GREETING=$GREETING PAGER=$PAGER' 2>&1)"
 assert_contains "grandchild sees the post-suspend divergence" "post-suspend" "$OUT"
 assert_contains "grandchild sees the pre-suspend layer chain" "base-content" "$OUT"
 assert_contains "grandchild inherited shell state through both hops" "GREETING=hello-from-checkpoint" "$OUT"
+assert_contains "unattended defaults survive suspend + two more hops" "PAGER=cat" "$OUT"
 
 # ---------------------------------------------------------------------------
 say "19. cleanup leaves nothing behind"

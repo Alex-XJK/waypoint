@@ -2,6 +2,7 @@ package waypoint
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -47,5 +48,68 @@ func TestImageRefComponentFallback(t *testing.T) {
 	}
 	if tag := "waypoint_" + got; !nameComponent.MatchString(tag) {
 		t.Fatalf("fallback tag %q is not a valid image reference name", tag)
+	}
+}
+
+// splitEnvKey returns the variable name of a "KEY=VALUE" entry.
+func splitEnvKey(entry string) string {
+	if i := strings.IndexByte(entry, '='); i > 0 {
+		return entry[:i]
+	}
+	return ""
+}
+
+func TestSessionEnvIsWellFormed(t *testing.T) {
+	seen := map[string]bool{}
+	for _, entry := range sessionEnv() {
+		key := splitEnvKey(entry)
+		if key == "" {
+			t.Fatalf("environment entry %q is not KEY=VALUE", entry)
+		}
+		if seen[key] {
+			// A duplicate would make the guest's value depend on os/exec's
+			// dedup rules rather than on this list.
+			t.Fatalf("environment defines %s twice", key)
+		}
+		seen[key] = true
+	}
+	for _, key := range []string{"PATH", "HOME", "TERM", "LANG", "WAYPOINT_NAMESPACED", "WAYPOINT_REEXEC_PATH"} {
+		if !seen[key] {
+			t.Fatalf("session environment is missing %s", key)
+		}
+	}
+}
+
+// TestUnattendedEnvReachesTheGuest guards a cross-package contract: bash_init
+// drops every WAYPOINT_* and TERM= entry before handing the environment to
+// the shell (see cmd/bash-init/main.go). An unattended variable named to
+// collide with that filter would be silently discarded.
+func TestUnattendedEnvReachesTheGuest(t *testing.T) {
+	for _, entry := range unattendedGuestEnv {
+		if strings.HasPrefix(entry, "WAYPOINT_") || strings.HasPrefix(entry, "TERM=") {
+			t.Fatalf("%q is stripped by bash_init and would never reach the shell", entry)
+		}
+	}
+}
+
+// TestUnattendedEnvCoversInteractiveTooling pins the tools a fork's shell must
+// not stall on: it is driven over a socket, so a prompt is a hang, not a
+// cosmetic issue.
+func TestUnattendedEnvCoversInteractiveTooling(t *testing.T) {
+	present := map[string]bool{}
+	for _, entry := range unattendedGuestEnv {
+		present[splitEnvKey(entry)] = true
+	}
+	for _, key := range []string{
+		"PAGER", "GIT_PAGER", "SYSTEMD_PAGER",
+		"EDITOR", "VISUAL", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR",
+		"GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "GIT_SSH_COMMAND",
+		"DEBIAN_FRONTEND", "NEEDRESTART_MODE",
+		"OPAMYES", "OPAMCONFIRMLEVEL",
+		"PYTHONUNBUFFERED", "PIP_NO_INPUT", "PIP_DISABLE_PIP_VERSION_CHECK", "PIP_PROGRESS_BAR",
+	} {
+		if !present[key] {
+			t.Errorf("unattended environment lost %s", key)
+		}
 	}
 }
