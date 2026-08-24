@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -51,7 +52,7 @@ func imageRefComponent(s string) string {
 	return out
 }
 
-func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool) error {
+func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool, cfg *ImageConfig) error {
 	imageTag := fmt.Sprintf("waypoint_%s:%d", imageRefComponent(filepath.Base(dockerfileDir)), time.Now().Unix())
 
 	run := func(cmd *exec.Cmd, capture bool) (string, error) {
@@ -80,6 +81,14 @@ func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool) error {
 		"buildah", "bud", "-t", imageTag, "-f", filepath.Join(dockerfileDir, "Dockerfile"), dockerfileDir,
 	), false); err != nil {
 		return err
+	}
+
+	if cfg != nil {
+		inspected, inspectErr := inspectImageConfig(imageTag, run)
+		if inspectErr != nil {
+			return fmt.Errorf("failed to inspect built image: %w", inspectErr)
+		}
+		*cfg = inspected
 	}
 
 	// 2. buildah from -q
@@ -239,6 +248,62 @@ func PrepareNetworkDeps(rootfs string) error {
 	return nil
 }
 
+type imageInspect struct {
+	OCIv1 struct {
+		Config struct {
+			Env        []string `json:"Env"`
+			WorkingDir string   `json:"WorkingDir"`
+		} `json:"config"`
+	} `json:"OCIv1"`
+}
+
+func inspectImageConfig(imageTag string, run func(*exec.Cmd, bool) (string, error)) (ImageConfig, error) {
+	out, err := run(exec.Command("buildah", "inspect", "--type", "image", imageTag), true)
+	if err != nil {
+		return ImageConfig{}, err
+	}
+
+	var inspected imageInspect
+	if err := json.Unmarshal([]byte(out), &inspected); err != nil {
+		return ImageConfig{}, fmt.Errorf("failed to parse buildah inspect output: %w", err)
+	}
+
+	return ImageConfig{
+		Env:        inspected.OCIv1.Config.Env,
+		WorkingDir: inspected.OCIv1.Config.WorkingDir,
+	}, nil
+}
+
+func hasEnvKey(env []string, key string) bool {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) sessionEnv() []string {
+	var env []string
+	if len(m.imageEnv) == 0 {
+		env = os.Environ()
+	} else {
+		env = append(env, m.imageEnv...)
+		if !hasEnvKey(env, "PATH") {
+			env = append(env, FallbackPath)
+		}
+		if !hasEnvKey(env, "HOME") {
+			env = append(env, "HOME=/root")
+		}
+		if term := os.Getenv("TERM"); term != "" && !hasEnvKey(env, "TERM") {
+			env = append(env, "TERM="+term)
+		}
+	}
+
+	return env
+}
+
 // StartShell launches a new chroot-embedded bash_init process at the given workDir.
 // On success, it updates the session info with the shell PID and socket path for later use.
 func (m *Manager) StartShell(workDir string) (int, string, error) {
@@ -256,10 +321,11 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 		return ShellNotEnabled, "", fmt.Errorf("bash pre-requisite not met: %s does not exist", bashPath)
 	}
 
-	cmd := exec.Command(bashInitSrc, socketPath, workDir)
+	cmd := exec.Command(bashInitSrc, socketPath, workDir, m.imageWorkDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true, // new session = no controlling TTY
 	}
+	cmd.Env = m.sessionEnv()
 
 	// stdin -> /dev/null
 	devNull, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
@@ -393,10 +459,14 @@ func (m *Manager) BuildEnvironment(dockerfileDir string, quiet bool) (string, in
 	}
 
 	// Build from Dockerfile to create a virtual system environment
-	buildahErr := BuildFromDockerfile(dockerfileDir, originalDir, quiet)
+	var imageConfig ImageConfig
+	buildahErr := BuildFromDockerfile(dockerfileDir, originalDir, quiet, &imageConfig)
 	if buildahErr != nil {
 		return "", 0, fmt.Errorf("failed to build from Dockerfile: %w", buildahErr)
 	}
+
+	m.imageEnv = imageConfig.Env
+	m.imageWorkDir = imageConfig.WorkingDir
 	if pndErr := PrepareNetworkDeps(originalDir); pndErr != nil {
 		return "", 0, fmt.Errorf("failed to prepare network: %w", pndErr)
 	}
