@@ -90,6 +90,12 @@ func (m *Manager) loadMetadata(checkpointID string) (*Metadata, error) {
 // LoadCheckpointMetadata returns persisted metadata for a session checkpoint
 // without needing a live Manager.
 func LoadCheckpointMetadata(sessionID, checkpointID string) (*Metadata, error) {
+	if err := validateSessionID(sessionID); err != nil {
+		return nil, err
+	}
+	if err := validateCheckpointID(checkpointID); err != nil {
+		return nil, err
+	}
 	sessionInfo, err := loadSessionInfo(sessionID)
 	if err != nil {
 		return nil, err
@@ -105,6 +111,9 @@ func LoadCheckpointMetadata(sessionID, checkpointID string) (*Metadata, error) {
 }
 
 func (m *Manager) LoadCheckpoint(checkpointID string) (*Checkpoint, error) {
+	if err := validateCheckpointID(checkpointID); err != nil {
+		return nil, err
+	}
 	metadata, err := m.loadMetadata(checkpointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load checkpoint metadata: %w", err)
@@ -129,6 +138,9 @@ func (m *Manager) ForkCheckpoint(checkpointID string, spec ForkSpec) (*Fork, err
 // SnapshotFork turns a live fork into a new checkpoint, then resumes the fork
 // on top of it.
 func (m *Manager) SnapshotFork(forkID, checkpointID string) (*Checkpoint, error) {
+	if err := validateForkID(forkID); err != nil {
+		return nil, err
+	}
 	var ckpt *Checkpoint
 	err := m.withForkLock(forkID, func() error {
 		f, err := m.loadFork(forkID)
@@ -152,6 +164,9 @@ func (m *Manager) ParkFork(forkID, checkpointID string) (*Checkpoint, error) {
 	if forkID == MainForkID {
 		return nil, fmt.Errorf("cannot park %s: the session needs a live main fork", MainForkID)
 	}
+	if err := validateForkID(forkID); err != nil {
+		return nil, err
+	}
 	var ckpt *Checkpoint
 	err := m.withForkLock(forkID, func() error {
 		f, err := m.loadFork(forkID)
@@ -168,6 +183,11 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 	m := c.manager
 	if ckpt == nil || ckpt.Metadata == nil {
 		return nil, fmt.Errorf("checkpoint is nil")
+	}
+	if spec.ID != "" {
+		if err := validateForkID(spec.ID); err != nil {
+			return nil, err
+		}
 	}
 	if ckpt.Metadata.PID == SkipMemoryCheckpoint {
 		return nil, fmt.Errorf("checkpoint %s has no memory image to fork", ckpt.ID)
@@ -267,8 +287,12 @@ func (c *CRIUMaterializer) Snapshot(f *Fork, id string) (*Checkpoint, error) {
 // (the dump already stopped the tree) and only the checkpoint remains. The
 // caller must hold the fork lock.
 func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkpoint, error) {
-	if checkpointID == "" || checkpointID == "current" {
-		return nil, fmt.Errorf("invalid checkpoint ID: %s", checkpointID)
+	// Validate before anything destructive happens. The dump kills the fork's
+	// process tree and the seal renames its upper away, so an ID that only
+	// blows up later — when it is spliced into the overlay lowerdir list —
+	// would cost a live fork and leave an unforkable checkpoint behind.
+	if err := validateCheckpointID(checkpointID); err != nil {
+		return nil, err
 	}
 	if f.Status != ForkStatusRunning {
 		return nil, fmt.Errorf("fork %s is not running (status=%s)", f.ID, f.Status)

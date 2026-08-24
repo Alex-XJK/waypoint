@@ -22,9 +22,13 @@ ROOTFS="$WORK/rootfs"
 BIN="$WORK/bin"
 GOCACHE="${GOCACHE:-/tmp/waypoint-go-cache}"
 SESSION=""
-SESSIONS_DIR="${WAYPOINT_SESSIONS_DIR:-/tmp/waypoint-sessions}"
+# Resolved from `waypoint info` after the build; see "Resolve effective paths".
+SESSIONS_DIR=""
+SESSION_INFO_DIR=""
+CURRENT_SECTION="startup"
+COMPLETED=0
 
-say()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
+say()  { CURRENT_SECTION="$*"; printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 run()  { printf '\033[0;90m$ %s\033[0m\n' "$*"; eval "$*"; }
 
 PASS=0; FAIL=0
@@ -50,6 +54,11 @@ assert_fails() {
 }
 
 cleanup() {
+  # `set -e` can end the run anywhere. Say so loudly: a truncated log with no
+  # summary otherwise reads exactly like a clean pass.
+  if [ "$COMPLETED" -ne 1 ]; then
+    printf '\n\033[0;31m!! aborted during "%s" — the sections after it never ran\033[0m\n' "$CURRENT_SECTION"
+  fi
   [ -n "$SESSION" ] && "$BIN/waypoint" cleanup "$SESSION" --force >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
@@ -64,7 +73,10 @@ say "Environment checks"
 # ---------------------------------------------------------------------------
 [ "$(id -u)" -eq 0 ] || { echo "must run as root (CRIU needs it)"; exit 1; }
 
-criu_ver="$(criu --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+# `|| true` throughout this script guards pipelines against `set -o pipefail`:
+# without it a grep that matches nothing, or a find over a missing directory,
+# ends the whole run instead of the one assertion it belongs to.
+criu_ver="$(criu --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)"
 echo "criu: ${criu_ver:-not found}  ($(command -v criu))"
 major="${criu_ver%%.*}"
 if [ "$(uname -m)" = "aarch64" ] && grep -qwE 'paca|pacg' /proc/cpuinfo; then
@@ -104,7 +116,9 @@ for b in bash cat ls sleep mkdir rm ps grep touch; do
 done
 # copy every shared-lib dependency, preserving its absolute path
 for b in "$ROOTFS"/bin/*; do
-  ldd "$b" 2>/dev/null | grep -oE '/[^ ]+\.so[^ ]*' | while read -r lib; do
+  libs="$(ldd "$b" 2>/dev/null | grep -oE '/[^ ]+\.so[^ ]*' || true)"
+  [ -n "$libs" ] || continue   # static binary, or not an ELF at all
+  printf '%s\n' "$libs" | while read -r lib; do
     [ -f "$lib" ] || continue
     mkdir -p "$ROOTFS$(dirname "$lib")"
     cp -n "$(readlink -f "$lib")" "$ROOTFS$lib" 2>/dev/null || true
@@ -117,6 +131,27 @@ done
 echo "rootfs: $ROOTFS ($(du -sh "$ROOTFS" | cut -f1))"
 
 W="$BIN/waypoint"
+
+# ---------------------------------------------------------------------------
+say "Resolve effective paths"
+# ---------------------------------------------------------------------------
+# Ask waypoint where it will actually put things instead of assuming the
+# defaults. `loadConfig` resolves these from an env var, then a config file
+# found at any of four locations (WAYPOINT_CONFIG, next to the binary, the
+# user config, /etc/waypoint/config.json) — so a host with sessions_dir set
+# in /etc would otherwise make every path assertion below fail against a
+# directory nothing ever writes to.
+INFO_JSON="$("$W" info)"
+wp_config() {
+  printf '%s\n' "$INFO_JSON" | sed -n "/\"$1\":/,/}/ s/.*\"value\": *\"\\([^\"]*\\)\".*/\\1/p" | head -1
+}
+SESSIONS_DIR="$(wp_config sessions_dir)"
+SESSION_INFO_DIR="$(wp_config session_info_dir)"
+[ -n "$SESSIONS_DIR" ] && [ -n "$SESSION_INFO_DIR" ] || {
+  echo "could not read sessions_dir / session_info_dir from 'waypoint info'"; exit 1; }
+echo "sessions dir:     $SESSIONS_DIR"
+echo "session info dir: $SESSION_INFO_DIR"
+
 SLEEPS_BEFORE="$(pgrep -fc 'sleep 600' || true)"
 
 # ---------------------------------------------------------------------------
@@ -229,7 +264,7 @@ run "$W exec $SESSION f3 -- 'touch /root/ghost.txt'"
 run "$W snapshot $SESSION f3 C1"
 run "$W exec $SESSION f3 -- 'rm /root/ghost.txt /root/base.txt'"
 run "$W snapshot $SESSION f3 C2"
-WH="$(find "$(ck_upper C2)" -type c 2>/dev/null | wc -l)"
+WH="$( { find "$(ck_upper C2)" -type c 2>/dev/null || true; } | wc -l )"
 [ "$WH" -ge 2 ] && ok "C2's layer carries whiteouts for both deletions" || bad "C2's layer has $WH whiteout(s), expected 2 (ghost.txt + base.txt)"
 run "$W fork $SESSION C2 --id f4"
 OUT="$("$W" exec "$SESSION" f4 -- 'ls /root' 2>&1)"; echo "$OUT"
@@ -346,10 +381,31 @@ assert_fails "fork from missing checkpoint"   "$W" fork "$SESSION" NOPE --id x1
 assert_fails "snapshot of missing fork"       "$W" snapshot "$SESSION" nope X1
 assert_fails "reserved checkpoint ID"         "$W" snapshot "$SESSION" f1 current
 
+# Identifiers become path components under the session tree and are spliced
+# into the OverlayFS lowerdir list, so they must be rejected up front.
+assert_fails "checkpoint ID with a path traversal"     "$W" snapshot "$SESSION" f1 '../../../../tmp/wp-demo-escape'
+assert_fails "checkpoint ID with an overlay separator" "$W" snapshot "$SESSION" f1 'x:y'
+assert_fails "fork ID with a path traversal"           "$W" fork "$SESSION" A --id '../../../../tmp/wp-demo-forkescape'
+assert_fails "session ID with a path traversal"        "$W" list '../../etc/passwd'
+assert_absent "rejected checkpoint ID wrote nothing outside the session" /tmp/wp-demo-escape
+assert_absent "rejected fork ID wrote nothing outside the session"       /tmp/wp-demo-forkescape
+assert_absent "rejected checkpoint ID left no half-built checkpoint"     "$(ck_upper 'x:y')"
+# The dump kills the fork's tree, so validating late used to cost a live fork
+# and leave an unforkable checkpoint behind. Rejection must be free.
+OUT="$("$W" exec "$SESSION" f1 -- 'echo f1-still-alive' 2>&1)"
+assert_contains "the fork survives a rejected checkpoint ID" "f1-still-alive" "$OUT"
+
+# Unknown flags must be refused, not silently dropped — a typo'd --force
+# used to fall through to the interactive path.
+assert_fails "unknown flag on list"    "$W" list "$SESSION" --bogus
+assert_fails "unknown flag on cleanup" "$W" cleanup "$SESSION" --bogus
+assert_fails "unknown flag on suspend" "$W" suspend "$SESSION" --bogus
+assert_exists "the refused cleanup left the session alone" "$(ck_upper A)/root/base.txt"
+
 # ---------------------------------------------------------------------------
 say "17. inspect the DAG + info"
 # ---------------------------------------------------------------------------
-run "$W list $SESSION --json | grep -E '\"id\"|\"status\"|\"base_checkpoint_id\"' | head -30"
+run "$W list $SESSION --json | grep -E '\"id\"|\"status\"|\"base_checkpoint_id\"' | head -30 || true"
 OUT="$("$W" info "$SESSION" 2>&1)"
 assert_contains "info shows the session" "$SESSION" "$OUT"
 OUT="$("$W" info "$SESSION" D3 2>&1)"
@@ -364,7 +420,7 @@ MNTS="$(grep -c "$SESSION" /proc/mounts || true)"
 assert_absent "running fork destroyed by suspend" "$(fork_dir c1)"
 assert_fails  "exec on a suspended session's fork fails" "$W" exec "$SESSION" c1 -- 'echo zombie'
 assert_exists "checkpoint layers survive suspend" "$(ck_upper A)/root/base.txt"
-assert_exists "session stays registered" "/tmp/waypoint-sessions-info/$SESSION.json"
+assert_exists "session stays registered" "$SESSION_INFO_DIR/$SESSION.json"
 CRIU_T="$(readlink "$(ck_criu T)" 2>/dev/null || echo not-a-symlink)"
 case "$CRIU_T" in
   /dev/shm*) bad "checkpoint T images still on tmpfs after suspend ($CRIU_T)";;
@@ -421,5 +477,6 @@ fi
 # ---------------------------------------------------------------------------
 say "Summary"
 # ---------------------------------------------------------------------------
+COMPLETED=1   # every section ran; the trap may stop warning about an abort
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

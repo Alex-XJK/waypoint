@@ -79,6 +79,9 @@ func NewManagerWithSession() (*Manager, string, error) {
 func LoadManager(sessionID string) (*Manager, error) {
 	loadConfig() // session paths come from the registry; this resolves behavior flags (e.g. TmpfsImages)
 
+	if err := validateSessionID(sessionID); err != nil {
+		return nil, err
+	}
 	sessionInfo, err := loadSessionInfo(sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load session: %w", err)
@@ -156,6 +159,9 @@ func loadSessionInfo(sessionID string) (*SessionInfo, error) {
 // LoadSessionInfo returns persisted information for a checkpoint session.
 func LoadSessionInfo(sessionID string) (*SessionInfo, error) {
 	loadConfig() // SessionInfoDir is configurable
+	if err := validateSessionID(sessionID); err != nil {
+		return nil, err
+	}
 	return loadSessionInfo(sessionID)
 }
 
@@ -201,6 +207,53 @@ func writeSessionInfo(sessionInfo *SessionInfo) error {
 		return err
 	}
 	return atomicWriteFile(filepath.Join(SessionInfoDir, sessionInfo.SessionID+".json"), data, 0o644)
+}
+
+// --- identifier validation ---
+
+// maxIDLength bounds session, checkpoint, and fork identifiers. They become
+// path components under the session tree, so this keeps the resulting paths
+// (in particular the canonical socket path, see validateSessionsDir) well
+// inside the limits the rest of the system assumes.
+const maxIDLength = 64
+
+// validateID checks a user-supplied identifier before it is used to build a
+// path or a mount option. Identifiers are single path components under the
+// session tree and are spliced into OverlayFS lowerdir/upperdir options, so
+// they may contain neither path separators nor the option separators ':'
+// and ',' — the same constraint validateSessionsDir enforces for the
+// sessions directory. Requiring a leading letter or digit additionally rules
+// out "." and ".." (path traversal) and leading dashes (flag lookalikes).
+func validateID(kind, id string) error {
+	if id == "" {
+		return fmt.Errorf("%s ID must not be empty", kind)
+	}
+	if len(id) > maxIDLength {
+		return fmt.Errorf("invalid %s ID %q: %d bytes exceeds the %d-byte limit", kind, id, len(id), maxIDLength)
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+			continue
+		}
+		if i > 0 && (c == '.' || c == '_' || c == '-') {
+			continue
+		}
+		return fmt.Errorf("invalid %s ID %q: must start with a letter or digit and may otherwise contain only letters, digits, '.', '_' and '-'", kind, id)
+	}
+	return nil
+}
+
+func validateSessionID(id string) error { return validateID("session", id) }
+func validateForkID(id string) error    { return validateID("fork", id) }
+
+// validateCheckpointID also rejects "current", which older releases used as a
+// pseudo-ID for the live state.
+func validateCheckpointID(id string) error {
+	if id == "current" {
+		return fmt.Errorf("invalid checkpoint ID: %q is reserved", id)
+	}
+	return validateID("checkpoint", id)
 }
 
 // --- on-disk layout ---

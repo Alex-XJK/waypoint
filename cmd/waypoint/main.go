@@ -367,11 +367,6 @@ func main() {
 		printExecResult(result)
 
 	case "list":
-		if len(os.Args) > 4 {
-			fmt.Println("Usage: list [session] [--json]")
-			os.Exit(1)
-		}
-
 		if len(os.Args) == 2 {
 			sessions, err := waypoint.ListSessions()
 			if err != nil {
@@ -390,7 +385,16 @@ func main() {
 		}
 
 		sessionID := os.Args[2]
-		asJSON := len(os.Args) > 3 && os.Args[3] == "--json"
+		asJSON := false
+		for i := 3; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--json":
+				asJSON = true
+			default:
+				fmt.Printf("Error: unknown flag: %s\n", os.Args[i])
+				os.Exit(1)
+			}
+		}
 
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
@@ -428,7 +432,7 @@ func main() {
 		}
 
 	case "suspend":
-		if len(os.Args) < 3 {
+		if len(os.Args) != 3 {
 			fmt.Println("Usage: suspend <session>")
 			os.Exit(1)
 		}
@@ -450,13 +454,22 @@ func main() {
 		}
 		sessionID := os.Args[2]
 
+		force := false
+		for i := 3; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--force":
+				force = true
+			default:
+				fmt.Printf("Error: unknown flag: %s\n", os.Args[i])
+				os.Exit(1)
+			}
+		}
+
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
 			fmt.Printf("Error loading session: %v\n", err)
 			os.Exit(1)
 		}
-
-		force := len(os.Args) > 3 && os.Args[3] == "--force"
 
 		if force {
 			if err := manager.CleanupForce(); err != nil {
