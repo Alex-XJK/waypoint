@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -31,10 +32,26 @@ var (
 	otherEscapeRegex = regexp.MustCompile(`\x1b[>=]`)
 )
 
+func resolveWorkDir(chrootDir string) string {
+	if len(os.Args) < 4 {
+		return "/"
+	}
+	workDir := os.Args[3]
+	if workDir == "" {
+		return "/"
+	}
+	if fi, err := os.Stat(filepath.Join(chrootDir, workDir)); err != nil || !fi.IsDir() {
+		fmt.Fprintf(os.Stderr, "warning: image WORKDIR %q is not a usable directory, starting at /\n", workDir)
+		return "/"
+	}
+	return workDir
+}
+
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("Usage: bash_init <socket-path> <chroot-dir>")
-		fmt.Println("Example: bash_init /tmp/bash_cmd.sock /tmp/waypoint-sessions/xyz/work")
+		fmt.Println("Usage: bash_init <socket-path> <chroot-dir> [work-dir]")
+		fmt.Println("Example: bash_init /tmp/bash_cmd.sock /tmp/waypoint-sessions/xyz/work /opt")
+		fmt.Println("  work-dir: starting directory inside the chroot, defaults to /")
 		os.Exit(1)
 	}
 
@@ -82,7 +99,7 @@ func main() {
 		Setctty: true,
 		Ctty:    0,
 	}
-	cmd.Dir = "/"
+	cmd.Dir = resolveWorkDir(chrootDir)
 	cmd.Env = append(cmd.Environ(),
 		// Pagers: stream output directly instead of waiting for navigation input.
 		"PAGER=cat",
