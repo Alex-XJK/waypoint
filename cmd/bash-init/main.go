@@ -23,6 +23,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -325,6 +326,12 @@ func handleClient(conn net.Conn, ptyMaster *os.File, shellMutex *sync.Mutex, out
 	// Read one length-prefixed command from client.
 	payloadLen, err := readPayloadLength(reader)
 	if err != nil {
+		// The peer hung up before finishing its header. There is nobody left
+		// to read a status, and "request_too_large" would misdescribe it in
+		// the log; the remaining cases are genuine protocol violations.
+		if errors.Is(err, io.EOF) {
+			return
+		}
 		respond(conn, "request_too_large", 125, err.Error()+"\n")
 		return
 	}
