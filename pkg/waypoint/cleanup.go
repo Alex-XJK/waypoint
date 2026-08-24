@@ -141,6 +141,9 @@ func (m *Manager) flushAllCheckpointImages() error {
 		if !e.IsDir() {
 			continue
 		}
+		if validateCheckpointID(e.Name()) != nil {
+			continue // not a checkpoint this build could have created
+		}
 		if err := m.FlushCheckpointImages(e.Name()); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("checkpoint %s: %w", e.Name(), err)
 		}

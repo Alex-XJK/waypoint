@@ -135,6 +135,9 @@ func RunImageFlushFromArgs(args []string) error {
 // deletes the tmpfs copy. Idempotent: a checkpoint already on disk is a
 // no-op.
 func (m *Manager) FlushCheckpointImages(checkpointID string) error {
+	if err := validateCheckpointID(checkpointID); err != nil {
+		return err
+	}
 	ckptDir := m.checkpointDir(checkpointID)
 	criuLink := m.checkpointCriuDir(checkpointID)
 

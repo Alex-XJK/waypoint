@@ -381,6 +381,27 @@ assert_fails "fork from missing checkpoint"   "$W" fork "$SESSION" NOPE --id x1
 assert_fails "snapshot of missing fork"       "$W" snapshot "$SESSION" nope X1
 assert_fails "reserved checkpoint ID"         "$W" snapshot "$SESSION" f1 current
 
+# Identifiers become path components under the session tree and are spliced
+# into the OverlayFS lowerdir list, so they must be rejected up front.
+assert_fails "checkpoint ID with a path traversal"     "$W" snapshot "$SESSION" f1 '../../../../tmp/wp-demo-escape'
+assert_fails "checkpoint ID with an overlay separator" "$W" snapshot "$SESSION" f1 'x:y'
+assert_fails "fork ID with a path traversal"           "$W" fork "$SESSION" A --id '../../../../tmp/wp-demo-forkescape'
+assert_fails "session ID with a path traversal"        "$W" list '../../etc/passwd'
+assert_absent "rejected checkpoint ID wrote nothing outside the session" /tmp/wp-demo-escape
+assert_absent "rejected fork ID wrote nothing outside the session"       /tmp/wp-demo-forkescape
+assert_absent "rejected checkpoint ID left no half-built checkpoint"     "$(ck_upper 'x:y')"
+# The dump kills the fork's tree, so validating late used to cost a live fork
+# and leave an unforkable checkpoint behind. Rejection must be free.
+OUT="$("$W" exec "$SESSION" f1 -- 'echo f1-still-alive' 2>&1)"
+assert_contains "the fork survives a rejected checkpoint ID" "f1-still-alive" "$OUT"
+
+# Unknown flags must be refused, not silently dropped — a typo'd --force
+# used to fall through to the interactive path.
+assert_fails "unknown flag on list"    "$W" list "$SESSION" --bogus
+assert_fails "unknown flag on cleanup" "$W" cleanup "$SESSION" --bogus
+assert_fails "unknown flag on suspend" "$W" suspend "$SESSION" --bogus
+assert_exists "the refused cleanup left the session alone" "$(ck_upper A)/root/base.txt"
+
 # ---------------------------------------------------------------------------
 say "17. inspect the DAG + info"
 # ---------------------------------------------------------------------------
