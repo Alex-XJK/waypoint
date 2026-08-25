@@ -283,7 +283,9 @@ func (m *Manager) sessionLockPath() string {
 }
 
 func (m *Manager) forkLockPath(forkID string) string {
-	return filepath.Join(m.forkDir(forkID), "lock")
+	// Fork roots can be removed while their locks are held. Keep lock paths in
+	// the stable session namespace so their inodes cannot be replaced mid-lock.
+	return filepath.Join(m.baseDir, "locks", "fork-"+forkID+".lock")
 }
 
 // canonicalSocketPath is the shell socket path as seen from inside the

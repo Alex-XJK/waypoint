@@ -1,6 +1,7 @@
 package waypoint
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -81,5 +82,42 @@ func TestValidateCheckpointIDRejectsReserved(t *testing.T) {
 	}
 	if err := validateCheckpointID("currently"); err != nil {
 		t.Fatalf(`validateCheckpointID("currently") = %v, want nil`, err)
+	}
+}
+
+func TestMissingForkOperationDoesNotCreateForkDirectory(t *testing.T) {
+	m := newManager(t.TempDir())
+	const forkID = "missing"
+
+	if _, err := m.ExecuteForkCommand(forkID, "true"); err == nil {
+		t.Fatal("ExecuteForkCommand() = nil error, want missing fork error")
+	}
+	if _, err := os.Stat(m.forkDir(forkID)); !os.IsNotExist(err) {
+		t.Fatalf("os.Stat(fork directory) error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(m.forkLockPath(forkID)); err != nil {
+		t.Fatalf("os.Stat(fork lock) error = %v, want lock to exist", err)
+	}
+}
+
+func TestForkLockSurvivesForkDirectoryRemoval(t *testing.T) {
+	m := newManager(t.TempDir())
+	const forkID = "removable"
+
+	if err := os.MkdirAll(m.forkDir(forkID), 0o755); err != nil {
+		t.Fatalf("MkdirAll(fork directory): %v", err)
+	}
+	lockPath := m.forkLockPath(forkID)
+	if err := m.withForkLock(forkID, func() error {
+		return os.RemoveAll(m.forkDir(forkID))
+	}); err != nil {
+		t.Fatalf("withForkLock(): %v", err)
+	}
+
+	if _, err := os.Stat(m.forkDir(forkID)); !os.IsNotExist(err) {
+		t.Fatalf("os.Stat(fork directory) error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("os.Stat(fork lock) error = %v, want lock to survive: %v", err, lockPath)
 	}
 }
