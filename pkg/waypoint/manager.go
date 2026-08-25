@@ -94,6 +94,18 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 		if memoryErr != nil {
 			return fmt.Errorf("memory checkpoint failed: %w", memoryErr)
 		}
+
+		// Clear the way for the restore *before* touching the filesystem.
+		//
+		// Everything below this point is destructive and not undoable: the
+		// overlay is unmounted, "current" is renamed to the checkpoint, and a
+		// fresh "current" takes its place. If the restore then fails, the
+		// session is left without a live process and without metadata for the
+		// checkpoint that just swallowed its upper layer. Doing the pid
+		// reclamation here means that failure mode costs nothing but the dump.
+		if errPrep := m.prepareCheckpointRestore(pid, currentCriuDir); errPrep != nil {
+			return fmt.Errorf("checkpoint task IDs cannot be reclaimed, so the restore would fail; leaving the session untouched: %w", errPrep)
+		}
 	}
 
 	// Unmount runtime pseudo filesystems first, then overlay mount.
@@ -132,6 +144,8 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 	// (so that the process can continue running in the new overlay)
 	if pid != SkipMemoryCheckpoint {
 		currentCriuDir := filepath.Join(m.baseDir, checkpointID, "criu")
+		// Re-check: the pids were reclaimed before the rotation above, but the
+		// window is not closed, and a conflict here is worth a clear error.
 		if errPrep := m.prepareCheckpointRestore(pid, currentCriuDir); errPrep != nil {
 			return fmt.Errorf("failed to prepare memory restore into new overlay: %w", errPrep)
 		}

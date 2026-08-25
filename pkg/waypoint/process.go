@@ -84,6 +84,16 @@ func (m *Manager) prepareCheckpointRestore(rootPID int, criuPath string) error {
 		}
 	}
 
+	holders, err := m.findPidHolders(taskIDs)
+	if err != nil {
+		return fmt.Errorf("failed to scan for processes holding checkpoint task IDs: %w", err)
+	}
+	for holderPID, held := range holders {
+		fmt.Printf("Process %d keeps checkpoint %s reserved and must go before the restore\n",
+			holderPID, strings.Join(held, " and "))
+		pidsToKill[holderPID] = struct{}{}
+	}
+
 	killList := make([]int, 0, len(pidsToKill))
 	for pid := range pidsToKill {
 		killList = append(killList, pid)
@@ -155,6 +165,82 @@ func (m *Manager) readCheckpointTaskIDs(criuPath string) ([]int, error) {
 	return taskIDs, nil
 }
 
+// parseProcStatIDs pulls the process group id and session id out of the
+// contents of /proc/<pid>/stat.
+//
+// The comm field is parenthesised and may itself contain spaces and
+// parentheses, so the fixed-position fields are only meaningful after the
+// final ')'. Counting from there: 1=state, 2=ppid, 3=pgrp, 4=session.
+func parseProcStatIDs(stat string) (pgrp int, session int, err error) {
+	end := strings.LastIndex(stat, ")")
+	if end < 0 {
+		return 0, 0, fmt.Errorf("malformed stat line: no comm field")
+	}
+	fields := strings.Fields(stat[end+1:])
+	if len(fields) < 4 {
+		return 0, 0, fmt.Errorf("malformed stat line: only %d fields after comm", len(fields))
+	}
+	if pgrp, err = strconv.Atoi(fields[2]); err != nil {
+		return 0, 0, fmt.Errorf("unparsable pgrp %q: %w", fields[2], err)
+	}
+	if session, err = strconv.Atoi(fields[3]); err != nil {
+		return 0, 0, fmt.Errorf("unparsable session %q: %w", fields[3], err)
+	}
+	return pgrp, session, nil
+}
+
+// findPidHolders reports live processes that keep one of the checkpoint's task
+// IDs allocated *without* owning a task by that ID.
+//
+// A pid stays reserved in the kernel for as long as anything still references
+// it, and a process group id or session id counts as a reference. So a single
+// surviving grandchild of a checkpointed shell -- a job that was backgrounded
+// and then reparented to init, say -- keeps the shell's pid taken long after
+// /proc/<pid> is gone. CRIU restores tasks with clone3(set_tid=...), which
+// fails with EEXIST on a reserved pid, so the restore dies with a bare
+// "Can't fork for <pid>: File exists" that no /proc lookup can predict.
+//
+// The returned map is keyed by the holding process, valued by a description of
+// what it is holding, so callers can explain themselves before killing it.
+func (m *Manager) findPidHolders(taskIDs []int) (map[int][]string, error) {
+	wanted := make(map[int]struct{}, len(taskIDs))
+	for _, taskID := range taskIDs {
+		wanted[taskID] = struct{}{}
+	}
+
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read /proc: %w", err)
+	}
+
+	holders := make(map[int][]string)
+	for _, entry := range entries {
+		holderPID, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue // not a process directory
+		}
+		if _, isCheckpointTask := wanted[holderPID]; isCheckpointTask {
+			// Owned outright, not merely referenced; findTaskOwnerPID covers it.
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
+		if err != nil {
+			continue // exited between ReadDir and here
+		}
+		pgrp, session, err := parseProcStatIDs(string(data))
+		if err != nil {
+			continue
+		}
+		if _, held := wanted[session]; held {
+			holders[holderPID] = append(holders[holderPID], fmt.Sprintf("session %d", session))
+		}
+		if _, held := wanted[pgrp]; held && pgrp != session {
+			holders[holderPID] = append(holders[holderPID], fmt.Sprintf("process group %d", pgrp))
+		}
+	}
+	return holders, nil
+}
+
 func (m *Manager) findTaskOwnerPID(taskID int) (int, error) {
 	statusPath := filepath.Join("/proc", strconv.Itoa(taskID), "status")
 	tgid, err := readProcStatusInt(statusPath, "Tgid")
@@ -169,6 +255,16 @@ func (m *Manager) findTaskOwnerPID(taskID int) (int, error) {
 
 func (m *Manager) findConflictingCheckpointTasks(taskIDs []int) ([]string, error) {
 	var conflicts []string
+
+	holders, err := m.findPidHolders(taskIDs)
+	if err != nil {
+		return nil, err
+	}
+	for holderPID, held := range holders {
+		conflicts = append(conflicts, fmt.Sprintf("%s reserved by live process %d",
+			strings.Join(held, " and "), holderPID))
+	}
+
 	for _, taskID := range taskIDs {
 		ownerPID, err := m.findTaskOwnerPID(taskID)
 		if err != nil {
