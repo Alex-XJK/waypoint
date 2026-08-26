@@ -226,6 +226,21 @@ assert_contains "concurrent fork c2 is alive" "c2-alive" "$OUT"
 OUT="$("$W" fork "$SESSION" A --n 2 2>&1)"; echo "$OUT"
 N="$(echo "$OUT" | grep -c 'pid=' || true)"
 [ "$N" -eq 2 ] && ok "fork --n 2 materialized 2 forks" || bad "fork --n 2: expected 2 forks, saw $N"
+# --n restores concurrently, so the batch must still be N independent forks
+# rather than N reports of one restore sharing an upper layer.
+BATCH_IDS="$(printf '%s\n' "$OUT" | awk '/pid=/{print $1}')"
+UNIQ="$(printf '%s\n' "$BATCH_IDS" | sort -u | wc -l)"
+[ "$UNIQ" -eq 2 ] && ok "fork --n 2 gave distinct fork IDs" || bad "fork --n 2 IDs not distinct: $BATCH_IDS"
+B1="$(printf '%s\n' "$BATCH_IDS" | sed -n 1p)"
+B2="$(printf '%s\n' "$BATCH_IDS" | sed -n 2p)"
+run "$W exec $SESSION $B1 -- 'echo one > /root/batch1.txt'"
+run "$W exec $SESSION $B2 -- 'echo two > /root/batch2.txt'"
+OUT="$("$W" exec "$SESSION" "$B1" -- 'ls /root' 2>&1)"
+assert_contains     "batch fork 1 sees its own write"        "batch1.txt" "$OUT"
+assert_not_contains "batch fork 1 is isolated from its peer" "batch2.txt" "$OUT"
+OUT="$("$W" exec "$SESSION" "$B2" -- 'ls /root' 2>&1)"
+assert_contains     "batch fork 2 sees its own write"        "batch2.txt" "$OUT"
+assert_not_contains "batch fork 2 is isolated from its peer" "batch1.txt" "$OUT"
 
 # ---------------------------------------------------------------------------
 say "6. forks inherit state, then diverge without touching each other"
@@ -415,6 +430,14 @@ assert_fails "unknown flag on list"    "$W" list "$SESSION" --bogus
 assert_fails "unknown flag on cleanup" "$W" cleanup "$SESSION" --bogus
 assert_fails "unknown flag on suspend" "$W" suspend "$SESSION" --bogus
 assert_exists "the refused cleanup left the session alone" "$(ck_upper A)/root/base.txt"
+
+# A mistyped fork ID must not retire that name for the session. Taking the
+# fork lock creates the lock file's parent, so a lock stored under forks/<id>/
+# would leave a directory behind that Materialize reads as "already exists".
+assert_fails  "exec on a fork that was never created" "$W" exec "$SESSION" typofork -- 'echo hi'
+assert_absent "the failed exec created no fork directory" "$(fork_dir typofork)"
+OUT="$("$W" fork "$SESSION" A --id typofork 2>&1)"
+assert_contains "the mistyped fork ID is still usable afterwards" "pid=" "$OUT"
 
 # ---------------------------------------------------------------------------
 say "17. inspect the DAG + info"

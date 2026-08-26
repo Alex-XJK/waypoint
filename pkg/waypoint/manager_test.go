@@ -85,18 +85,69 @@ func TestValidateCheckpointIDRejectsReserved(t *testing.T) {
 	}
 }
 
+// TestMissingForkOperationDoesNotCreateForkDirectory covers every entry point
+// that takes the fork lock. Materialize refuses an ID whose directory already
+// exists, so an operation on a mistyped ID that left one behind would retire
+// that name for the life of the session.
 func TestMissingForkOperationDoesNotCreateForkDirectory(t *testing.T) {
-	m := newManager(t.TempDir())
-	const forkID = "missing"
+	// One fork ID per operation: the lock file is deliberately left behind,
+	// and sharing an ID would let one case mask another.
+	cases := []struct {
+		name   string
+		forkID string
+		call   func(m *Manager, forkID string) error
+	}{
+		{"ExecuteForkCommand", "missing-exec", func(m *Manager, id string) error {
+			_, err := m.ExecuteForkCommand(id, "true")
+			return err
+		}},
+		{"DestroyFork", "missing-destroy", func(m *Manager, id string) error {
+			return m.DestroyFork(id)
+		}},
+		{"SnapshotFork", "missing-snapshot", func(m *Manager, id string) error {
+			_, err := m.SnapshotFork(id, "ckpt")
+			return err
+		}},
+		{"ParkFork", "missing-park", func(m *Manager, id string) error {
+			_, err := m.ParkFork(id, "ckpt")
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newManager(t.TempDir())
+			if err := tc.call(m, tc.forkID); err == nil {
+				t.Fatalf("%s() = nil error, want missing fork error", tc.name)
+			}
+			if _, err := os.Stat(m.forkDir(tc.forkID)); !os.IsNotExist(err) {
+				t.Fatalf("os.Stat(fork directory) error = %v, want not exist", err)
+			}
+			if _, err := os.Stat(m.forkLockPath(tc.forkID)); err != nil {
+				t.Fatalf("os.Stat(fork lock) error = %v, want lock to exist", err)
+			}
+		})
+	}
+}
 
-	if _, err := m.ExecuteForkCommand(forkID, "true"); err == nil {
-		t.Fatal("ExecuteForkCommand() = nil error, want missing fork error")
-	}
-	if _, err := os.Stat(m.forkDir(forkID)); !os.IsNotExist(err) {
-		t.Fatalf("os.Stat(fork directory) error = %v, want not exist", err)
-	}
-	if _, err := os.Stat(m.forkLockPath(forkID)); err != nil {
-		t.Fatalf("os.Stat(fork lock) error = %v, want lock to exist", err)
+// TestForkLockPathIsOutsideForkDirectory pins the placement the fix depends
+// on. Locking creates the file's parent, so a lock stored under the fork root
+// would recreate that root as a side effect of merely looking at the fork.
+func TestForkLockPathIsOutsideForkDirectory(t *testing.T) {
+	m := newManager(t.TempDir())
+	seen := map[string]string{}
+	for _, forkID := range []string{MainForkID, "f1", "f2", "a.b-c_d", "session"} {
+		lock := m.forkLockPath(forkID)
+		root := m.forkDir(forkID)
+		if lock == root || strings.HasPrefix(lock, root+string(filepath.Separator)) {
+			t.Fatalf("fork %q lock %q is inside its fork directory %q", forkID, lock, root)
+		}
+		if lock == m.sessionLockPath() {
+			t.Fatalf("fork %q lock collides with the session lock %q", forkID, lock)
+		}
+		if other, ok := seen[lock]; ok {
+			t.Fatalf("forks %q and %q share the lock path %q", other, forkID, lock)
+		}
+		seen[lock] = forkID
 	}
 }
 

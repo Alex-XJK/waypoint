@@ -131,3 +131,44 @@ func TestLoadConfigBooleanEnvironmentOverridesFile(t *testing.T) {
 		t.Fatalf("boolean config state = %+v, want %+v", got, want)
 	}
 }
+
+func TestLoadConfigAppliesExplicitTrueBooleans(t *testing.T) {
+	// The complement of the explicit-false case: a file must be able to turn
+	// a default-off flag on, and say so in the reported source.
+	setBooleanConfigState(t, booleanConfigState{
+		preserveSource: "default",
+		tmpfsSource:    "default",
+		phaseSource:    "default",
+	})
+	source := loadBooleanConfigForTest(t, `{
+		"preserve_session_on_cleanup": true,
+		"tmpfs_images": true,
+		"phase_stats": true
+	}`, nil)
+
+	want := booleanConfigState{
+		preserve:       true,
+		preserveSource: source,
+		tmpfs:          true,
+		tmpfsSource:    source,
+		phase:          true,
+		phaseSource:    source,
+	}
+	if got := currentBooleanConfigState(); got != want {
+		t.Fatalf("boolean config state = %+v, want %+v", got, want)
+	}
+}
+
+// TestLoadConfigIsIdempotent guards against the resolution drifting when it
+// runs more than once: every command re-resolves, and LoadConfigInfo resolves
+// again on top of whatever a Manager already did.
+func TestLoadConfigIsIdempotent(t *testing.T) {
+	setBooleanConfigState(t, booleanConfigState{})
+	contents := `{"preserve_session_on_cleanup": true, "tmpfs_images": false}`
+	loadBooleanConfigForTest(t, contents, nil)
+	first := currentBooleanConfigState()
+	loadConfig()
+	if second := currentBooleanConfigState(); second != first {
+		t.Fatalf("second loadConfig() = %+v, want %+v", second, first)
+	}
+}

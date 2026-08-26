@@ -79,3 +79,23 @@ func TestForkCheckpointsConcurrentlyCollectsPartialFailures(t *testing.T) {
 		t.Fatalf("result 1 error = %v, want %v", results[1].err, wantErr)
 	}
 }
+
+func TestForkCheckpointsConcurrentlyHandlesSmallCounts(t *testing.T) {
+	// count==1 is the default `fork` path, and count==0 must return rather
+	// than block on a WaitGroup nothing will ever release.
+	for _, count := range []int{0, 1} {
+		t.Run(fmt.Sprintf("count=%d", count), func(t *testing.T) {
+			calls := 0
+			results := forkCheckpointsConcurrently(count, func(i int) (*waypoint.Fork, error) {
+				calls++
+				return &waypoint.Fork{ID: fmt.Sprintf("fork-%d", i)}, nil
+			})
+			if len(results) != count {
+				t.Fatalf("len(results) = %d, want %d", len(results), count)
+			}
+			if calls != count {
+				t.Fatalf("create called %d times, want %d", calls, count)
+			}
+		})
+	}
+}
