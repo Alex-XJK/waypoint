@@ -57,10 +57,10 @@ type config struct {
 	SessionInfoDir           string `json:"session_info_dir,omitempty"`
 	SessionsDir              string `json:"sessions_dir,omitempty"`
 	BashInitSrc              string `json:"bash_init_src,omitempty"`
-	PreserveSessionOnCleanup bool   `json:"preserve_session_on_cleanup,omitempty"`
-	TmpfsImages              bool   `json:"tmpfs_images,omitempty"`
+	PreserveSessionOnCleanup *bool  `json:"preserve_session_on_cleanup,omitempty"`
+	TmpfsImages              *bool  `json:"tmpfs_images,omitempty"`
 	TmpfsImagesDir           string `json:"tmpfs_images_dir,omitempty"`
-	PhaseStats               bool   `json:"phase_stats,omitempty"`
+	PhaseStats               *bool  `json:"phase_stats,omitempty"`
 }
 
 // ConfigValue reports an effective configuration value and where it came from.
@@ -253,20 +253,20 @@ func loadConfig() {
 					DefaultBashInitSrc = cfg.BashInitSrc
 					DefaultBashInitSrcConfig = configSource
 				}
-				if os.Getenv("WAYPOINT_PRESERVE_SESSION_ON_CLEANUP") == "" {
-					PreserveSessionOnCleanup = cfg.PreserveSessionOnCleanup
+				if cfg.PreserveSessionOnCleanup != nil && os.Getenv("WAYPOINT_PRESERVE_SESSION_ON_CLEANUP") == "" {
+					PreserveSessionOnCleanup = *cfg.PreserveSessionOnCleanup
 					PreserveSessionOnCleanupConfig = configSource
 				}
-				if cfg.TmpfsImages && os.Getenv("WAYPOINT_TMPFS_IMAGES") == "" {
-					TmpfsImages = cfg.TmpfsImages
+				if cfg.TmpfsImages != nil && os.Getenv("WAYPOINT_TMPFS_IMAGES") == "" {
+					TmpfsImages = *cfg.TmpfsImages
 					TmpfsImagesConfig = configSource
 				}
 				if cfg.TmpfsImagesDir != "" && os.Getenv("WAYPOINT_TMPFS_DIR") == "" {
 					TmpfsImagesDir = cfg.TmpfsImagesDir
 					TmpfsImagesDirConfig = configSource
 				}
-				if cfg.PhaseStats && os.Getenv("WAYPOINT_PHASE_STATS") == "" {
-					PhaseStats = cfg.PhaseStats
+				if cfg.PhaseStats != nil && os.Getenv("WAYPOINT_PHASE_STATS") == "" {
+					PhaseStats = *cfg.PhaseStats
 					PhaseStatsConfig = configSource
 				}
 			}
