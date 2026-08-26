@@ -13,7 +13,7 @@ import (
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
 
-var Version = "v0.6.3-rc"
+var Version = "v0.6.3"
 
 func main() {
 	if len(os.Args) < 2 {
