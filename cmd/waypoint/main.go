@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
@@ -30,6 +31,27 @@ func printExecResult(result *waypoint.ExecResult) {
 	if result.ExitCode != 0 {
 		os.Exit(result.ExitCode)
 	}
+}
+
+type forkResult struct {
+	fork *waypoint.Fork
+	err  error
+}
+
+// forkCheckpointsConcurrently starts every requested materialization at once
+// and stores each result in its request slot so callers can print stable output.
+func forkCheckpointsConcurrently(count int, create func(int) (*waypoint.Fork, error)) []forkResult {
+	results := make([]forkResult, count)
+	var wg sync.WaitGroup
+	wg.Add(count)
+	for i := range results {
+		go func(i int) {
+			defer wg.Done()
+			results[i].fork, results[i].err = create(i)
+		}(i)
+	}
+	wg.Wait()
+	return results
 }
 
 func main() {
@@ -246,21 +268,29 @@ func main() {
 			fmt.Printf("Error loading session: %v\n", err)
 			os.Exit(1)
 		}
-		for i := 0; i < count; i++ {
+		results := forkCheckpointsConcurrently(count, func(_ int) (*waypoint.Fork, error) {
 			spec := waypoint.ForkSpec{}
 			if forkID != "" {
 				spec.ID = forkID
 			}
-			f, err := manager.ForkCheckpoint(checkpointID, spec)
-			if err != nil {
-				fmt.Printf("Error creating fork: %v\n", err)
-				os.Exit(1)
+			return manager.ForkCheckpoint(checkpointID, spec)
+		})
+		failed := false
+		for _, result := range results {
+			if result.err != nil {
+				fmt.Printf("Error creating fork: %v\n", result.err)
+				failed = true
+				continue
 			}
+			f := result.fork
 			line := fmt.Sprintf("%s pid=%d socket=%s duration=%s", f.ID, f.PID, f.SocketPath, f.RestoreDuration)
 			if f.RestoreBreakdown != nil {
 				line += " " + f.RestoreBreakdown.String()
 			}
 			fmt.Println(line)
+		}
+		if failed {
+			os.Exit(1)
 		}
 
 	case "fork-exec":
