@@ -10,13 +10,36 @@ import (
 	"syscall"
 )
 
+// tcpFlag decides what happens to established TCP connections. CRIU wants the
+// same choice on both sides: dumping with --tcp-close and restoring without it
+// fails with "Need to set the --tcp-close options."
+//
+// The default, --tcp-established, asks CRIU to carry the connection across the
+// checkpoint and reconnect it on restore. That only works while the peer still
+// has the connection open, so a checkpoint taken now and restored minutes later
+// dies with "soccr: Can't connect inet socket back: Cannot assign requested
+// address" -- and the whole restore fails with it, not just the socket.
+//
+// For a sandbox running network *clients* (an HTTP client with a keep-alive
+// pool, say) --tcp-close is the sturdier choice: the connection is dropped at
+// dump time and the client simply opens a new one after restore.
+//
+//	WAYPOINT_TCP=close   drop established connections at dump time
+//	WAYPOINT_TCP=established (or unset)  current behaviour
+func tcpFlag() string {
+	if os.Getenv("WAYPOINT_TCP") == "close" {
+		return "--tcp-close"
+	}
+	return "--tcp-established"
+}
+
 func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 	// Use CRIU to dump the process
 	// Notice: Cannot use '--shell-job' because the PTY issue during the restore phase.
 	cmd := exec.Command("criu", "dump",
 		"-t", fmt.Sprintf("%d", pid),
 		"-D", criuPath,
-		"--tcp-established",
+		tcpFlag(),
 		"--manage-cgroups=ignore",
 		"--force-irmap", // resolve inotify watches via the inode reverse-map when the path is gone
 		"--link-remap",  // dump deleted files that still have open fds
@@ -51,7 +74,7 @@ func (m *Manager) restoreMemoryState(pid int, criuPath string) (int, error) {
 	cmd := exec.Command(
 		"criu", "restore",
 		"--images-dir", criuPath,
-		"--tcp-established",
+		tcpFlag(),
 		"--manage-cgroups=ignore",
 		"--restore-detached",
 		"--file-locks",
