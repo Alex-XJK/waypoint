@@ -1,4 +1,4 @@
-.PHONY: build test install uninstall check doctor deps-ubuntu clean help
+.PHONY: build test install uninstall check doctor deps-ubuntu completion clean help
 
 build:
 	@./setup build
@@ -19,6 +19,9 @@ doctor: check
 
 deps-ubuntu:
 	@./setup deps-ubuntu
+
+completion:
+	@./setup completion
 
 clean:
 	@./setup clean

@@ -272,25 +272,40 @@ func (m *Manager) CleanupForce() error {
 
 	fmt.Printf("Starting forceful cleanup for session %s...\n", m.sessionID)
 
-	// Step 1: Kill processes using files in this directory
+	// Step 1: Stop the tracked shell directly. Processes inside the chroot do
+	// not reliably appear in lsof/fuser results for the session directory, so
+	// relying only on the fallback scan can leave the shell process tree alive
+	// after its mounts and session metadata have been removed.
+	if m.shellPid != ShellNotEnabled {
+		fmt.Printf("Killing shell process %d...\n", m.shellPid)
+		if err := m.killProcess(m.shellPid); err != nil {
+			fmt.Printf("Warning: Failed to kill shell process: %v\n", err)
+		} else if m.shellSocket != "" {
+			// Ignore errors: the socket may already have disappeared with the
+			// shell or an earlier cleanup attempt.
+			_ = os.Remove(m.shellSocket)
+		}
+	}
+
+	// Step 2: Kill any remaining processes using files in this directory
 	fmt.Println("Killing processes using session directory...")
 	if err := m.killProcessesUsingDirectory(); err != nil {
 		fmt.Printf("Warning: Failed to kill some processes: %v\n", err)
 	}
 
-	// Step 2: Close file handles
+	// Step 3: Close file handles
 	fmt.Println("Closing file handles...")
 	if err := m.closeFileHandles(); err != nil {
 		fmt.Printf("Warning: Failed to close some file handles: %v\n", err)
 	}
 
-	// Step 3: Unmount overlay filesystems
+	// Step 4: Unmount overlay filesystems
 	fmt.Println("Unmounting overlay filesystems...")
 	if err := m.forceUnmountOverlays(); err != nil {
 		fmt.Printf("Warning: Failed to unmount overlays: %v\n", err)
 	}
 
-	// Step 4: Force unmount any remaining mounts
+	// Step 5: Force unmount any remaining mounts
 	fmt.Println("Force unmounting all mounts in session directory...")
 	if err := m.forceUnmountAll(); err != nil {
 		fmt.Printf("Warning: Failed to force unmount: %v\n", err)
@@ -301,14 +316,14 @@ func (m *Manager) CleanupForce() error {
 		return nil
 	}
 
-	// Step 5: Try removing the directory multiple times with a backoff
+	// Step 6: Try removing the directory multiple times with a backoff
 	fmt.Println("Removing session directory...")
 	if err := m.removeDirectoryWithRetry(); err != nil {
 		// Must error out if we cannot remove the directory, otherwise we might leave a broken session
 		return fmt.Errorf("failed to remove session directory after multiple attempts: %w", err)
 	}
 
-	// Step 6: Remove global session info
+	// Step 7: Remove global session info
 	fmt.Println("Removing session info...")
 	if err := removeSessionInfo(m.sessionID); err != nil {
 		fmt.Printf("Warning: Failed to remove session info: %v\n", err)

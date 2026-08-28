@@ -19,6 +19,7 @@ on minimal overhead by directly orchestrating existing kernel features and redes
 - **Minimal Overhead**: Direct system calls without unnecessary container abstractions
 - **Minimal File IO**: Uses multiple lower-layer designs to achieve true inter-checkpoint deduplication
 - **Simple CLI**: Straightforward command-line interface for checkpoint operations
+- **Bash Completion**: Completes commands, flags, host directories, sessions, and checkpoints
 - **Session Management**: Automatic cleanup and resource management
 
 ## Architecture 🧱
@@ -69,7 +70,8 @@ For full details, see [Installing Waypoint](./docs/INSTALL.md).
 ### Scripted Setup (Recommended, since v0.6.1)
 
 This path uses the repository `Makefile` to install system packages, build the
-binaries, install the CLI/helper pair, and run a root-level host check.
+binaries, install the CLI/helper pair and Bash completion, and run a root-level
+host check.
 
 ```bash
 git clone https://github.com/Alex-XJK/waypoint.git
@@ -144,7 +146,7 @@ go build -o bash_init ./cmd/bash-init
 
 ```bash
 waypoint version
-# Output: waypoint version v0.6.2
+# Output: waypoint version v0.6.3
 ```
 
 You can also run the root-level host check from the setup script after manual
@@ -225,6 +227,9 @@ Save the session ID for future operations!
 Special options:
 - `--quiet` to output only the session ID, work directory, and bash PID, separated by commas.
 
+Since v0.6.3, sessions created with `build` apply the built image's `ENV` and
+`WORKDIR` settings instead of silently replacing them with the host defaults.
+
 > Credit: This `buildah`-based workflow was originally designed by [Tianle Zhou](https://www.linkedin.com/in/tian-le-zhou-99a145221/)
 in his TBench integration for v0.2.0.
 
@@ -255,6 +260,10 @@ Note that the `exec` command can be used all the time, regardless of whether you
 
 If you have a shell session, the `exec` command will execute using a long-running shell session, and will be able to preserve state across multiple `exec` calls and also across checkpoints.
 If you don't have a shell session, the `exec` will simply help you execute the command in the correct workspace WITHOUT containment.
+
+Since v0.6.3, managed shell sessions also use unattended defaults for common
+pagers, editors, Git authentication, package-management tools, and Python
+tooling so automation does not stall on an interactive prompt.
 
 ### 3. Create Checkpoints
 

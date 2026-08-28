@@ -5,10 +5,10 @@ type: software
 authors:
   - family-names: Xu
     given-names: Jiakai
+  - family-names: Ge
+    given-names: Tiancheng
   - family-names: Liargkovas
     given-names: Georgios
-  - family-names: Gillai
-    given-names: Danielle
   - family-names: Wu
     given-names: Eugene
   - family-names: Kaffes
@@ -23,8 +23,8 @@ abstract: >-
   on top of CRIU and OverlayFS for fast, isolated process
   state management.
 license: Apache-2.0
-version: 0.6.2
-date-released: '2026-07-31'
+version: 0.6.3
+date-released: '2026-08-28'
 references:
   - type: article
     title: "Toward Systems Foundations for Agentic Exploration"

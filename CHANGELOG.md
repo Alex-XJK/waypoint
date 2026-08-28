@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.6.3 — Image Environment and Bash Completion
+**Dockerfile runtime fidelity and command-line usability improvements**
+- Applied `ENV` and `WORKDIR` settings from built images to Waypoint shell sessions.
+- Centralized unattended shell defaults for pagers, editors, Git, Debian tools, and Python tooling to avoid interactive prompts.
+- Added Bash completion for Waypoint commands, flags, host directories, sessions, and checkpoints.
+
 ## v0.6.2 — CRIU Compatibility and Restore Readiness
 **Synchronous restore completion and broader workload support**
 - Made CRIU restore synchronous so `restore` returns only after the restored process is ready for immediate follow-up commands.

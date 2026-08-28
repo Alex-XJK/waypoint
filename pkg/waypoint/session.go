@@ -52,6 +52,8 @@ func LoadManager(sessionID string) (*Manager, error) {
 	manager.shellPid = sessionInfo.ShellPid
 	manager.shellSocket = sessionInfo.ShellSocket
 	manager.currentParent = sessionInfo.CurrentParent
+	manager.imageEnv = sessionInfo.ImageEnv
+	manager.imageWorkDir = sessionInfo.ImageWorkDir
 
 	return manager, nil
 }
@@ -78,6 +80,8 @@ func saveSessionInfo(sessionID string, manager *Manager) error {
 		CurrentParent: manager.currentParent,
 		ShellPid:      manager.shellPid,
 		ShellSocket:   manager.shellSocket,
+		ImageEnv:      manager.imageEnv,
+		ImageWorkDir:  manager.imageWorkDir,
 	}
 
 	data, err := json.MarshalIndent(sessionInfo, "", "  ")

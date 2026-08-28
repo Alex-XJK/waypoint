@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -31,10 +32,26 @@ var (
 	otherEscapeRegex = regexp.MustCompile(`\x1b[>=]`)
 )
 
+func resolveWorkDir(chrootDir string) string {
+	if len(os.Args) < 4 {
+		return "/"
+	}
+	workDir := os.Args[3]
+	if workDir == "" {
+		return "/"
+	}
+	if fi, err := os.Stat(filepath.Join(chrootDir, workDir)); err != nil || !fi.IsDir() {
+		fmt.Fprintf(os.Stderr, "warning: image WORKDIR %q is not a usable directory, starting at /\n", workDir)
+		return "/"
+	}
+	return workDir
+}
+
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("Usage: bash_init <socket-path> <chroot-dir>")
-		fmt.Println("Example: bash_init /tmp/bash_cmd.sock /tmp/waypoint-sessions/xyz/work")
+		fmt.Println("Usage: bash_init <socket-path> <chroot-dir> [work-dir]")
+		fmt.Println("Example: bash_init /tmp/bash_cmd.sock /tmp/waypoint-sessions/xyz/work /opt")
+		fmt.Println("  work-dir: starting directory inside the chroot, defaults to /")
 		os.Exit(1)
 	}
 
@@ -82,7 +99,38 @@ func main() {
 		Setctty: true,
 		Ctty:    0,
 	}
-	cmd.Dir = "/"
+	cmd.Dir = resolveWorkDir(chrootDir)
+	cmd.Env = append(cmd.Environ(),
+		// Pagers: stream output directly instead of waiting for navigation input.
+		"PAGER=cat",
+		"GIT_PAGER=cat",
+		"SYSTEMD_PAGER=cat",
+
+		// Editors: return immediately instead of opening an interactive editor.
+		"EDITOR=true",
+		"VISUAL=true",
+		"GIT_EDITOR=true",
+		"GIT_SEQUENCE_EDITOR=true",
+
+		// Git authentication: fail instead of prompting; accept new SSH host keys.
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=/bin/true",
+		"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+
+		// Debian tools: disable prompts and report restarts without performing them.
+		"DEBIAN_FRONTEND=noninteractive",
+		"NEEDRESTART_MODE=l",
+
+		// opam 2.0 uses OPAMYES; newer releases prefer OPAMCONFIRMLEVEL.
+		"OPAMYES=1",
+		"OPAMCONFIRMLEVEL=unsafe-yes",
+
+		// Python/pip: emit output promptly and disable prompts or dynamic UI.
+		"PYTHONUNBUFFERED=1",
+		"PIP_NO_INPUT=1",
+		"PIP_DISABLE_PIP_VERSION_CHECK=1",
+		"PIP_PROGRESS_BAR=off",
+	)
 	cmd.Stdin = ptySlave
 	cmd.Stdout = ptySlave
 	cmd.Stderr = ptySlave

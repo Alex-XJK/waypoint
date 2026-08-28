@@ -12,6 +12,8 @@ type Manager struct {
 	shellPid      int      // PID of the shell process if a shell is enabled, ShellNotEnabled(=0) otherwise
 	shellSocket   string   // Path to the shell socket if enabled, empty otherwise
 	currentParent []string // Current parent checkpoints
+	imageEnv      []string // Env from the built image's config, empty for non-build sessions
+	imageWorkDir  string   // WorkingDir from the built image's config, empty if unset
 }
 
 // Metadata represents the metadata stored for each checkpoint.
@@ -36,6 +38,14 @@ type SessionInfo struct {
 	CurrentParent []string `json:"current_parent"`
 	ShellPid      int      `json:"shell_pid"`
 	ShellSocket   string   `json:"shell_socket,omitempty"`
+	ImageEnv      []string `json:"image_env,omitempty"`
+	ImageWorkDir  string   `json:"image_workdir,omitempty"`
+}
+
+// ImageConfig holds the image settings Waypoint applies to a session.
+type ImageConfig struct {
+	Env        []string
+	WorkingDir string
 }
 
 // PID values for special cases
@@ -45,6 +55,9 @@ const ShellNotEnabled = 0       // Shell is not enabled for this session
 const PidNotProvided = -2       // PID not provided for checkpointing
 
 const SessionInfoDir = "/tmp/waypoint-sessions-info"
+
+// FallbackPath is used when the image config carries no PATH of its own.
+const FallbackPath = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 // The below section declares configuration variables.
 // Those variables can be overridden by configuration.
