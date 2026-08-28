@@ -24,7 +24,7 @@ abstract: >-
   state management.
 license: Apache-2.0
 version: 0.6.3
-date-released: '2026-08-26'
+date-released: '2026-08-28'
 references:
   - type: article
     title: "Toward Systems Foundations for Agentic Exploration"
