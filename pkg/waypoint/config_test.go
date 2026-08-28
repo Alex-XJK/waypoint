@@ -132,6 +132,35 @@ func TestLoadConfigBooleanEnvironmentOverridesFile(t *testing.T) {
 	}
 }
 
+func TestLoadConfigInvalidBooleanEnvironmentFallsBackToFile(t *testing.T) {
+	setBooleanConfigState(t, booleanConfigState{
+		preserveSource: "default",
+		tmpfsSource:    "default",
+		phaseSource:    "default",
+	})
+	source := loadBooleanConfigForTest(t, `{
+		"preserve_session_on_cleanup": true,
+		"tmpfs_images": true,
+		"phase_stats": true
+	}`, map[string]string{
+		"WAYPOINT_PRESERVE_SESSION_ON_CLEANUP": "not-a-bool",
+		"WAYPOINT_TMPFS_IMAGES":                "not-a-bool",
+		"WAYPOINT_PHASE_STATS":                 "not-a-bool",
+	})
+
+	want := booleanConfigState{
+		preserve:       true,
+		preserveSource: source,
+		tmpfs:          true,
+		tmpfsSource:    source,
+		phase:          true,
+		phaseSource:    source,
+	}
+	if got := currentBooleanConfigState(); got != want {
+		t.Fatalf("boolean config state = %+v, want %+v", got, want)
+	}
+}
+
 func TestLoadConfigAppliesExplicitTrueBooleans(t *testing.T) {
 	// The complement of the explicit-false case: a file must be able to turn
 	// a default-off flag on, and say so in the reported source.
