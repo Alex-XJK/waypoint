@@ -32,6 +32,25 @@ func printExecResult(result *waypoint.ExecResult) {
 	}
 }
 
+// splitForkArg parses a cp argument into a possible "<fork-id>:<path>" form.
+// The fork side is recognized syntactically: a colon is present and the
+// segment before the FIRST colon contains no '/'. Fork ids never contain
+// slashes, and a host path with a colon in a directory component (e.g.
+// /a/b:c) keeps its slash before the colon, so it is correctly read as a host
+// path. (A bare relative host path like "we:rd.txt" is ambiguous, as with
+// docker cp; qualify it as "./we:rd.txt".) Existence and liveness of the named
+// fork are validated later by Copy, which owns the parked/destroyed message.
+func splitForkArg(arg string) (fork, path string, isFork bool) {
+	i := strings.IndexByte(arg, ':')
+	if i <= 0 {
+		return "", arg, false
+	}
+	if strings.ContainsRune(arg[:i], '/') {
+		return "", arg, false
+	}
+	return arg[:i], arg[i+1:], true
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: waypoint <command> [args...]")
@@ -47,6 +66,7 @@ func main() {
 		fmt.Println("  destroy <session> <fork-id>                  - Destroy a live fork")
 		fmt.Println("  list <session> [--json]                      - List checkpoints and forks")
 		fmt.Println("  suspend <session>                            - End all live forks; keep checkpoints on disk")
+		fmt.Println("  cp <session> <fork>:<path> <host> | <host> <fork>:<path> - Copy a file/dir in or out of a live fork")
 		fmt.Println("  cleanup <session> [--force]                  - Clean up session")
 		fmt.Println("  info [session [checkpoint-id]]               - Show system, session, or checkpoint info")
 		fmt.Println("  version                                      - Show version")
@@ -442,6 +462,40 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Session '%s' suspended; checkpoints remain on disk — `waypoint fork` any of them to resume\n", os.Args[2])
+
+	case "cp":
+		if len(os.Args) != 5 {
+			fmt.Println("Usage: cp <session> <fork-id>:<path> <host-path>   (copy out)")
+			fmt.Println("       cp <session> <host-path> <fork-id>:<path>   (copy in)")
+			fmt.Println("  Exactly one argument carries a <fork-id>: prefix.")
+			os.Exit(1)
+		}
+		sessionID := os.Args[2]
+		manager, err := waypoint.LoadManager(sessionID)
+		if err != nil {
+			fmt.Printf("Error loading session: %v\n", err)
+			os.Exit(1)
+		}
+		srcFork, srcPath, srcIsFork := splitForkArg(os.Args[3])
+		dstFork, dstPath, dstIsFork := splitForkArg(os.Args[4])
+		switch {
+		case srcIsFork && !dstIsFork:
+			if err := manager.Copy(srcFork, srcPath, dstPath, waypoint.CopyOut); err != nil {
+				fmt.Printf("Error copying out of fork: %v\n", err)
+				os.Exit(1)
+			}
+		case !srcIsFork && dstIsFork:
+			if err := manager.Copy(dstFork, dstPath, srcPath, waypoint.CopyIn); err != nil {
+				fmt.Printf("Error copying into fork: %v\n", err)
+				os.Exit(1)
+			}
+		case srcIsFork && dstIsFork:
+			fmt.Println("Error: fork-to-fork copy is not supported; copy via the host")
+			os.Exit(1)
+		default:
+			fmt.Println("Error: exactly one path must carry a <fork-id>: prefix")
+			os.Exit(1)
+		}
 
 	case "cleanup":
 		if len(os.Args) < 3 {

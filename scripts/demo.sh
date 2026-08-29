@@ -98,7 +98,7 @@ say "Assemble a minimal rootfs"
 # No /dev seeding needed: bash_init assembles the sandbox /dev at session
 # start. Commands go in /bin, which the fixed guest PATH includes.
 mkdir -p "$ROOTFS"/{bin,tmp,proc,sys,root}
-for b in bash cat ls sleep mkdir rm ps grep touch; do
+for b in bash sh cat ls sleep mkdir rm ps grep touch dirname stat tar sha256sum ln head; do
   p="$(command -v "$b" || true)"
   [ -n "$p" ] && [ -f "$p" ] && cp "$p" "$ROOTFS/bin/$(basename "$b")"
 done
@@ -208,6 +208,46 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+say "7b. cp: host <-> live fork file and directory transfer"
+# A file into a fork, read back inside, and out again -- content exact.
+CPTMP="$WORK/cp"; mkdir -p "$CPTMP"
+printf 'payload-%s' "$RANDOM" > "$CPTMP/up.txt"; UPWANT="$(cat "$CPTMP/up.txt")"
+run "$W cp $SESSION $CPTMP/up.txt main:/work/cpf.txt"
+got="$($W exec $SESSION main -- 'cat /work/cpf.txt' 2>&1)"
+[ "$got" = "$UPWANT" ] && ok "cp-in file visible in fork" || bad "cp-in file: got '$got'"
+run "$W cp $SESSION main:/work/cpf.txt $CPTMP/back.txt"
+[ "$(cat "$CPTMP/back.txt")" = "$UPWANT" ] && ok "cp-out file round trip" || bad "cp-out file"
+
+# A never-modified inherited file (in a fork off a checkpoint) must download --
+# the copy-on-write upper does not hold it, so this catches an upper-only impl.
+"$W" exec $SESSION main -- 'sh -c "echo inherited > /work/inh.txt"' >/dev/null 2>&1
+run "$W checkpoint $SESSION cpc"
+CPFORK="$($W fork $SESSION cpc 2>&1 | tail -1 | awk '{print $1}')"
+"$W" exec $SESSION "$CPFORK" -- 'sh -c "echo own > /work/own.txt"' >/dev/null 2>&1
+run "$W cp $SESSION $CPFORK:/work/inh.txt $CPTMP/inh.txt"
+[ "$(cat "$CPTMP/inh.txt")" = inherited ] && ok "inherited file downloads from a fork" || bad "inherited download"
+
+# Absolute symlink inside the fork must not let a copy escape to the host.
+"$W" exec $SESSION "$CPFORK" -- 'sh -c "ln -s /tmp/cp_esc /work/evil; echo orig > /tmp/cp_esc"' >/dev/null 2>&1
+printf 'through-symlink' > "$CPTMP/pl"
+run "$W cp $SESSION $CPTMP/pl $CPFORK:/work/evil"
+insb="$($W exec $SESSION "$CPFORK" -- 'cat /tmp/cp_esc' 2>&1)"
+onhost="$([ -f /tmp/cp_esc ] && cat /tmp/cp_esc || echo NONE)"
+{ [ "$insb" = through-symlink ] && [ "$onhost" = NONE ]; } && ok "absolute symlink stays inside the fork" || bad "symlink escape: sandbox='$insb' host='$onhost'"
+rm -f /tmp/cp_esc
+
+# A directory tree, mode preserved.
+mkdir -p "$CPTMP/tree/sub"; echo a > "$CPTMP/tree/a"; echo b > "$CPTMP/tree/sub/b"; chmod 750 "$CPTMP/tree/sub"
+run "$W cp $SESSION $CPTMP/tree main:/work/cptree"
+gm="$($W exec $SESSION main -- 'stat -c %a /work/cptree/sub' 2>&1 | tr -d '[:space:]')"
+gb="$($W exec $SESSION main -- 'cat /work/cptree/sub/b' 2>&1)"
+{ [ "$gb" = b ] && [ "$gm" = 750 ]; } && ok "directory copy preserves tree and mode" || bad "dir copy: b='$gb' mode='$gm'"
+
+# A parked fork has no live copy: cp must fail with a reason, not silently.
+run "$W snapshot $SESSION $CPFORK cppk --park"
+assert_fails "cp on a parked fork is rejected with a reason" \
+  "$W" cp "$SESSION" "$CPFORK:/work/inh.txt" "$CPTMP/nope.txt"
+
 say "8. snapshot seals a true delta layer (not a cumulative copy)"
 # ---------------------------------------------------------------------------
 run "$W snapshot $SESSION f2 B"
