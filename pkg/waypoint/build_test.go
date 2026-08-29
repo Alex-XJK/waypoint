@@ -61,7 +61,7 @@ func splitEnvKey(entry string) string {
 
 func TestSessionEnvIsWellFormed(t *testing.T) {
 	seen := map[string]bool{}
-	for _, entry := range sessionEnv() {
+	for _, entry := range (&Manager{}).sessionEnv() {
 		key := splitEnvKey(entry)
 		if key == "" {
 			t.Fatalf("environment entry %q is not KEY=VALUE", entry)
