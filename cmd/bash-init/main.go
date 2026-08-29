@@ -54,10 +54,31 @@ const (
 	maxCommandOutputBytes = 16 << 20 // 16 MiB
 )
 
+// resolveWorkDir picks the shell's starting directory from the optional third
+// argument -- the built image's WORKDIR. An image that declares none, or one
+// naming a path that is not a directory in the session rootfs, falls back to
+// "/" with a warning rather than failing the session: a bad WORKDIR should not
+// cost the user their environment.
+func resolveWorkDir() string {
+	if len(os.Args) < 4 || os.Args[3] == "" {
+		return "/"
+	}
+	workDir := os.Args[3]
+	// Called after the re-exec has pivoted into the session root, so the path
+	// is checked as the session itself sees it -- no host prefix to join.
+	if fi, err := os.Stat(workDir); err != nil || !fi.IsDir() {
+		fmt.Fprintf(os.Stderr,
+			"warning: image WORKDIR %q is not a usable directory, starting at /\n", workDir)
+		return "/"
+	}
+	return workDir
+}
+
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("Usage: bash_init <socket-path> <chroot-dir>")
-		fmt.Println("Example: bash_init /tmp/bash_cmd.sock /tmp/waypoint-sessions/xyz/work")
+		fmt.Println("Usage: bash_init <socket-path> <chroot-dir> [work-dir]")
+		fmt.Println("Example: bash_init /tmp/bash_cmd.sock /tmp/waypoint-sessions/xyz/work /app")
+		fmt.Println("  work-dir: starting directory inside the session, defaults to /")
 		os.Exit(1)
 	}
 
@@ -86,7 +107,14 @@ func main() {
 			reexecPath = "/.waypoint/bash_init"
 		}
 		env := append(os.Environ(), "WAYPOINT_REEXECED=1")
-		if err := syscall.Exec(reexecPath, []string{reexecPath, socketPath, "/"}, env); err != nil {
+		// After the re-exec the process is pivoted into the session root, so
+		// the chroot argument becomes "/" -- but the image work-dir must ride
+		// along, or the shell would start at / regardless of the image.
+		reexecArgs := []string{reexecPath, socketPath, "/"}
+		if len(os.Args) >= 4 {
+			reexecArgs = append(reexecArgs, os.Args[3])
+		}
+		if err := syscall.Exec(reexecPath, reexecArgs, env); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to re-exec %s: %v\n", reexecPath, err)
 			os.Exit(1)
 		}
@@ -132,7 +160,7 @@ func main() {
 		Setctty: true,
 		Ctty:    0,
 	}
-	cmd.Dir = "/"
+	cmd.Dir = resolveWorkDir()
 	// The shell gets bash_init's environment (a fixed set chosen by
 	// StartShell, not the invoking user's) minus the WAYPOINT_* plumbing
 	// vars, which are bash_init implementation details.

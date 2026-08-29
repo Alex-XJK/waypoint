@@ -29,19 +29,26 @@ type Manager struct {
 	// shellStartTime is shellPid's /proc stat starttime, recorded at spawn
 	// so kills can verify the identity (PID-reuse safety). 0 = unknown.
 	shellStartTime uint64
+	// imageEnv and imageWorkDir carry the built image's OCI config into the
+	// session shell, so a task's `ENV` and `WORKDIR` mean the same thing here
+	// as they do under docker. Empty for `init` sessions, which have no image.
+	imageEnv     []string
+	imageWorkDir string
 }
 
 // SessionInfo holds information about a checkpoint session.
 // It is serialized to JSON and stored in a globally known location for session tracking.
 type SessionInfo struct {
-	SessionID      string `json:"session_id"`
-	BaseDir        string `json:"base_dir"`
-	OriginalDir    string `json:"original_dir"`
-	WorkOverlay    string `json:"work_overlay"`
-	CreatedAt      int64  `json:"created_at"`
-	ShellPid       int    `json:"shell_pid"`
-	ShellStartTime uint64 `json:"shell_start_time,omitempty"`
-	ShellSocket    string `json:"shell_socket,omitempty"`
+	SessionID      string   `json:"session_id"`
+	BaseDir        string   `json:"base_dir"`
+	OriginalDir    string   `json:"original_dir"`
+	WorkOverlay    string   `json:"work_overlay"`
+	CreatedAt      int64    `json:"created_at"`
+	ShellPid       int      `json:"shell_pid"`
+	ShellStartTime uint64   `json:"shell_start_time,omitempty"`
+	ShellSocket    string   `json:"shell_socket,omitempty"`
+	ImageEnv       []string `json:"image_env,omitempty"`
+	ImageWorkDir   string   `json:"image_workdir,omitempty"`
 }
 
 // PID values for special cases
@@ -91,6 +98,8 @@ func LoadManager(sessionID string) (*Manager, error) {
 	manager.shellPid = sessionInfo.ShellPid
 	manager.shellStartTime = sessionInfo.ShellStartTime
 	manager.shellSocket = sessionInfo.ShellSocket
+	manager.imageEnv = sessionInfo.ImageEnv
+	manager.imageWorkDir = sessionInfo.ImageWorkDir
 
 	return manager, nil
 }
@@ -138,6 +147,8 @@ func saveSessionInfo(sessionID string, manager *Manager) error {
 		ShellPid:       manager.shellPid,
 		ShellStartTime: manager.shellStartTime,
 		ShellSocket:    manager.shellSocket,
+		ImageEnv:       manager.imageEnv,
+		ImageWorkDir:   manager.imageWorkDir,
 	}
 	return writeSessionInfo(&sessionInfo)
 }
