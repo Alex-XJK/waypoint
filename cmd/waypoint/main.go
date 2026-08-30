@@ -63,6 +63,7 @@ func main() {
 		fmt.Println("  checkpoint <session> <checkpoint-id>         - Snapshot main fork")
 		fmt.Println("  fork <session> <checkpoint-id> [--id ID] [--n K] - Materialize live fork(s)")
 		fmt.Println("  exec <session> <fork-id> -- <command>        - Execute command in a fork")
+		fmt.Println("  cp <session> <source> <destination>          - Copy host path <-> fork-id:/path")
 		fmt.Println("  snapshot <session> <fork-id> <checkpoint-id> [--park] - Snapshot a live fork (--park: don't resume it)")
 		fmt.Println("  create <session> <checkpoint-id>             - Legacy alias for checkpoint")
 		fmt.Println("  fork-exec <session> <fork-id> <command>      - Legacy alias for exec")
@@ -522,6 +523,12 @@ func main() {
 		}
 		if err := printInfo(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "Error collecting info: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "cp":
+		if err := runCopy(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error copying: %v\n", err)
 			os.Exit(1)
 		}
 

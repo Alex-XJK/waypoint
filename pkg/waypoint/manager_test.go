@@ -112,6 +112,12 @@ func TestMissingForkOperationDoesNotCreateForkDirectory(t *testing.T) {
 			_, err := m.ParkFork(id, "ckpt")
 			return err
 		}},
+		{"CopyToFork", "missing-copy-to", func(m *Manager, id string) error {
+			return m.CopyToFork(id, "unused", "/unused")
+		}},
+		{"CopyFromFork", "missing-copy-from", func(m *Manager, id string) error {
+			return m.CopyFromFork(id, "/unused", "unused")
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
