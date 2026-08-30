@@ -1,17 +1,18 @@
 #!/bin/bash
 # End-to-end demo and functional test of Waypoint parallel forking.
 #
-# Walks every user-facing operation (init/checkpoint/fork/exec/snapshot/
-# snapshot --park/destroy/list/info/cleanup) and asserts the semantics the
-# fork model promises: delta layers, whiteout correctness across snapshot
-# chains, divergence isolation, park/revive round-trips, error paths, and
-# no leaked mounts or processes after cleanup. Exits non-zero if any
-# assertion fails.
+# Walks every user-facing operation (init/build/checkpoint/fork/exec/cp/
+# snapshot/snapshot --park/destroy/list/info/suspend/cleanup) and asserts the
+# semantics the fork model promises: delta layers, whiteout correctness across
+# snapshot chains, divergence isolation, park/revive round-trips, copy
+# containment, error paths, and no leaked mounts or processes after cleanup.
+# Exits non-zero if any assertion fails.
 #
 # Requires (see the "Environment" checks below):
 #   - root (CRIU needs it)
 #   - CRIU >= 4.0  (older CRIU cannot restore PAC-built binaries on arm64)
 #   - Go toolchain
+#   - buildah, optionally: without it the image ENV/WORKDIR section is skipped
 #
 # Usage:  sudo ./scripts/demo.sh
 set -euo pipefail
@@ -110,7 +111,7 @@ say "Assemble a minimal rootfs"
 # No /dev seeding needed: bash_init assembles the sandbox /dev at session
 # start. Commands go in /bin, which the fixed guest PATH includes.
 mkdir -p "$ROOTFS"/{bin,tmp,proc,sys,root}
-for b in bash cat ls sleep mkdir rm ps grep touch; do
+for b in bash cat ls sleep mkdir rm ps grep touch stat ln; do
   p="$(command -v "$b" || true)"
   [ -n "$p" ] && [ -f "$p" ] && cp "$p" "$ROOTFS/bin/$(basename "$b")"
 done
@@ -445,6 +446,9 @@ say "17. inspect the DAG + info"
 run "$W list $SESSION --json | grep -E '\"id\"|\"status\"|\"base_checkpoint_id\"' | head -30 || true"
 OUT="$("$W" info "$SESSION" 2>&1)"
 assert_contains "info shows the session" "$SESSION" "$OUT"
+assert_contains "info reports per-fork runtime state" '"forks"'          "$OUT"
+assert_contains "info marks a live fork available"    '"available": true' "$OUT"
+assert_contains "info reports the fork's host root"   '"host_root"'       "$OUT"
 OUT="$("$W" info "$SESSION" D3 2>&1)"
 assert_contains "checkpoint info records DAG lineage (D3's parent is D2)" '"parent_id": "D2"' "$OUT"
 
@@ -483,7 +487,98 @@ assert_contains "grandchild inherited shell state through both hops" "GREETING=h
 assert_contains "unattended defaults survive suspend + two more hops" "PAGER=cat" "$OUT"
 
 # ---------------------------------------------------------------------------
-say "19. cleanup leaves nothing behind"
+say "19. cp: host <-> fork file transfer"
+# ---------------------------------------------------------------------------
+# Self-contained: its own fork, destroyed at the end, so nothing here disturbs
+# the checkpoints and forks the sections above rely on.
+run "$W fork $SESSION A --id cpf"
+CPDIR="$WORK/cp"; mkdir -p "$CPDIR/tree/sub"
+echo host-payload   > "$CPDIR/f.txt"; chmod 0641 "$CPDIR/f.txt"
+echo nested-payload > "$CPDIR/tree/sub/deep.txt"
+ln -sf /etc/hostname "$CPDIR/link"
+
+run "$W cp $SESSION $CPDIR/f.txt cpf:/root/f.txt"
+OUT="$("$W" exec "$SESSION" cpf -- 'cat /root/f.txt; stat -c %a /root/f.txt' 2>&1)"; echo "$OUT"
+assert_contains "host -> fork copied the contents" "host-payload" "$OUT"
+assert_contains "host -> fork preserved the mode"  "641"          "$OUT"
+run "$W cp $SESSION $CPDIR/tree cpf:/root/tree"
+OUT="$("$W" exec "$SESSION" cpf -- 'cat /root/tree/sub/deep.txt' 2>&1)"
+assert_contains "host -> fork copied a directory recursively" "nested-payload" "$OUT"
+
+"$W" exec "$SESSION" cpf -- 'echo guest-payload > /root/out.txt' >/dev/null
+run "$W cp $SESSION cpf:/root/out.txt $CPDIR/back.txt"
+assert_contains "fork -> host copied the contents" "guest-payload" "$(cat "$CPDIR/back.txt" 2>&1)"
+
+# A copy is an ordinary write: it belongs to that fork's upper layer alone.
+assert_exists     "the copy landed in the fork's own upper" "$(fork_dir cpf)/upper/root/f.txt"
+assert_absent     "the checkpoint layer is untouched by a copy" "$(ck_upper A)/root/f.txt"
+OUT="$("$W" exec "$SESSION" woke -- 'ls /root' 2>&1)"
+assert_not_contains "a peer fork does not see the copy" "f.txt" "$OUT"
+
+# Guest paths resolve through an os.Root opened on /proc/<pid>/root, so
+# traversal and symlink escapes have to fail closed rather than reach the host.
+assert_fails "cp rejects ../ in the guest destination"      "$W" cp "$SESSION" "$CPDIR/f.txt" 'cpf:/../../../../tmp/wp-demo-cp-escape'
+assert_fails "cp rejects ../ in the guest source"           "$W" cp "$SESSION" 'cpf:/../../../../etc/passwd' "$CPDIR/stolen.txt"
+assert_fails "cp rejects a symlink as the source"           "$W" cp "$SESSION" "$CPDIR/link" 'cpf:/root/link.txt'
+run "$W exec $SESSION cpf -- 'ln -sf / /root/escape'"
+assert_fails "cp will not follow a symlink out of the fork" "$W" cp "$SESSION" 'cpf:/root/escape/etc/hostname' "$CPDIR/via-link.txt"
+assert_fails "cp refuses to replace the fork root"          "$W" cp "$SESSION" "$CPDIR/f.txt" 'cpf:/'
+assert_fails "cp requires exactly one fork endpoint"        "$W" cp "$SESSION" 'cpf:/root/f.txt' 'woke:/root/f.txt'
+assert_absent "no escape attempt wrote outside the session" /tmp/wp-demo-cp-escape
+assert_absent "no escape attempt read a host file"          "$CPDIR/stolen.txt"
+assert_absent "no escape attempt followed the symlink"      "$CPDIR/via-link.txt"
+
+run "$W destroy $SESSION cpf"
+assert_fails "cp to a destroyed fork fails" "$W" cp "$SESSION" "$CPDIR/f.txt" 'cpf:/root/f.txt'
+
+# ---------------------------------------------------------------------------
+say "20. build: the image's ENV and WORKDIR reach the session"
+# ---------------------------------------------------------------------------
+if command -v buildah >/dev/null 2>&1; then
+  # FROM scratch + COPY keeps the build offline: sessions are loopback-only,
+  # and a CI host may have no registry access.
+  IMG="$WORK/img"; mkdir -p "$IMG/rootfs"
+  cp -a "$ROOTFS/." "$IMG/rootfs/"
+  mkdir -p "$IMG/rootfs/srv/app"
+  cat > "$IMG/Dockerfile" <<'DOCKERFILE'
+FROM scratch
+COPY rootfs /
+ENV APP_MODE=production
+ENV PAGER=less
+WORKDIR /srv/app
+DOCKERFILE
+  BOUT="$("$W" build "$IMG" --quiet 2>&1)" && BSESSION="${BOUT%%,*}" || BSESSION=""
+  if [ -n "$BSESSION" ]; then
+    echo "build session: $BSESSION"
+    OUT="$("$W" exec "$BSESSION" main -- 'echo "MODE=$APP_MODE PAGER=$PAGER cwd=$(pwd)"' 2>&1)"; echo "$OUT"
+    assert_contains "the image's ENV reaches the guest"         "MODE=production" "$OUT"
+    assert_contains "the image's WORKDIR becomes the guest cwd" "cwd=/srv/app"    "$OUT"
+    # The unattended floor sits above the image on purpose: an image that puts
+    # PAGER back to less must not be able to stall a socket-driven shell.
+    assert_contains "the unattended floor overrides the image" "PAGER=cat" "$OUT"
+    OUT="$("$W" exec "$BSESSION" main -- 'export -p' 2>&1)"
+    assert_not_contains "the image cannot shadow WAYPOINT_* plumbing" "WAYPOINT_" "$OUT"
+    # Environment and cwd are process state, so they ride the CRIU image.
+    "$W" checkpoint "$BSESSION" IA >/dev/null
+    "$W" fork "$BSESSION" IA --id ifork >/dev/null
+    OUT="$("$W" exec "$BSESSION" ifork -- 'echo "MODE=$APP_MODE cwd=$(pwd)"' 2>&1)"
+    assert_contains "image ENV survives checkpoint -> fork"     "MODE=production" "$OUT"
+    assert_contains "image WORKDIR survives checkpoint -> fork" "cwd=/srv/app"    "$OUT"
+    "$W" cleanup "$BSESSION" --force >/dev/null 2>&1
+  else
+    bad "build session failed: $(printf '%s' "$BOUT" | head -1)"
+  fi
+  # `waypoint build` leaves the image it built behind, and every build mints a
+  # fresh timestamped tag, so they accumulate. Drop this run's.
+  for img in $(buildah images --format '{{.Name}}:{{.Tag}}' 2>/dev/null | grep '^localhost/waypoint_img:' || true); do
+    buildah rmi "$img" >/dev/null 2>&1 || true
+  done
+else
+  echo "  (skipped: buildah not available)"
+fi
+
+# ---------------------------------------------------------------------------
+say "21. cleanup leaves nothing behind"
 # ---------------------------------------------------------------------------
 run "$W cleanup $SESSION --force"
 MNTS="$(grep -c "$SESSION" /proc/mounts || true)"
@@ -495,7 +590,7 @@ SLEEPS_AFTER="$(pgrep -fc 'sleep 600' || true)"
 SESSION=""  # already cleaned; skip the trap's cleanup
 
 # ---------------------------------------------------------------------------
-say "20. host /dev is untouched"
+say "22. host /dev is untouched"
 # ---------------------------------------------------------------------------
 # Sessions build their /dev inside the private session root; nothing they do
 # may mutate the host's. In particular /dev/ptmx must remain a real character
