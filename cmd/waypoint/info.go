@@ -17,8 +17,9 @@ type systemInfoOutput struct {
 }
 
 type sessionInfoOutput struct {
-	Type    string                `json:"type"`
-	Session *waypoint.SessionInfo `json:"session"`
+	Type    string                     `json:"type"`
+	Session *waypoint.SessionInfo      `json:"session"`
+	Forks   []waypoint.ForkRuntimeInfo `json:"forks"`
 }
 
 type checkpointInfoOutput struct {
@@ -87,9 +88,18 @@ func collectSessionInfo(sessionID string) (sessionInfoOutput, error) {
 	if err != nil {
 		return sessionInfoOutput{}, err
 	}
+	manager, err := waypoint.LoadManager(sessionID)
+	if err != nil {
+		return sessionInfoOutput{}, err
+	}
+	forks, err := manager.InspectForks()
+	if err != nil {
+		return sessionInfoOutput{}, err
+	}
 	return sessionInfoOutput{
 		Type:    "session",
 		Session: sessionInfo,
+		Forks:   forks,
 	}, nil
 }
 
