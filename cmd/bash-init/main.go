@@ -532,7 +532,7 @@ func setupNamespaceRuntime(chrootDir string) error {
 			return fmt.Errorf("mount %s on %s failed: %w", mount.fstype, target, err)
 		}
 	}
-	return bringLoopbackUp()
+	return nil
 }
 
 func pivotIntoSessionRoot(newRoot string) error {

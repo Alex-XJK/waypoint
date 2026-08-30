@@ -267,7 +267,7 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 
 	cmd := exec.Command(bashInitSrc, canonicalSocketPath, workDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: uintptr(unix.CLONE_NEWPID | unix.CLONE_NEWNS | unix.CLONE_NEWNET | unix.CLONE_NEWIPC | unix.CLONE_NEWUTS),
+		Cloneflags: uintptr(unix.CLONE_NEWPID | unix.CLONE_NEWNS | unix.CLONE_NEWIPC | unix.CLONE_NEWUTS),
 		Setsid:     true, // new session = no controlling TTY
 	}
 	// Sessions get a fixed, OCI-style environment instead of inheriting the
