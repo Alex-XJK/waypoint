@@ -65,7 +65,17 @@ func (m *Manager) ExecuteCommand(command string, args ...string) (string, error)
 // Deprecated: Since version 0.4.0, use CreateCheckpointNew instead
 
 // CreateCheckpointNew creates a new checkpoint with the given ID
+// CreateCheckpointNew dumps the session's process, swaps in a fresh overlay,
+// and restores the process into it. The process is dead for the whole middle
+// of that sequence, so its devpts index is free and reclaimable by anyone —
+// see WithPTYLock.
 func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
+	return WithPTYLock("create", func() error {
+		return m.createCheckpointNewLocked(pid, checkpointID)
+	})
+}
+
+func (m *Manager) createCheckpointNewLocked(pid int, checkpointID string) error {
 	// Validate checkpoint ID
 	// TODO: Check for duplication
 	if checkpointID == "" || checkpointID == "current" {
@@ -155,7 +165,20 @@ func (m *Manager) CreateCheckpointNew(pid int, checkpointID string) error {
 	return m.saveMetadata(checkpointID, metadata)
 }
 
+// RestoreCheckpointNew kills the live process, swaps the overlay back to a
+// previous checkpoint, and restores that checkpoint's process — the same
+// free-then-reclaim window as CreateCheckpointNew.
 func (m *Manager) RestoreCheckpointNew(checkpointID string) (int, error) {
+	var pid int
+	err := WithPTYLock("restore", func() error {
+		var inner error
+		pid, inner = m.restoreCheckpointNewLocked(checkpointID)
+		return inner
+	})
+	return pid, err
+}
+
+func (m *Manager) restoreCheckpointNewLocked(checkpointID string) (int, error) {
 	// Load checkpointMetadata
 	checkpointMetadata, err := m.loadMetadata(checkpointID)
 	if err != nil {

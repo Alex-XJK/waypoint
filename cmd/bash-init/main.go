@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 	"io"
 	"net"
 	"os"
@@ -64,9 +65,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create PTY
-	ptyMaster, ptySlave, err := pty.Open()
-	if err != nil {
+	// Create PTY under the shared devpts lock. A session starting up allocates
+	// the lowest free index, which is exactly the index some other session's
+	// `criu restore` may be about to reclaim — the same race the checkpoint
+	// paths take this lock for (see waypoint.WithPTYLock).
+	var ptyMaster, ptySlave *os.File
+	if err := waypoint.WithPTYLock("bash-init", func() error {
+		var e error
+		ptyMaster, ptySlave, e = pty.Open()
+		return e
+	}); err != nil {
 		panic(err)
 	}
 	// Disable canonical mode on the slave PTY so long single-line commands
