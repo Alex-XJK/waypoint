@@ -105,7 +105,7 @@ func runRestoreHelper(f *Fork) error {
 	statePath := filepath.Join(f.RootDir, ForkStateFile)
 	cmd := exec.Command(exe, "__waypoint_restore_fork_child", statePath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: uintptr(unix.CLONE_NEWNS | unix.CLONE_NEWNET | unix.CLONE_NEWIPC),
+		Cloneflags: uintptr(unix.CLONE_NEWNS | unix.CLONE_NEWIPC),
 		Setsid:     true,
 	}
 	var output bytes.Buffer
@@ -143,9 +143,6 @@ type childRestoreTiming struct {
 func restoreForkChild(f *Fork) error {
 	mountStart := time.Now()
 	if err := prepareForkMountNamespace(f); err != nil {
-		return err
-	}
-	if err := bringLoopbackUp(); err != nil {
 		return err
 	}
 	timing := childRestoreTiming{MountMs: durMs(time.Since(mountStart))}
