@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
@@ -32,6 +33,27 @@ func printExecResult(result *waypoint.ExecResult) {
 	}
 }
 
+type forkResult struct {
+	fork *waypoint.Fork
+	err  error
+}
+
+// forkCheckpointsConcurrently starts every requested materialization at once
+// and stores each result in its request slot so callers can print stable output.
+func forkCheckpointsConcurrently(count int, create func(int) (*waypoint.Fork, error)) []forkResult {
+	results := make([]forkResult, count)
+	var wg sync.WaitGroup
+	wg.Add(count)
+	for i := range results {
+		go func(i int) {
+			defer wg.Done()
+			results[i].fork, results[i].err = create(i)
+		}(i)
+	}
+	wg.Wait()
+	return results
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: waypoint <command> [args...]")
@@ -41,6 +63,7 @@ func main() {
 		fmt.Println("  checkpoint <session> <checkpoint-id>         - Snapshot main fork")
 		fmt.Println("  fork <session> <checkpoint-id> [--id ID] [--n K] - Materialize live fork(s)")
 		fmt.Println("  exec <session> <fork-id> -- <command>        - Execute command in a fork")
+		fmt.Println("  cp <session> <source> <destination>          - Copy host path <-> fork-id:/path")
 		fmt.Println("  snapshot <session> <fork-id> <checkpoint-id> [--park] - Snapshot a live fork (--park: don't resume it)")
 		fmt.Println("  create <session> <checkpoint-id>             - Legacy alias for checkpoint")
 		fmt.Println("  fork-exec <session> <fork-id> <command>      - Legacy alias for exec")
@@ -246,21 +269,29 @@ func main() {
 			fmt.Printf("Error loading session: %v\n", err)
 			os.Exit(1)
 		}
-		for i := 0; i < count; i++ {
+		results := forkCheckpointsConcurrently(count, func(_ int) (*waypoint.Fork, error) {
 			spec := waypoint.ForkSpec{}
 			if forkID != "" {
 				spec.ID = forkID
 			}
-			f, err := manager.ForkCheckpoint(checkpointID, spec)
-			if err != nil {
-				fmt.Printf("Error creating fork: %v\n", err)
-				os.Exit(1)
+			return manager.ForkCheckpoint(checkpointID, spec)
+		})
+		failed := false
+		for _, result := range results {
+			if result.err != nil {
+				fmt.Printf("Error creating fork: %v\n", result.err)
+				failed = true
+				continue
 			}
+			f := result.fork
 			line := fmt.Sprintf("%s pid=%d socket=%s duration=%s", f.ID, f.PID, f.SocketPath, f.RestoreDuration)
 			if f.RestoreBreakdown != nil {
 				line += " " + f.RestoreBreakdown.String()
 			}
 			fmt.Println(line)
+		}
+		if failed {
+			os.Exit(1)
 		}
 
 	case "fork-exec":
@@ -367,11 +398,6 @@ func main() {
 		printExecResult(result)
 
 	case "list":
-		if len(os.Args) > 4 {
-			fmt.Println("Usage: list [session] [--json]")
-			os.Exit(1)
-		}
-
 		if len(os.Args) == 2 {
 			sessions, err := waypoint.ListSessions()
 			if err != nil {
@@ -390,7 +416,16 @@ func main() {
 		}
 
 		sessionID := os.Args[2]
-		asJSON := len(os.Args) > 3 && os.Args[3] == "--json"
+		asJSON := false
+		for i := 3; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--json":
+				asJSON = true
+			default:
+				fmt.Printf("Error: unknown flag: %s\n", os.Args[i])
+				os.Exit(1)
+			}
+		}
 
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
@@ -428,7 +463,7 @@ func main() {
 		}
 
 	case "suspend":
-		if len(os.Args) < 3 {
+		if len(os.Args) != 3 {
 			fmt.Println("Usage: suspend <session>")
 			os.Exit(1)
 		}
@@ -450,13 +485,22 @@ func main() {
 		}
 		sessionID := os.Args[2]
 
+		force := false
+		for i := 3; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--force":
+				force = true
+			default:
+				fmt.Printf("Error: unknown flag: %s\n", os.Args[i])
+				os.Exit(1)
+			}
+		}
+
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
 			fmt.Printf("Error loading session: %v\n", err)
 			os.Exit(1)
 		}
-
-		force := len(os.Args) > 3 && os.Args[3] == "--force"
 
 		if force {
 			if err := manager.CleanupForce(); err != nil {
@@ -479,6 +523,12 @@ func main() {
 		}
 		if err := printInfo(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "Error collecting info: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "cp":
+		if err := runCopy(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error copying: %v\n", err)
 			os.Exit(1)
 		}
 

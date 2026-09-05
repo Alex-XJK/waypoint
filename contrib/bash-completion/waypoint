@@ -1,0 +1,360 @@
+# Bash completion for Waypoint.
+#
+# Session, checkpoint, and fork candidates come from the existing `list`
+# command. New IDs, fork counts, and commands or paths inside a managed
+# environment remain user-supplied. No commands run inside a fork on Tab.
+
+_waypoint_unquote_word()
+{
+    # COMP_WORDS retains quotes and backslashes. Remove shell quoting without
+    # eval: completing an executable path must not evaluate substitutions.
+    local input="$1" result="" quote="" escaped=0 character i
+    for (( i=0; i<${#input}; i++ )); do
+        character="${input:i:1}"
+        if (( escaped )); then
+            if [[ "$quote" == '"' && "$character" != [\$\`\"\\] && "$character" != $'\n' ]]; then
+                result+='\'
+            fi
+            [[ "$character" == $'\n' ]] || result+="$character"
+            escaped=0
+        elif [[ "$quote" == "'" ]]; then
+            if [[ "$character" == "'" ]]; then
+                quote=""
+            else
+                result+="$character"
+            fi
+        else
+            case "$character" in
+                \\) escaped=1 ;;
+                \"|\')
+                    if [[ "$quote" == "$character" ]]; then
+                        quote=""
+                    elif [[ -z "$quote" ]]; then
+                        quote="$character"
+                    else
+                        result+="$character"
+                    fi
+                    ;;
+                *) result+="$character" ;;
+            esac
+        fi
+    done
+    (( ! escaped )) || result+='\'
+    printf -v "$2" '%s' "$result"
+}
+
+_waypoint_complete_words()
+{
+    local current="$1"
+    _waypoint_unquote_word "$current" current
+    shift
+
+    local candidate
+    for candidate in "$@"; do
+        if [[ "$candidate" == "$current"* ]]; then
+            COMPREPLY+=("$candidate")
+        fi
+    done
+}
+
+_waypoint_complete_paths()
+{
+    local current="$1"
+    local directories_only="${2:-}"
+
+    if declare -F _filedir >/dev/null 2>&1; then
+        # _filedir reads the dynamically scoped `cur` variable used by the
+        # bash-completion project.
+        local cur="$current"
+        if [[ "$directories_only" == directories ]]; then
+            _filedir -d
+        else
+            _filedir
+        fi
+        return
+    fi
+
+    # Keep the helper useful when sourced without the bash-completion package.
+    local candidate action=-f
+    [[ "$directories_only" == directories ]] && action=-d
+    while IFS= read -r candidate; do
+        COMPREPLY+=("$candidate")
+    done < <(compgen "$action" -- "$current")
+    compopt -o filenames 2>/dev/null || true
+}
+
+_waypoint_query_list()
+{
+    # Use the executable as entered by the user, including an explicit path.
+    # `command` avoids invoking a same-named alias or shell function. Do not
+    # elevate here: completion must never display a password prompt.
+    local waypoint_command="${COMP_WORDS[0]:-waypoint}"
+    _waypoint_unquote_word "$waypoint_command" waypoint_command
+    command "$waypoint_command" list "$@" </dev/null
+}
+
+_waypoint_complete_list_output()
+{
+    local current="$1"
+    local expected_header="$2"
+    local session="${3:-}"
+    local running_only="${4:-}"
+    local omit_main="${5:-}"
+    local output
+    local -a args=()
+    [[ -n "$session" ]] && args+=("$session")
+    if ! output="$(_waypoint_query_list "${args[@]}" 2>/dev/null)"; then
+        return 0
+    fi
+
+    local line candidate section="" first_line=1
+    while IFS= read -r line; do
+        if (( first_line )); then
+            first_line=0
+            if [[ -z "$session" ]]; then
+                [[ "$line" == 'Available sessions:' ]] || return 0
+            else
+                case "$line" in
+                    'Checkpoints:'|'No checkpoints found') ;;
+                    *) return 0 ;;
+                esac
+            fi
+        fi
+
+        case "$line" in
+            'Available sessions:'|'Checkpoints:'|'Live forks:')
+                section="$line"
+                continue
+                ;;
+        esac
+        [[ "$section" == "$expected_header" && "$line" == '  '* ]] || continue
+        candidate="${line:2}"
+        case "$section" in
+            'Checkpoints:')
+                [[ "$candidate" == *' parent='*' status='*' layers='* ]] || continue
+                candidate="${candidate%% *}"
+                ;;
+            'Live forks:')
+                [[ "$candidate" == *' checkpoint='*' status='*' pid='*' socket='* ]] || continue
+                [[ "$running_only" != running || "$candidate" == *' status=running '* ]] || continue
+                candidate="${candidate%% *}"
+                [[ "$omit_main" != park || "$candidate" != main ]] || continue
+                ;;
+        esac
+        # IDs cannot contain whitespace, shell metacharacters, or path separators.
+        [[ "$candidate" == [a-zA-Z0-9]* && "$candidate" != *[!a-zA-Z0-9._-]* ]] || continue
+        _waypoint_complete_words "$current" "$candidate"
+    done <<< "$output"
+}
+
+_waypoint_complete_sessions()
+{
+    _waypoint_complete_list_output "$1" 'Available sessions:'
+}
+
+_waypoint_complete_checkpoints()
+{
+    [[ -n "$2" ]] || return 0
+    _waypoint_complete_list_output "$1" 'Checkpoints:' "$2"
+}
+
+_waypoint_complete_forks()
+{
+    [[ -n "$2" ]] || return 0
+    _waypoint_complete_list_output "$1" 'Live forks:' "$2" "${3:-}" "${4:-}"
+}
+
+_waypoint_get_words()
+{
+    # Bash normally splits fork:/path into separate words at the colon.
+    # Return `words`, `cword`, and `cur` in the caller's dynamic scope.
+    if declare -F _get_comp_words_by_ref >/dev/null 2>&1; then
+        _get_comp_words_by_ref -n : cur words cword
+    else
+        local i token line="${COMP_LINE:-}" previous_colon=0 index=-1
+        words=()
+        for (( i=0; i<${#COMP_WORDS[@]}; i++ )); do
+            token="${COMP_WORDS[i]}"
+            if (( i > 0 )) && [[ "$line" != [[:space:]]* ]] &&
+                { [[ -n "$token" && "$token" != *[!:]* ]] || (( previous_colon )); }; then
+                words[index]+="$token"
+            else
+                index=$((index+1))
+                words[index]="$token"
+            fi
+            (( i != COMP_CWORD )) || cword=$index
+            line="${line#*"$token"}"
+            previous_colon=0
+            [[ "$token" == *: ]] && previous_colon=1
+        done
+        cur="${words[cword]}"
+    fi
+    local word_index
+    for word_index in "${!words[@]}"; do
+        (( word_index == cword )) && continue
+        _waypoint_unquote_word "${words[word_index]}" "words[$word_index]"
+    done
+}
+
+_waypoint_is_fork_path()
+{
+    # Match cp's endpoint syntax. image:latest and ./image:/path are host paths.
+    [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*:/ ]]
+}
+
+_waypoint_complete_copy()
+{
+    local current="$1" session="$2" source="${3:-}"
+    local endpoint
+    _waypoint_unquote_word "$current" endpoint
+    local host_paths=1 fork_paths=1
+    if [[ -n "$source" ]]; then
+        if _waypoint_is_fork_path "$source"; then
+            fork_paths=0
+        else
+            host_paths=0
+        fi
+    fi
+
+    if (( host_paths )) && ! _waypoint_is_fork_path "$endpoint"; then
+        _waypoint_complete_paths "$current"
+    fi
+    if (( fork_paths )); then
+        local -a host_replies=("${COMPREPLY[@]}")
+        COMPREPLY=()
+        # At an empty guest path, complete the endpoint's initial slash only.
+        # There is no read-only guest directory listing command.
+        if [[ "$endpoint" != */* && "$endpoint" != *\\* ]]; then
+            _waypoint_complete_forks "${endpoint%%:*}" "$session" running
+        fi
+        local -a forks=("${COMPREPLY[@]}")
+        COMPREPLY=("${host_replies[@]}")
+        local fork
+        for fork in "${forks[@]}"; do
+            _waypoint_complete_words "$current" "$fork:/"
+        done
+        if (( ${#COMPREPLY[@]} > ${#host_replies[@]} )); then
+            compopt -o nospace 2>/dev/null || true
+        fi
+    fi
+
+    # Readline replaces only the part after the last word-breaking colon.
+    if [[ "$current" == *:* && "$COMP_WORDBREAKS" == *:* ]]; then
+        local prefix="${current%"${current##*:}"}" i
+        for i in "${!COMPREPLY[@]}"; do
+            COMPREPLY[i]="${COMPREPLY[i]#"$prefix"}"
+        done
+    fi
+}
+
+_waypoint()
+{
+    local cur cword
+    local -a words=()
+    COMPREPLY=()
+    _waypoint_get_words
+    local command="${words[1]:-}"
+
+    if (( cword == 1 )); then
+        _waypoint_complete_words "$cur" \
+            init build checkpoint fork exec cp snapshot create fork-exec \
+            destroy list suspend cleanup info version --version -v
+        return
+    fi
+
+    # snapshot alone permits its flag before or between positional arguments.
+    if [[ "$command" == snapshot ]]; then
+        local i park=""
+        local -a operands=()
+        for (( i=2; i<${#words[@]}; i++ )); do
+            (( i == cword )) && continue
+            if [[ "${words[i]}" == --park ]]; then
+                park=park
+            elif (( i < cword )); then
+                operands+=("${words[i]}")
+            fi
+        done
+        case "${#operands[@]}" in
+            0) _waypoint_complete_sessions "$cur" ;;
+            1) _waypoint_complete_forks "$cur" "${operands[0]}" running "$park" ;;
+        esac
+        if [[ -z "$park" && "${operands[1]:-}" != main ]] &&
+            (( ${#operands[@]} <= 3 )); then
+            _waypoint_complete_words "$cur" --park
+        fi
+        return
+    fi
+
+    case "$command" in
+        init|build)
+            if (( cword == 2 )); then
+                _waypoint_complete_paths "$cur" directories
+            elif (( cword > 2 )); then
+                _waypoint_complete_words "$cur" --quiet
+                [[ "$command" != init ]] || _waypoint_complete_words "$cur" --shell
+            fi
+            return
+            ;;
+        checkpoint|create|fork|exec|fork-exec|cp|destroy|list|suspend|cleanup|info)
+            if (( cword == 2 )); then
+                _waypoint_complete_sessions "$cur"
+                return
+            fi
+            ;;
+    esac
+
+    case "$command" in
+        fork|info)
+            if (( cword == 3 )); then
+                _waypoint_complete_checkpoints "$cur" "${words[2]}"
+            elif [[ "$command" == fork ]] && (( cword >= 4 )); then
+                local i named=0 count=1
+                for (( i=4; i<cword; i++ )); do
+                    case "${words[i]}" in
+                        --id|--n)
+                            # A new name or count is free-form, even if its
+                            # current prefix resembles a flag or existing ID.
+                            (( i+1 < cword )) || return 0
+                            if [[ "${words[i]}" == --id ]]; then
+                                named=1
+                            else
+                                count="${words[i+1]}"
+                            fi
+                            (( i+=1 ))
+                            ;;
+                        *) return 0 ;;
+                    esac
+                done
+                if (( ! named )) && [[ "$count" == 1 ]]; then
+                    _waypoint_complete_words "$cur" --id
+                fi
+                _waypoint_complete_words "$cur" --n
+            fi
+            ;;
+        exec|fork-exec|destroy)
+            if (( cword == 3 )); then
+                local status=running
+                [[ "$command" != destroy ]] || status=""
+                _waypoint_complete_forks "$cur" "${words[2]}" "$status"
+            elif [[ "$command" == exec ]] && (( cword == 4 )); then
+                _waypoint_complete_words "$cur" --
+            fi
+            ;;
+        cp)
+            if (( cword == 3 )); then
+                _waypoint_complete_copy "$cur" "${words[2]}"
+            elif (( cword == 4 )); then
+                _waypoint_complete_copy "$cur" "${words[2]}" "${words[3]}"
+            fi
+            ;;
+        list)
+            (( cword < 3 )) || _waypoint_complete_words "$cur" --json
+            ;;
+        cleanup)
+            (( cword < 3 )) || _waypoint_complete_words "$cur" --force
+            ;;
+    esac
+    return 0
+}
+
+complete -F _waypoint waypoint

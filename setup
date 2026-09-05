@@ -7,6 +7,9 @@ BIN_DIR="${BIN_DIR:-$ROOT_DIR/bin}"
 PREFIX="${PREFIX:-/usr/local}"
 BINDIR="${BINDIR:-$PREFIX/bin}"
 LIBEXECDIR="${LIBEXECDIR:-$PREFIX/libexec/waypoint}"
+DATADIR="${DATADIR:-$PREFIX/share}"
+BASH_COMPLETION_DIR="${BASH_COMPLETION_DIR:-$DATADIR/bash-completion/completions}"
+BASH_COMPLETION_SRC="$ROOT_DIR/contrib/bash-completion/waypoint"
 SYSCONFDIR="${SYSCONFDIR:-/etc}"
 CONFIG_DIR="${CONFIG_DIR:-$SYSCONFDIR/waypoint}"
 CONFIG_PATH="${CONFIG_PATH:-$CONFIG_DIR/config.json}"
@@ -28,11 +31,12 @@ Usage: ./setup <command>
 
 Commands:
   build        Build bin/waypoint and bin/bash_init
-  test         Run Go tests
-  install      Install waypoint, bash_init, and default system config
+  test         Run Bash completion and Go tests
+  install      Install binaries, Bash completion, and default system config
   uninstall    Remove files installed by ./setup install
   check        Check host commands and kernel features used by Waypoint
   deps-ubuntu  Install Ubuntu/Debian host dependencies and Go
+  completion   Print the Bash completion helper
   clean        Remove local build outputs
   help         Show this help
 
@@ -42,6 +46,8 @@ Environment overrides:
   PREFIX=$PREFIX
   BINDIR=$BINDIR
   LIBEXECDIR=$LIBEXECDIR
+  DATADIR=$DATADIR
+  BASH_COMPLETION_DIR=$BASH_COMPLETION_DIR
   CONFIG_PATH=$CONFIG_PATH
 
 Typical flow:
@@ -85,6 +91,8 @@ build() {
 }
 
 test_all() {
+  log "running Bash completion tests"
+  bash "$ROOT_DIR/scripts/test-bash-completion.sh"
   need_cmd "$GO" >/dev/null
   log "running Go tests"
   (cd "$ROOT_DIR" && "$GO" test ./...)
@@ -101,6 +109,10 @@ install_all() {
   install -d -m 0755 "$BINDIR" "$LIBEXECDIR"
   install -m 0755 "$BIN_DIR/waypoint" "$BINDIR/waypoint"
   install -m 0755 "$BIN_DIR/bash_init" "$LIBEXECDIR/bash_init"
+
+  log "installing Bash completion to $BASH_COMPLETION_DIR"
+  install -d -m 0755 "$BASH_COMPLETION_DIR"
+  install -m 0644 "$BASH_COMPLETION_SRC" "$BASH_COMPLETION_DIR/waypoint"
 
   install -d -m 0755 "$CONFIG_DIR"
   if [[ -e "$CONFIG_PATH" && "${FORCE_CONFIG:-0}" != "1" ]]; then
@@ -124,9 +136,14 @@ uninstall_all() {
   log "removing installed Waypoint files"
   rm -f "$BINDIR/waypoint"
   rm -f "$LIBEXECDIR/bash_init"
+  rm -f "$BASH_COMPLETION_DIR/waypoint"
   rmdir "$LIBEXECDIR" 2>/dev/null || true
   warn "left $CONFIG_PATH in place; remove it manually if you no longer need it"
   ok "uninstall complete"
+}
+
+print_completion() {
+  command cat "$BASH_COMPLETION_SRC"
 }
 
 clean() {
@@ -349,6 +366,7 @@ deps_ubuntu() {
   log "installing common Waypoint host dependencies with apt-get"
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     bash \
+    bash-completion \
     buildah \
     make \
     util-linux
@@ -365,6 +383,7 @@ case "$cmd" in
   uninstall) uninstall_all ;;
   check) check_all ;;
   deps-ubuntu) deps_ubuntu ;;
+  completion) print_completion ;;
   clean) clean ;;
   help | -h | --help) usage ;;
   *) err "unknown command: $cmd"; usage >&2; exit 2 ;;

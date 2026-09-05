@@ -151,8 +151,7 @@ Two binaries, one library:
   work/                     canonical merged mountpoint (mounted per-fork,
                               differently, in each fork's mount namespace)
   temp/
-    shell_<session>.sock    canonical control-socket path (main's; each fork
-    shell_<session>.log       has its own socket at this path inside its ns)
+    shell_<session>.log     host-side shell startup log
   metadata/<ckpt>.json      checkpoint DAG nodes
   checkpoints/<ckpt>/
     upper/                  sealed, immutable filesystem delta
@@ -160,14 +159,24 @@ Two binaries, one library:
                               a symlink (tmpfs first, criu.disk/ once flushed)
   forks/<fork>/
     fork.json               live fork record
-    upper/  work/  temp/    this fork's private CoW layers + socket dir
-    lock                    per-fork flock
+    upper/                  this fork's private CoW layer; contains the socket
+                              inode below tmp/waypoint-sessions/<session>/temp/
+    work/                   OverlayFS scratch space
+    temp/                   currently unused
     restore.log restore.pid
-  locks/session.lock        session-wide flock
+  locks/
+    session.lock            session-wide flock
+    fork-<fork>.lock        stable per-fork flock
 
 /tmp/waypoint-sessions-info/<session>.json   global registry (find a session)
 /dev/shm/waypoint/<session>/<ckpt>/          tmpfs images (tmpfs_images only)
 ```
+
+`/tmp/waypoint-sessions/<session>/temp/shell_<session>.sock` is the canonical
+socket path inside every fork namespace; it is not a host-side entry in the
+session's top-level `temp/`. The inode lives at
+`forks/<fork>/upper/tmp/waypoint-sessions/<session>/temp/shell_<session>.sock`,
+and the host connects through `/proc/<pid>/root/<canonical-socket-path>`.
 
 Overlay lowerdir order for a fork on checkpoint chain `[A,B,C]`:
 
@@ -194,17 +203,18 @@ what changed in that step.
 │                                    upperdir = forks/main/upper
 │                                    workdir  = forks/main/work
 ├── temp/
-│   ├── shell_S.sock             ◄ main's control socket (canonical path)
-│   └── shell_S.log
+│   └── shell_S.log              ◄ host-side shell startup log
 ├── metadata/                    (empty — no checkpoints yet)
 ├── checkpoints/                 (empty)
 ├── forks/
 │   └── main/
 │       ├── fork.json            ◄ PID + socket of the running shell
 │       ├── upper/               ◄ every write the shell makes lands here
+│       │   └── tmp/waypoint-sessions/S/temp/shell_S.sock
+│       │                            ◄ main's socket backing inode
 │       ├── work/                  (overlayfs scratch space)
-│       └── temp/
-└── locks/session.lock
+│       └── temp/                  (empty; currently unused)
+└── locks/                        (empty; lock files are created lazily)
 
 /tmp/waypoint-sessions-info/S.json   ◄ global registry entry
 ```
@@ -240,14 +250,15 @@ checkpoint's layer. Nothing is copied.
 └── forks/
     └── main/
         ├── fork.json            ◄ rebased: BaseCheckpointID=A, LayerIDs=[A]
-        ├── upper/               ◄ fresh + empty — main's writes start over
+        ├── upper/               ◄ fresh writable layer; restored socket lands here
         ├── work/                  (recreated)
-        └── temp/
+        └── temp/                  (empty; currently unused)
 ```
 
 ### Step 3 — `fork S A --id f1`: a second live instance of A
 
-Forking touches only `forks/` — checkpoints are never written after sealing.
+Forking adds live runtime state under `forks/` and a stable per-fork lock under
+`locks/`; checkpoints are never written after sealing.
 
 ```
 /tmp/waypoint-sessions/S/
@@ -257,10 +268,11 @@ Forking touches only `forks/` — checkpoints are never written after sealing.
     ├── main/  ...               (still running, unaffected)
     └── f1/                      ◄ all new
         ├── fork.json
-        ├── upper/               ◄ f1's private writes (empty at birth)
+        ├── upper/               ◄ f1's private writes
+        │   └── tmp/waypoint-sessions/S/temp/shell_S.sock
+        │                            ◄ f1's socket backing inode
         ├── work/
-        ├── temp/
-        │   └── shell_S.sock     ◄ f1's own socket, reached via /proc/<pid>/root/...
+        ├── temp/                  (empty; currently unused)
         ├── restore.log
         └── restore.pid
 ```
@@ -278,7 +290,7 @@ f1's   namespace:  work = f1/upper    over  A/upper  over  rootfs
 
 ```
 f1/upper ──rename──► checkpoints/B/upper      metadata/B.json:
-f1 rebased: LayerIDs=[A,B], fresh empty upper   ParentID: A
+f1 rebased: LayerIDs=[A,B], fresh writable upper  ParentID: A
                                                 LayerIDs: [A, B]
 ```
 
@@ -299,17 +311,18 @@ Park is steps 1–3 of a snapshot, then deletion instead of restore:
 ```
 1. criu dump f1            ─────►  checkpoints/C/criu/
 2. rename f1/upper         ─────►  checkpoints/C/upper
-3. rm -rf forks/f1/                ◄ fork record, socket, logs — all gone
+3. rm -rf forks/f1/                ◄ fork record and live runtime dir — gone
 ```
 
 ```
 ├── metadata/    A.json  B.json  C.json      (C: ParentID=B, LayerIDs=[A,B,C])
-├── checkpoints/ A/      B/      C/          ◄ C is now the ONLY trace of f1
-└── forks/       main/                       ◄ f1 has left the registry
+├── checkpoints/ A/      B/      C/          ◄ C is f1's only restorable state
+├── forks/       main/                       ◄ f1 has left the registry
+└── locks/       ... fork-f1.lock             ◄ stable lock inode remains
 ```
 
 The node survives purely as data. `fork S C --id f2` later revives it —
-which is just step 3, so the revived fork gets a new empty upper on chain
+which is just step 3, so the revived fork gets a new private upper on chain
 `[A,B,C]`. (`main` can't be parked; the session needs one live fork.)
 
 ### Invariants worth internalizing
@@ -318,8 +331,9 @@ which is just step 3, so the revived fork gets a new empty upper on chain
   sealed it. After that it only ever appears on the read-only side of
   overlay mounts. Deleting a checkpoint that others chain on would corrupt
   every descendant, which is why nodes are immutable DAG entries.
-- **A fork's cost is its delta.** `forks/<id>/upper` starts empty on every
-  fork *and* after every snapshot; history lives in the sealed layers.
+- **A fork's cost is its delta.** `forks/<id>/upper` is created empty on every
+  fork *and* after every snapshot, then receives private runtime writes such as
+  the restored socket; history lives in the sealed layers.
 - **The DAG is the filesystem.** `metadata/*.json` (`ParentID`) is the edge
   list; `checkpoints/*/upper` are the nodes' payloads; a fork's `LayerIDs` is
   a root-to-node path through the DAG, applied left-to-right (oldest at the

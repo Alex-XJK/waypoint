@@ -57,10 +57,10 @@ type config struct {
 	SessionInfoDir           string `json:"session_info_dir,omitempty"`
 	SessionsDir              string `json:"sessions_dir,omitempty"`
 	BashInitSrc              string `json:"bash_init_src,omitempty"`
-	PreserveSessionOnCleanup bool   `json:"preserve_session_on_cleanup,omitempty"`
-	TmpfsImages              bool   `json:"tmpfs_images,omitempty"`
+	PreserveSessionOnCleanup *bool  `json:"preserve_session_on_cleanup,omitempty"`
+	TmpfsImages              *bool  `json:"tmpfs_images,omitempty"`
 	TmpfsImagesDir           string `json:"tmpfs_images_dir,omitempty"`
-	PhaseStats               bool   `json:"phase_stats,omitempty"`
+	PhaseStats               *bool  `json:"phase_stats,omitempty"`
 }
 
 // ConfigValue reports an effective configuration value and where it came from.
@@ -140,6 +140,22 @@ func validateSessionsDir(dir string) error {
 	return nil
 }
 
+// boolEnvOverride returns a parsed boolean environment override. Invalid
+// non-empty values are warned about and treated as unset so they do not hide
+// a valid value from the config file.
+func boolEnvOverride(name string) (bool, bool) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return false, false
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: ignoring invalid boolean %s=%q; using config/default instead\n", name, raw)
+		return false, false
+	}
+	return value, true
+}
+
 // loadConfig loads custom configuration.
 func loadConfig() {
 	// Determine config by precedence:
@@ -164,27 +180,24 @@ func loadConfig() {
 		DefaultBashInitSrc = v
 		DefaultBashInitSrcConfig = "env:WAYPOINT_BASH_INIT_SRC"
 	}
-	if v := os.Getenv("WAYPOINT_PRESERVE_SESSION_ON_CLEANUP"); v != "" {
-		if parsed, err := strconv.ParseBool(v); err == nil {
-			PreserveSessionOnCleanup = parsed
-			PreserveSessionOnCleanupConfig = "env:WAYPOINT_PRESERVE_SESSION_ON_CLEANUP"
-		}
+	preserveEnv, preserveEnvSet := boolEnvOverride("WAYPOINT_PRESERVE_SESSION_ON_CLEANUP")
+	if preserveEnvSet {
+		PreserveSessionOnCleanup = preserveEnv
+		PreserveSessionOnCleanupConfig = "env:WAYPOINT_PRESERVE_SESSION_ON_CLEANUP"
 	}
-	if v := os.Getenv("WAYPOINT_TMPFS_IMAGES"); v != "" {
-		if parsed, err := strconv.ParseBool(v); err == nil {
-			TmpfsImages = parsed
-			TmpfsImagesConfig = "env:WAYPOINT_TMPFS_IMAGES"
-		}
+	tmpfsEnv, tmpfsEnvSet := boolEnvOverride("WAYPOINT_TMPFS_IMAGES")
+	if tmpfsEnvSet {
+		TmpfsImages = tmpfsEnv
+		TmpfsImagesConfig = "env:WAYPOINT_TMPFS_IMAGES"
 	}
 	if v := os.Getenv("WAYPOINT_TMPFS_DIR"); v != "" {
 		TmpfsImagesDir = v
 		TmpfsImagesDirConfig = "env:WAYPOINT_TMPFS_DIR"
 	}
-	if v := os.Getenv("WAYPOINT_PHASE_STATS"); v != "" {
-		if parsed, err := strconv.ParseBool(v); err == nil {
-			PhaseStats = parsed
-			PhaseStatsConfig = "env:WAYPOINT_PHASE_STATS"
-		}
+	phaseStatsEnv, phaseStatsEnvSet := boolEnvOverride("WAYPOINT_PHASE_STATS")
+	if phaseStatsEnvSet {
+		PhaseStats = phaseStatsEnv
+		PhaseStatsConfig = "env:WAYPOINT_PHASE_STATS"
 	}
 
 	// 2) Config file path determination
@@ -253,20 +266,20 @@ func loadConfig() {
 					DefaultBashInitSrc = cfg.BashInitSrc
 					DefaultBashInitSrcConfig = configSource
 				}
-				if os.Getenv("WAYPOINT_PRESERVE_SESSION_ON_CLEANUP") == "" {
-					PreserveSessionOnCleanup = cfg.PreserveSessionOnCleanup
+				if cfg.PreserveSessionOnCleanup != nil && !preserveEnvSet {
+					PreserveSessionOnCleanup = *cfg.PreserveSessionOnCleanup
 					PreserveSessionOnCleanupConfig = configSource
 				}
-				if cfg.TmpfsImages && os.Getenv("WAYPOINT_TMPFS_IMAGES") == "" {
-					TmpfsImages = cfg.TmpfsImages
+				if cfg.TmpfsImages != nil && !tmpfsEnvSet {
+					TmpfsImages = *cfg.TmpfsImages
 					TmpfsImagesConfig = configSource
 				}
 				if cfg.TmpfsImagesDir != "" && os.Getenv("WAYPOINT_TMPFS_DIR") == "" {
 					TmpfsImagesDir = cfg.TmpfsImagesDir
 					TmpfsImagesDirConfig = configSource
 				}
-				if cfg.PhaseStats && os.Getenv("WAYPOINT_PHASE_STATS") == "" {
-					PhaseStats = cfg.PhaseStats
+				if cfg.PhaseStats != nil && !phaseStatsEnvSet {
+					PhaseStats = *cfg.PhaseStats
 					PhaseStatsConfig = configSource
 				}
 			}

@@ -48,6 +48,8 @@ By default, `sudo ./setup install` installs:
 
 - `waypoint` to `/usr/local/bin/waypoint`
 - `bash_init` to `/usr/local/libexec/waypoint/bash_init`
+- Bash completion to
+  `/usr/local/share/bash-completion/completions/waypoint`
 - `/etc/waypoint/config.json` with `bash_init_src` pointing at the installed
   helper
 
@@ -60,11 +62,51 @@ PREFIX=/opt/waypoint sudo -E ./setup install
 or more specifically:
 
 ```bash
-BINDIR=/usr/bin LIBEXECDIR=/usr/libexec/waypoint sudo -E ./setup install
+BINDIR=/usr/bin LIBEXECDIR=/usr/libexec/waypoint \
+  BASH_COMPLETION_DIR=/usr/share/bash-completion/completions \
+  sudo -E ./setup install
 ```
 
 If `/etc/waypoint/config.json` already exists, the installer preserves it. Use
 `FORCE_CONFIG=1 sudo -E ./setup install` to replace it with the default config.
+
+## Bash Completion
+
+The installed completion is discovered automatically by the standard
+`bash-completion` package. Start a new Bash session after installation, then
+complete commands and host-directory arguments with Tab:
+
+```bash
+waypoint sna<Tab>
+waypoint init /path/to/proj<Tab>
+```
+
+Ubuntu's standard `sudo` completion delegates to command-specific helpers, so
+completion also works after `sudo waypoint`.
+
+The helper completes public subcommands and aliases, supported flags, directory
+arguments for `init` and `build`, and local files and directories for `cp`. It
+uses only the existing `waypoint list` and `waypoint list <session>` commands,
+with simple text filtering, to complete session, checkpoint, and fork IDs. For
+`cp`, fork IDs are offered as `fork-id:/` prefixes. It recognizes `snapshot`'s
+`--park` flag anywhere among its arguments and offers the required `--`
+separator for `exec`.
+
+New checkpoint and fork IDs, fork counts, guest commands, and guest file paths
+remain user-supplied. The current CLI has no guest-filesystem listing command;
+completion does not execute commands inside a fork. Live-state completion is
+best effort: failed or unrecognized `list` output produces no candidates and
+never interrupts the command line.
+
+For development, print or source the repository copy without installing it:
+
+```bash
+make completion
+source <(./setup completion)
+```
+
+Run the focused completion checks with `bash scripts/test-bash-completion.sh`.
+They also run as part of `make test` and require no live Waypoint sessions.
 
 ## Host Dependencies
 

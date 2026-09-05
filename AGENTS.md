@@ -1,197 +1,202 @@
-# Agent Notes
+# Working on Waypoint
 
-This repository is Linux/CRIU/OverlayFS heavy. Most meaningful checks require **root on a
-Linux host**. Builds prove nothing about runtime behavior — a green `go build` on any
-machine says nothing about whether CRIU can dump or restore a fork.
+This file provides general repository orientation and development guidance. Keep it
+focused on the current design and reusable practices; put task plans, investigation
+logs, benchmark results, and release-specific findings elsewhere.
 
-## What Waypoint Is
+## Collaborating with the human developer
 
-Waypoint checkpoints and forks **live Linux environments**: a running process tree —
-e.g. a bash shell with its variables, cwd, and background jobs — together with its
-filesystem. A session starts from a rootfs and a live shell (the `main` fork). At any
-point that live state can be sealed into an immutable checkpoint, and any checkpoint
-can be forked into many concurrent, fully divergent live copies of that exact moment,
-warm in-memory state included. The representative workload is agent-style search:
-fork one warm environment once per candidate action, evaluate the actions in
-parallel, keep the winner, snapshot it as a new checkpoint, recurse — with cheap
-backtracking to any earlier node.
+Understand the affected code before changing it. Prefer extending the existing
+components and abstractions, and keep changes focused enough for the developer to
+review and explain. Preserve the session/checkpoint/fork model and the boundaries
+between the CLI, runtime library, and shell supervisor.
 
-Two mechanisms make this work:
+For implementation changes, give the developer a brief high-level design explanation:
 
-- **CRIU** dumps and restores the process tree (memory, fds, PTY, namespaces), so a
-  fork resumes mid-execution — background processes keep running from where the
-  checkpoint froze them.
-- **OverlayFS** seals each checkpoint's filesystem delta as an immutable, shareable
-  layer and gives every live fork a private copy-on-write upper, so forking never
-  copies the rootfs and checkpoint history forms a cheap layer chain.
+- Which components are involved and what responsibility each has.
+- How the change fits into the existing control flow or state lifecycle.
+- Which architectural invariants it preserves, and any meaningful tradeoffs or
+  compatibility implications.
+- What was validated and what remains unverified.
 
-Checkpoints form a DAG (fork → exec → snapshot → fork again is the normal loop), and
-each live fork runs isolated in its own PID/mount/net/IPC/UTS namespaces. On a minimal
-rootfs a fork materializes in roughly 140 ms and a checkpoint/snapshot takes roughly
-240 ms — cheap enough to fork per candidate action.
+Scale this explanation to the change; a few sentences are enough for a small fix.
+A list of edited files alone does not explain the design. Surface substantial
+architectural departures early, with their motivation and alternatives, rather than
+introducing a second state model or execution mechanism incidentally. For changes
+limited to documentation or tests, summarize the content or coverage and validation;
+a separate architecture explanation is unnecessary.
 
-## Orientation
+## Repository orientation
 
-Read in this order:
+Waypoint is a Linux tool for checkpointing and concurrently forking live process
+state together with filesystem state. It combines CRIU process-tree dumps/restores,
+OverlayFS copy-on-write layers, and a persistent Bash shell supervised on a PTY.
+The runtime requires root and suitable kernel features. It shares host networking;
+it does not provide a complete container security boundary.
 
-1. `docs/architecture.md` — the canonical architecture guide: mental model, component
-   map, and how a fork is actually materialized. **Start here.**
-2. `docs/exec-protocol.md` — the v2 exec wire protocol (framing, exit codes, statuses).
-3. `docs/INSTALL.md` — host setup and the `setup`/`make` entry points.
+Start with [docs/architecture.md](docs/architecture.md) for the overall design,
+[docs/exec-protocol.md](docs/exec-protocol.md) for shell communication, and
+[docs/INSTALL.md](docs/INSTALL.md) for host setup. [README.md](README.md) documents
+user-facing usage. Verify details against the implementation and tests when these
+sources disagree, especially namespace and platform assumptions.
 
-## Architecture Rules
+| Location | Responsibility |
+|---|---|
+| `cmd/waypoint/` | CLI parsing, presentation, exit status, and internal re-exec entry points. |
+| `pkg/waypoint/manager.go`, `config.go` | Session registry, paths, configuration, cross-process locks, and atomic record writes. |
+| `pkg/waypoint/checkpoint.go`, `fork.go` | Checkpoint DAG, live fork lifecycle, materialization, snapshotting, and exec client. |
+| `pkg/waypoint/build.go`, `overlay.go`, `criu.go` | Rootfs staging/Buildah builds, shell startup, OverlayFS, and CRIU orchestration. |
+| `pkg/waypoint/copy.go`, `inspect.go`, `cleanup.go` | Fork-aware file transfer, runtime inspection, and process/mount teardown. |
+| `pkg/waypoint/imagestore.go`, `criustats.go` | Optional tmpfs image storage/flush and phase timing. |
+| `cmd/bash-init/` | Namespace init and persistent shell supervisor; exec protocol server. |
+| `contrib/bash-completion/`, `scripts/` | Bash completion and executable validation workflows. |
+| `setup`, `Makefile`, `.github/workflows/` | Build/install/check entry points and CI/release automation. |
 
-- Public model:
-  - Session = checkpoint store + live fork registry.
-  - Checkpoint = immutable DAG node.
-  - Fork = live mutable instance of one checkpoint.
-  - Snapshot = live fork -> new checkpoint (`--park` persists without resuming the fork).
-  - Fork = checkpoint -> live fork. Multiple concurrent forks of one checkpoint are
-    ordinary, each in its own PID/mount/net/IPC/UTS namespaces with a private overlay upper.
-- `main` is just another fork, created by `init --shell`. There is no destructive
-  restore; state is always materialized as checkpoint -> new fork.
-- Fork paths must not mutate session-global `current` state.
-- Shared checkpoint layers are immutable. Live forks own private upper/work dirs.
-- Recursive forking is ordinary: fork a checkpoint, exec, snapshot the fork, then fork
-  the new checkpoint. No special-casing of where a checkpoint came from.
-- Checkpoint metadata uses `ParentID` for the logical DAG edge and `LayerIDs` for the
-  resolved filesystem chain, oldest to newest.
-- OverlayFS lowerdirs are built by reversing `LayerIDs`, then appending the original
-  rootfs as the lowest-priority lowerdir.
-- Commands on different forks run concurrently; commands on the same fork must serialize.
-- Snapshot/destroy must not race with an active exec on the same fork.
-- Use **file locks**, not process-local mutexes — each CLI command is a separate process.
-- Never hold the session lock while running long CRIU, shell, mount, or process-kill
-  operations.
+## Architectural invariants
 
-## CLI
+- A **session** owns a checkpoint store and a live fork registry. A **checkpoint**
+  stores a sealed filesystem delta and process image. A **fork** is a live mutable
+  instance, with its own writable overlay and process tree. `main` is the initial
+  fork, started by `init --shell` or `build`; plain `init` does not start a shell.
+- Checkpoints form a DAG. `ParentID` is the logical parent; `LayerIDs` is the
+  resolved filesystem chain from oldest to newest. Overlay lowerdirs reverse that
+  chain and put the original rootfs last, at lowest priority.
+- Sealed filesystem layers and checkpointed process state are shared inputs to
+  materialization. Stage input rootfs directories into session-owned `original/`;
+  do not use a mutable caller directory as a shared lower layer. Keep fork writes
+  in private upper/work directories. Preserve OverlayFS whiteout semantics and
+  recursive snapshot/fork behavior.
+- Snapshotting normally seals a fork and rebases/resumes it on the new checkpoint.
+  Parking saves the checkpoint without resuming that fork. Backtracking materializes
+  a new fork from an earlier checkpoint; there is no destructive `restore` command
+  or session-global mutable "current checkpoint" to switch.
+- The CLI runs as separate processes. Use the existing file locks for coordination;
+  a process-local mutex cannot protect another invocation. Same-fork exec, copy,
+  snapshot, and destroy operations serialize; different forks can run concurrently.
+  Keep session locks around short metadata transitions, outside long CRIU, shell,
+  mount, and teardown work. Keep lockfiles in the stable session `locks/` directory,
+  outside removable fork directories. Preserve existing lock ordering and atomic
+  writes.
+- Runtime views belong to namespaces. The host's session `work/` directory is not
+  a universal live view of every fork. Resolve live sockets/files through the
+  verified fork process, using the existing `/proc/<pid>/root` helpers. Preserve
+  PID/start-time identity checks, path validation, and scoped teardown.
+- Keep CLI parsing and presentation in `cmd/waypoint`, lifecycle/storage logic in
+  `pkg/waypoint`, and PTY/shell supervision in `cmd/bash-init`. Reuse these paths
+  when adding operations so locking, configuration, and failure handling agree.
 
-As implemented in `cmd/waypoint/main.go`:
+## CLI conventions
 
-```bash
-waypoint init <work-directory> [--quiet] [--shell]
-waypoint build <dockerfile-directory> [--quiet]     # buildah-based rootfs build
-waypoint checkpoint <session> <checkpoint-id>       # alias: create
+The command dispatch in `cmd/waypoint/main.go` and copy parser in
+`cmd/waypoint/copy.go` define the supported syntax. Common forms are:
+
+```text
+waypoint init <rootfs-directory> [--quiet] [--shell]
+waypoint build <dockerfile-directory> [--quiet]
+waypoint checkpoint <session> <checkpoint-id>
 waypoint fork <session> <checkpoint-id> [--id ID] [--n K]
 waypoint exec <session> <fork-id> -- <command>
+waypoint cp <session> <host-path> <fork-id>:/<path>
+waypoint cp <session> <fork-id>:/<path> <host-path>
 waypoint snapshot <session> <fork-id> <checkpoint-id> [--park]
 waypoint destroy <session> <fork-id>
-waypoint list [session] [--json]
+waypoint list
+waypoint list <session> [--json]
 waypoint info [session [checkpoint-id]]
-waypoint suspend <session>                          # end live forks; keep checkpoints on disk (fork to resume)
+waypoint suspend <session>
 waypoint cleanup <session> [--force]
 waypoint version
 ```
 
-Notes:
-- `create` is a plain alias of `checkpoint`.
-- `fork-exec <session> <fork-id> <cmd> [args...]` calls the same `ExecuteForkCommand`
-  as `exec`; prefer `exec`.
-- `__waypoint_restore_fork_child` is an internal re-exec entry point, not a user command.
-- Note the `--` separator in `exec`; it is required.
-- Opt-in env toggles: `WAYPOINT_TMPFS_IMAGES` (CRIU images on tmpfs with async flush)
-  and `WAYPOINT_PHASE_STATS` (phase-level latency instrumentation). Both default off.
+`checkpoint` snapshots `main`; `snapshot` selects a fork. `main` cannot be parked.
+`destroy` removes a selected fork; session teardown uses `suspend` or `cleanup`.
+`suspend` ends the session's live forks while retaining checkpoint history; it does
+not snapshot unsaved fork edits. `create` and `fork-exec` are legacy aliases; prefer
+the primary commands. Names beginning `__waypoint_` are internal re-exec entry points.
 
-## Build, Install, Check
+`exec` requires `--` and sends a Bash input string, not an argv-preserving process
+launch. Preserve the PTY protocol's completion signaling and command exit status;
+stdout/stderr share the PTY. `cp` requires exactly one fork endpoint and uses exact
+destination paths. It supports regular files/directories, with explicit limits on
+symlinks and metadata preservation documented in `pkg/waypoint/copy.go`.
 
-The repo has a `setup` shell script with a thin `Makefile` wrapper. Prefer these:
+Changes to public commands should account for help/usage, documentation, completion,
+and their tests. Completion obtains dynamic IDs through existing read-only CLI
+commands and filters their output; keep completion free of runtime mutations.
 
-```bash
-./setup build      # -> bin/waypoint, bin/bash_init   (or: make build)
-./setup test       # -> go test ./...                  (see "Testing" below)
-sudo ./setup check # host commands + kernel + CRIU version/features
-sudo ./setup install
-./setup clean
-```
+## Build and configuration
 
-`setup install` places `waypoint` in `$PREFIX/bin`, `bash_init` in
-`$PREFIX/libexec/waypoint`, and writes `/etc/waypoint/config.json` pointing
-`bash_init_src` at the installed helper. Override with `PREFIX`, `BINDIR`,
-`LIBEXECDIR`, `CONFIG_PATH`; `FORCE_CONFIG=1` replaces an existing config.
-
-Without an install, `bash_init_src` defaults to `./bash_init`, so for local runtime work
-set it explicitly:
+Use the Go version declared in `go.mod`. The Makefile delegates to `setup`:
 
 ```bash
-sudo -E env WAYPOINT_BASH_INIT_SRC="$PWD/bin/bash_init" ./bin/waypoint init ...
+./setup build       # bin/waypoint and bin/bash_init; also: make build
+./setup test        # Bash completion tests and go test ./...; also: make test
+sudo ./setup check # host commands, kernel features, and CRIU checks
 ```
 
-`./setup build` builds `bash_init` with `CGO_ENABLED=0`, so it comes out **statically
-linked**. Keep it that way: `bash_init` is staged into the session rootfs and re-execs
-there as PID 1, and a dynamic build only works if its ELF loader and shared libraries are
-also staged in. `StartShell` does stage them, but a static binary removes the failure mode
-entirely. If you build `bash_init` by hand for runtime work, do the same:
+`bash_init` must be statically linked: it re-execs inside arbitrary session rootfses,
+and startup rejects a dynamically linked helper. `setup build` sets `CGO_ENABLED=0`
+for it. Rebuild both binaries when changing runtime code or the exec protocol so
+local validation uses a matching pair. For local runtime work, select the helper
+explicitly, for example:
 
 ```bash
-env CGO_ENABLED=0 go build -o bin/bash_init ./cmd/bash-init
+sudo env WAYPOINT_BASH_INIT_SRC="$PWD/bin/bash_init" \
+  ./bin/waypoint init /path/to/rootfs --shell
 ```
 
-## Testing
+Configuration is resolved in `pkg/waypoint/config.go`: direct `WAYPOINT_*` overrides
+win over a selected config file, then defaults apply. `WAYPOINT_CONFIG` selects an
+explicit file; otherwise discovery checks beside the executable, user configuration,
+then system configuration. Use the public loading paths when accessing persisted
+sessions so configuration is resolved consistently.
 
-Unit tests are narrow — they cover pure helper logic only. `go test ./...` passing is
-necessary but nowhere near sufficient: none of the CRIU/mount/namespace paths are
-exercised. Do not report "tests pass" as validation of runtime behavior.
+`WAYPOINT_SESSIONS_DIR` holds runtime/checkpoint data; `WAYPOINT_SESSION_INFO_DIR`
+holds registry records. Both default under `/tmp`. Use durable locations for both
+when persistence across reboots matters. Keep runtime paths short enough for Unix
+sockets and valid for OverlayFS mount options. `WAYPOINT_TMPFS_IMAGES` and
+`WAYPOINT_PHASE_STATS` are opt-in; pending tmpfs images are not durable until flushed.
 
-Real validation is the root runtime path. `scripts/demo.sh` is an asserting end-to-end
-test of the full CLI surface (init → exec → checkpoint → fork → divergence → snapshot /
-`--park` → destroy → list/info → cleanup); it exits non-zero on any failed assertion:
+Installation and dependency setup modify the host. `sudo ./setup install` installs
+the CLI, static helper, Bash completion, and a helper-path config, preserving existing
+configuration by default. See `./setup help` and `docs/INSTALL.md` for path overrides
+and dependency installation; neither is needed for a documentation edit.
 
-```bash
-sudo ./scripts/demo.sh
-```
+## Runtime constraints and validation
 
-A minimal test rootfs needs `/bin/bash`, its shared libraries, the ELF loader
-(`/lib64/ld-linux-x86-64.so.2` on x86-64, `/lib/ld-linux-aarch64.so.1` on arm64), plus
-`/tmp`, `/proc`, `/sys`, and any commands the test uses (`/dev` is assembled at
-session start by `bash_init`). The guest shell runs with a fixed environment
-(`PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, `HOME=/root`,
-`TERM`, `LANG`) — never the invoking user's — so put commands under one of those
-standard PATH directories.
+Preserve the startup sequence: enter the managed mount/PID/IPC/UTS environment,
+make mount propagation private, pivot into the overlay, assemble guest `/dev`,
+`/proc`, and `/sys`, and re-exec the helper inside the rootfs. Readiness requires a working shell control socket, not
+just a PID. Avoid retaining host-root log descriptors or child pidfds in checkpointed
+processes; keep the existing descriptor-release and stdio-detachment handling.
 
-## Non-Obvious Runtime Constraints
+A supplied rootfs needs Bash, its ELF loader/shared libraries, and the commands the
+workload uses. Guest configuration starts from controlled defaults and, for builds,
+OCI image `ENV`/`WORKDIR`; unattended shell settings and internal plumbing take
+precedence. The invoking host's environment is not passed through wholesale.
 
-- On aarch64 hosts with pointer authentication (`paca`/`pacg` in `/proc/cpuinfo`),
-  **CRIU >= 4.0 is required**: older CRIU does not checkpoint PAC keys, so restored
-  PAC-built binaries (bash, glibc userland) die with SIGILL at the first authenticated
-  return. This is enforced by `./setup check` (`CRIU_MIN_VERSION=4.0`), **not at
-  runtime**.
-- Do not keep an `os/exec` pidfd open for a long-lived child in a checkpointed process;
-  call `cmd.Process.Release()` after start (CRIU cannot dump pidfds).
-- `bash_init` must pivot into the session overlay root before checkpointing.
-- `bash_init` must re-exec from inside the overlay (`/.waypoint/bash_init`) so CRIU can
-  resolve its executable mapping.
-- After `pivot_root`, mount `/proc` and `/sys` relative to the **new** root, not the old
-  host `chrootDir`.
-- If `bash_init` is dynamic, its loader and shared libraries must exist inside the rootfs.
-- Do not keep host-root log files open in checkpointed processes; they break CRIU's fd
-  dump. `bash_init` detaches stdio to namespace `/dev/null` once the shell is ready.
-- Host access to restored Unix sockets should use `/proc/<pid>/root/<canonical-socket>`.
-- Do not bind-mount the session temp dir into the namespace for the socket; CRIU 4.2
-  fails on that mount shape.
-- CRIU 4.2 dump-side external mount syntax is mountpoint-based:
-  `--external mnt[/]:waypoint-work`, not `mnt[<mount-id>]:waypoint-work`.
-- Restore should be synchronous and should use `--restore-detached` plus `--pidfile`.
-- Namespace-local task IDs in CRIU images are not host PIDs. If the image contains PID 1,
-  cleanup must target the namespace init host PID, not `/proc/1`.
-- Startup is readiness-gated: `StartShell` waits for the control socket to be dialable
-  and detects early exit. Never report success on a PID alone.
+CRIU compatibility depends on the host. `setup check` verifies features and enforces
+a CRIU minimum on aarch64 for pointer-authentication support. Preserve the existing
+external-mount mapping and synchronous detached-restore protocol when changing CRIU
+integration; a successful build cannot establish that dump/restore works.
 
-## Before Ending Work
+Choose validation for the affected behavior:
 
-- Run `gofmt` on edited Go files.
-- Rebuild both binaries when touching runtime/session code: `./setup build` (plus a
-  static `bash_init` if you are about to do runtime validation).
-- For any change to CRIU, mounts, namespaces, `bash_init`, or the exec protocol, run a
-  **real root runtime check** — `sudo ./scripts/demo.sh` at minimum. Builds and
-  `go test` do not exercise any of this.
-- Clean up root-owned sessions created during testing:
-
-```bash
-sudo ./waypoint cleanup <session> --force
-```
-
-- Check for leftover mounts under the session directory:
-
-```bash
-sudo findmnt -R /tmp/waypoint-sessions/<session>
-```
+- Go tests cover configuration, metadata, filesystem helpers, locks, parsing, and
+  related logic. `./setup test` also runs the Bash completion tests. These do not
+  replace real CRIU/namespace lifecycle checks.
+- For changes to CRIU, mounts, namespaces, lifecycle, `bash_init`, or the exec
+  protocol, run `sudo ./scripts/demo.sh` as the baseline runtime check, plus focused
+  coverage for the change. It rebuilds binaries and asserts CLI behavior and cleanup;
+  its Dockerfile section requires Buildah and reports a skip if unavailable.
+- `sudo ./scripts/test-search-workflow.sh` adds an offline Dockerfile build, file
+  transfer, concurrent branching, recursive snapshots/backtracking, export, and
+  cleanup workload. Its header documents prerequisites and scaling options.
+- Run Waypoint runtime operations as root through `sudo` or a root test harness.
+  Use private test sessions/paths, clean only resources created by the test, and
+  verify that their processes and mounts are gone. Use the same registry/config
+  overrides for cleanup as for creation.
+- Run `gofmt` on changed Go files and check the diff. For documentation-only edits,
+  verify statements, examples, and links; runtime tests are unnecessary. For test
+  changes, exercise the affected tests. Report commands, failures, skips, and coverage
+  limits explicitly; do not describe a build or helper test as runtime validation.

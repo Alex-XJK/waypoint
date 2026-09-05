@@ -182,6 +182,9 @@ func (m *Manager) saveMainFork(pid int, socketPath, canonicalSocket, logPath str
 // --- fork lifecycle ---
 
 func (m *Manager) DestroyFork(forkID string) error {
+	if err := validateForkID(forkID); err != nil {
+		return err
+	}
 	return m.withForkLock(forkID, func() error {
 		f, err := m.loadFork(forkID)
 		if err != nil {
@@ -205,6 +208,9 @@ func (m *Manager) DestroyFork(forkID string) error {
 // shell. Extra args are joined with spaces into the command string, so the
 // payload is always a single bash input, not an argv.
 func (m *Manager) ExecuteForkCommand(forkID, command string, args ...string) (*ExecResult, error) {
+	if err := validateForkID(forkID); err != nil {
+		return nil, err
+	}
 	var result *ExecResult
 	err := m.withForkLock(forkID, func() error {
 		f, err := m.loadFork(forkID)

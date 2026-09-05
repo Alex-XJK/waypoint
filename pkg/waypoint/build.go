@@ -9,6 +9,7 @@ import (
 	"crypto/sha1"
 	"debug/elf"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -35,10 +36,13 @@ func (m *Manager) BuildEnvironment(dockerfileDir string, quiet bool) (string, in
 	}
 
 	// Build from Dockerfile to create a virtual system environment
-	if err := BuildFromDockerfile(dockerfileDir, originalDir, quiet); err != nil {
+	var imageConfig ImageConfig
+	if err := BuildFromDockerfile(dockerfileDir, originalDir, quiet, &imageConfig); err != nil {
 		return "", 0, fmt.Errorf("failed to build from Dockerfile: %w", err)
 	}
 
+	m.imageEnv = imageConfig.Env
+	m.imageWorkDir = imageConfig.WorkingDir
 	m.originalDir = originalDir
 
 	// Initialize overlay environment on top of it
@@ -93,7 +97,7 @@ func imageRefComponent(s string) string {
 	return out
 }
 
-func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool) error {
+func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool, cfg *ImageConfig) error {
 	imageTag := fmt.Sprintf("waypoint_%s:%d", imageRefComponent(filepath.Base(dockerfileDir)), time.Now().Unix())
 
 	run := func(cmd *exec.Cmd, capture bool) (string, error) {
@@ -122,6 +126,14 @@ func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool) error {
 		"buildah", "bud", "-t", imageTag, "-f", filepath.Join(dockerfileDir, "Dockerfile"), dockerfileDir,
 	), false); err != nil {
 		return err
+	}
+
+	if cfg != nil {
+		inspected, inspectErr := inspectImageConfig(imageTag, run)
+		if inspectErr != nil {
+			return fmt.Errorf("failed to inspect built image: %w", inspectErr)
+		}
+		*cfg = inspected
 	}
 
 	// 2. buildah from -q
@@ -229,6 +241,155 @@ func PrepareNetworkDeps(rootfs string) error {
 	return nil
 }
 
+// baseGuestEnv is the fixed, OCI-style environment every session starts with.
+// It deliberately does not inherit the invoking user's: the guest environment
+// is process state, so anything here is baked into every checkpoint and fork
+// of the session, and inheriting would make guest behavior depend on whoever
+// happened to run `waypoint init`.
+var baseGuestEnv = []string{
+	"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+	"HOME=/root",
+	"TERM=xterm",
+	"LANG=C.UTF-8",
+}
+
+// unattendedGuestEnv keeps interactive tooling from stalling a session that
+// has nobody on the other end. A fork's shell is driven over a socket, so a
+// pager waiting for a keypress or apt waiting for a confirmation does not
+// merely look wrong — it hangs the command until the exec timeout.
+//
+// These belong in the session's fixed environment rather than in bash_init's
+// inherited one: they are part of what a checkpoint captures, so every fork
+// and every recursive snapshot must see exactly the same set.
+var unattendedGuestEnv = []string{
+	// Pagers: stream output directly instead of waiting for navigation input.
+	"PAGER=cat",
+	"GIT_PAGER=cat",
+	"SYSTEMD_PAGER=cat",
+
+	// Editors: return immediately instead of opening an interactive editor.
+	"EDITOR=true",
+	"VISUAL=true",
+	"GIT_EDITOR=true",
+	"GIT_SEQUENCE_EDITOR=true",
+
+	// Git authentication: fail instead of prompting; accept new SSH host keys.
+	"GIT_TERMINAL_PROMPT=0",
+	"GIT_ASKPASS=/bin/true",
+	"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+
+	// Debian tools: disable prompts and report restarts without performing them.
+	"DEBIAN_FRONTEND=noninteractive",
+	"NEEDRESTART_MODE=l",
+
+	// opam 2.0 uses OPAMYES; newer releases prefer OPAMCONFIRMLEVEL.
+	"OPAMYES=1",
+	"OPAMCONFIRMLEVEL=unsafe-yes",
+
+	// Python/pip: emit output promptly and disable prompts or dynamic UI.
+	"PYTHONUNBUFFERED=1",
+	"PIP_NO_INPUT=1",
+	"PIP_DISABLE_PIP_VERSION_CHECK=1",
+	"PIP_PROGRESS_BAR=off",
+}
+
+// waypointPlumbingEnv is bash_init's own configuration. bash_init strips
+// every WAYPOINT_* variable before handing the environment to the shell, so
+// these never reach the guest.
+var waypointPlumbingEnv = []string{
+	"WAYPOINT_NAMESPACED=1",
+	"WAYPOINT_REEXEC_PATH=/.waypoint/bash_init",
+}
+
+// ImageConfig is the part of a built image's OCI config the session adopts.
+type ImageConfig struct {
+	Env        []string
+	WorkingDir string
+}
+
+type imageInspect struct {
+	OCIv1 struct {
+		Config struct {
+			Env        []string `json:"Env"`
+			WorkingDir string   `json:"WorkingDir"`
+		} `json:"config"`
+	} `json:"OCIv1"`
+}
+
+// inspectImageConfig reads the built image's env and working directory. It
+// reads the *image*, not the Dockerfile, so values inherited from the base
+// image (a `FROM python:3.12` PATH, say) come along too -- parsing the
+// Dockerfile would see only what that file itself declares.
+func inspectImageConfig(imageTag string, run func(*exec.Cmd, bool) (string, error)) (ImageConfig, error) {
+	out, err := run(exec.Command("buildah", "inspect", "--type", "image", imageTag), true)
+	if err != nil {
+		return ImageConfig{}, err
+	}
+	var inspected imageInspect
+	if err := json.Unmarshal([]byte(out), &inspected); err != nil {
+		return ImageConfig{}, fmt.Errorf("failed to parse buildah inspect output: %w", err)
+	}
+	return ImageConfig{
+		Env:        inspected.OCIv1.Config.Env,
+		WorkingDir: inspected.OCIv1.Config.WorkingDir,
+	}, nil
+}
+
+// sessionEnv assembles the environment bash_init is launched with: the fixed
+// OCI-style base, then the built image's env, then the unattended settings,
+// then Waypoint's own variables.
+//
+// Order is the whole design. Each layer overrides the one before it:
+//
+//   - the image overrides the base, so a `FROM python:3.12` PATH wins and an
+//     image declaring none simply keeps the default;
+//   - the unattended settings override the image, because they are an
+//     anti-hang floor rather than a preference -- a fork's shell is driven
+//     over a socket, so an image that put PAGER back to less would hang
+//     commands until the exec timeout;
+//   - WAYPOINT_* comes last and can never be shadowed by an image, because
+//     bash_init's re-exec depends on it.
+//
+// Overrides are collapsed here rather than left for os/exec to dedup, so the
+// guest environment stays a property of this function and no duplicate key
+// ever reaches the shell. The result is process state, baked into every
+// checkpoint and fork of this session, which is why forks need no separate
+// handling.
+func (m *Manager) sessionEnv() []string {
+	layered := make([]string, 0,
+		len(baseGuestEnv)+len(m.imageEnv)+len(unattendedGuestEnv)+len(waypointPlumbingEnv))
+	layered = append(layered, baseGuestEnv...)
+	layered = append(layered, m.imageEnv...)
+	layered = append(layered, unattendedGuestEnv...)
+	layered = append(layered, waypointPlumbingEnv...)
+
+	// Keep each key's final value, at the position that value was set.
+	winner := make(map[string]int, len(layered))
+	for i, entry := range layered {
+		if key := envKey(entry); key != "" {
+			winner[key] = i
+		}
+	}
+	env := make([]string, 0, len(layered))
+	for i, entry := range layered {
+		key := envKey(entry)
+		// A malformed entry has no key to override or be overridden by; an
+		// image is free to carry one, so pass it through untouched.
+		if key == "" || winner[key] == i {
+			env = append(env, entry)
+		}
+	}
+	return env
+}
+
+// envKey returns the KEY of a KEY=VALUE entry, or "" if it has no key.
+func envKey(entry string) string {
+	if i := strings.IndexByte(entry, '='); i > 0 {
+		return entry[:i]
+	}
+	return ""
+}
+
 // StartShell launches bash_init in fresh namespaces, pivoted into workDir.
 // On success, it updates the session info with the shell PID and socket path for later use.
 func (m *Manager) StartShell(workDir string) (int, string, error) {
@@ -265,23 +426,17 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	// host. A rootfs missing one fails the startup handshake, and the shell
 	// log surfaced below carries the loader's error naming the library.
 
-	cmd := exec.Command(bashInitSrc, canonicalSocketPath, workDir)
+	cmd := exec.Command(bashInitSrc, canonicalSocketPath, workDir, m.imageWorkDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: uintptr(unix.CLONE_NEWPID | unix.CLONE_NEWNS | unix.CLONE_NEWIPC | unix.CLONE_NEWUTS),
 		Setsid:     true, // new session = no controlling TTY
 	}
 	// Sessions get a fixed, OCI-style environment instead of inheriting the
 	// invoking user's: the guest environment is process state, so anything
-	// passed here is baked into every checkpoint and fork of this session
-	// (and would make guest behavior depend on the host shell's config).
-	cmd.Env = []string{
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"HOME=/root",
-		"TERM=xterm",
-		"LANG=C.UTF-8",
-		"WAYPOINT_NAMESPACED=1",
-		"WAYPOINT_REEXEC_PATH=/.waypoint/bash_init",
-	}
+	// passed here is baked into every checkpoint and fork of this session (and
+	// would make guest behavior depend on the host shell's config). See
+	// sessionEnv for the layering.
+	cmd.Env = m.sessionEnv()
 
 	// stdin -> /dev/null
 	devNull, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
