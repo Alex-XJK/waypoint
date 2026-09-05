@@ -298,10 +298,18 @@ func openCompletionFifo(hostPath string) (<-chan string, error) {
 }
 
 // initShellSession blanks the prompt state (PS1/PS2/PROMPT_COMMAND may be set
-// by rc files) and waits for the shell to acknowledge over the FIFO.
+// by rc files), turns off history expansion, and waits for the shell to
+// acknowledge over the FIFO.
+//
+// History expansion is on by default in an interactive bash and off under
+// `bash -c`, which is the environment callers write commands for. Left on,
+// a `!` inside double quotes fails with "event not found" and `!!` is
+// replaced by the previous input — which in a fork is always our own
+// completion line — so `git commit -m "ship it!!"` would silently commit
+// something else.
 func initShellSession(ptyMaster *os.File, completions <-chan string) error {
 	nonce := newNonce()
-	init := fmt.Sprintf("unset PROMPT_COMMAND; PS1=; PS2=; builtin printf '%%s 0\\n' '%s' > %s\n",
+	init := fmt.Sprintf("unset PROMPT_COMMAND; PS1=; PS2=; set +H; builtin printf '%%s 0\\n' '%s' > %s\n",
 		nonce, completionFifoGuestPath)
 	if _, err := ptyMaster.WriteString(init); err != nil {
 		return err
@@ -382,11 +390,7 @@ func handleClient(conn net.Conn, ptyMaster *os.File, shellMutex *sync.Mutex, out
 	outputBuffer.Reset()
 
 	nonce := newNonce()
-	if !strings.HasSuffix(command, "\n") {
-		command += "\n"
-	}
-	command += fmt.Sprintf("builtin printf '%%s %%s\\n' '%s' \"$?\" > %s\n", nonce, completionFifoGuestPath)
-	if _, err := ptyMaster.WriteString(command); err != nil {
+	if _, err := ptyMaster.WriteString(frameCommand(command, nonce, completionFifoGuestPath)); err != nil {
 		return
 	}
 
@@ -448,6 +452,21 @@ func handleClient(conn net.Conn, ptyMaster *os.File, shellMutex *sync.Mutex, out
 			return
 		}
 	}
+}
+
+// frameCommand turns one command payload into the bytes written to the PTY:
+// the command, a blank line, then the completion line that reports `$?`
+// through the FIFO at fifoPath. The blank line is not cosmetic. A payload
+// ending in a backslash is a line continuation, and without the separator
+// the completion line would be joined onto the command and run as its
+// arguments — no completion would ever arrive. An empty line is a no-op to
+// bash and leaves `$?` untouched, so the reported status is still the
+// command's own.
+func frameCommand(command, nonce, fifoPath string) string {
+	if !strings.HasSuffix(command, "\n") {
+		command += "\n"
+	}
+	return command + "\n" + fmt.Sprintf("builtin printf '%%s %%s\\n' '%s' \"$?\" > %s\n", nonce, fifoPath)
 }
 
 // interruptShell aborts whatever the shell is doing: Ctrl-C clears a parser

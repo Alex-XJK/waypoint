@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -19,7 +20,8 @@ import (
 var Version = "v0.7.0"
 
 // printExecResult writes the command output to stdout and exits with the
-// command's own exit code, so `waypoint exec` composes like ssh/docker exec.
+// command's own exit code, so a caller can branch on `waypoint exec` the way
+// it would on `bash -c`.
 func printExecResult(result *waypoint.ExecResult) {
 	fmt.Print(result.Output)
 	if result.Output != "" && !strings.HasSuffix(result.Output, "\n") {
@@ -31,6 +33,57 @@ func printExecResult(result *waypoint.ExecResult) {
 	if result.ExitCode != 0 {
 		os.Exit(result.ExitCode)
 	}
+}
+
+// execUsage is shared by `exec` and its legacy alias so the contract reads
+// the same everywhere: one argument, the whole bash command line.
+const execUsage = "Usage: exec <session> <fork-id> -- '<bash command line>'"
+
+// parseExecCommand extracts the single command string from the arguments
+// after `exec <session> <fork-id> --`. The fork's shell parses that string
+// itself, exactly as `bash -c` would, so it must arrive as one argument:
+// several arguments used to be joined with spaces and re-parsed inside the
+// fork, which lost every quote the caller had written. That is almost always
+// a sign that a host shell already parsed the command once (and expanded
+// `$VAR` and globs against the host), so it is refused rather than repaired.
+func parseExecCommand(rest []string) (string, error) {
+	switch len(rest) {
+	case 0:
+		return "", fmt.Errorf("%s\n       exec takes one argument after --: the bash command line", execUsage)
+	case 1:
+		return rest[0], nil
+	default:
+		return "", fmt.Errorf("exec takes one command string; got %d arguments\n"+
+			"       Quote the whole command so the fork's shell parses it: -- %s",
+			len(rest), shellQuote(strings.Join(rest, " ")))
+	}
+}
+
+// shellQuote renders s as one POSIX single-quoted word, for the hint above.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// runExec executes command in the fork and exits with the command's status.
+// A command bash cannot parse is reported the way bash itself would report
+// it, with bash's exit status for syntax errors, so a caller sees the same
+// signal it would get from `bash -c`.
+func runExec(sessionID, forkID, command string) {
+	manager, err := waypoint.LoadManager(sessionID)
+	if err != nil {
+		fmt.Printf("Error loading session: %v\n", err)
+		os.Exit(1)
+	}
+	result, err := manager.ExecuteForkCommand(forkID, command)
+	if errors.Is(err, waypoint.ErrCommandSyntax) {
+		fmt.Fprintf(os.Stderr, "waypoint exec: %v\n", err)
+		os.Exit(2)
+	}
+	if err != nil {
+		fmt.Printf("Error executing command: %v\n", err)
+		os.Exit(1)
+	}
+	printExecResult(result)
 }
 
 type forkResult struct {
@@ -62,7 +115,7 @@ func main() {
 		fmt.Println("  build <dockerfile-directory> [--quiet]       - Build environment from Dockerfile")
 		fmt.Println("  checkpoint <session> <checkpoint-id>         - Snapshot main fork")
 		fmt.Println("  fork <session> <checkpoint-id> [--id ID] [--n K] - Materialize live fork(s)")
-		fmt.Println("  exec <session> <fork-id> -- <command>        - Execute command in a fork")
+		fmt.Println("  exec <session> <fork-id> -- '<command>'      - Run one bash command line in a fork")
 		fmt.Println("  cp <session> <source> <destination>          - Copy host path <-> fork-id:/path")
 		fmt.Println("  snapshot <session> <fork-id> <checkpoint-id> [--park] - Snapshot a live fork (--park: don't resume it)")
 		fmt.Println("  create <session> <checkpoint-id>             - Legacy alias for checkpoint")
@@ -295,26 +348,17 @@ func main() {
 		}
 
 	case "fork-exec":
-		if len(os.Args) < 5 {
-			fmt.Println("Usage: fork-exec <session> <fork-id> <command> [args...]")
+		// Legacy alias: same contract as exec, minus the `--`.
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: fork-exec <session> <fork-id> '<bash command line>'")
 			os.Exit(1)
 		}
-		sessionID := os.Args[2]
-		forkID := os.Args[3]
-		command := os.Args[4]
-		args := os.Args[5:]
-
-		manager, err := waypoint.LoadManager(sessionID)
+		command, err := parseExecCommand(os.Args[4:])
 		if err != nil {
-			fmt.Printf("Error loading session: %v\n", err)
+			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
 		}
-		result, err := manager.ExecuteForkCommand(forkID, command, args...)
-		if err != nil {
-			fmt.Printf("Error executing fork command: %v\n", err)
-			os.Exit(1)
-		}
-		printExecResult(result)
+		runExec(os.Args[2], os.Args[3], command)
 
 	case "destroy":
 		if len(os.Args) != 4 {
@@ -376,26 +420,16 @@ func main() {
 		}
 
 	case "exec":
-		if len(os.Args) < 6 || os.Args[4] != "--" {
-			fmt.Println("Usage: exec <session> <fork-id> -- <command>")
+		if len(os.Args) < 5 || os.Args[4] != "--" {
+			fmt.Println(execUsage)
 			os.Exit(1)
 		}
-		sessionID := os.Args[2]
-		forkID := os.Args[3]
-		command := strings.Join(os.Args[5:], " ")
-
-		manager, err := waypoint.LoadManager(sessionID)
+		command, err := parseExecCommand(os.Args[5:])
 		if err != nil {
-			fmt.Printf("Error loading session: %v\n", err)
+			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
 		}
-
-		result, err := manager.ExecuteForkCommand(forkID, command)
-		if err != nil {
-			fmt.Printf("Error executing command: %v\n", err)
-			os.Exit(1)
-		}
-		printExecResult(result)
+		runExec(os.Args[2], os.Args[3], command)
 
 	case "list":
 		if len(os.Args) == 2 {

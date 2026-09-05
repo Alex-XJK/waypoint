@@ -289,13 +289,19 @@ called the `main` fork. You run commands in a fork with `exec`, and the fork
 keeps its shell state (cwd, environment variables, background jobs) across calls:
 
 ```bash
-sudo waypoint exec a1b2c3d4e5f6g7h8 main -- cat hello_world.txt
+sudo waypoint exec a1b2c3d4e5f6g7h8 main -- 'cat hello_world.txt'
 sudo waypoint exec a1b2c3d4e5f6g7h8 main -- 'cd /app; export ENV_VAR=start'
 ```
 
-Everything after `--` is a single bash command line. `exec` exits with the
-command's own exit code, so it composes like `ssh`/`docker exec`. Commands on
-the same fork serialize; commands on different forks run concurrently.
+`--` is followed by exactly one argument: the bash command line, passed to the
+fork's shell byte for byte, as `bash -c` would receive it. Quote the whole
+command; pipes, redirections, `$VAR` and globs are then resolved inside the
+fork. Passing several arguments (`-- cat "a b"`) is refused rather than joined —
+it usually means a host shell has already parsed the command once. A command
+bash cannot parse (an unterminated quote, an open `if`) is refused before it
+reaches the fork, with bash's own diagnostic and exit status 2. `exec` exits
+with the command's own exit code. Commands on the same fork serialize;
+commands on different forks run concurrently.
 
 Since v0.6.3, managed shell sessions also use unattended defaults for common
 pagers, editors, Git authentication, package-management tools, and Python

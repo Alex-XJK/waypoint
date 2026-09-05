@@ -56,7 +56,14 @@ Consequences:
 
 - PTY echo is disabled and `PS1`/`PS2`/`PROMPT_COMMAND` are blanked during a
   startup handshake, so the PTY carries *only* program output — no marker
-  scraping, echo stripping, or prompt heuristics.
+  scraping, echo stripping, or prompt heuristics. The handshake also runs
+  `set +H`: history expansion is on by default in an interactive bash and off
+  under `bash -c`, and callers write commands for the latter (`echo "hi!there"`
+  must print, not fail with "event not found").
+- The completion line is preceded by a blank line. A payload ending in `\` is
+  a line continuation; without the separator the completion line would be
+  joined onto the command as its arguments. A blank line is a no-op to bash
+  and leaves `$?` untouched.
 - The startup handshake runs before the socket is created, so the socket's
   existence proves the shell executes commands (not just that bash_init is
   alive).
@@ -70,8 +77,12 @@ Consequences:
   and waits briefly for the completion line so the next command starts in
   sync.
 - **Parser desync** (a payload with an unterminated quote/heredoc swallows
-  the completion line): nothing completes until the client disconnects or
-  the backstop fires; the Ctrl-C sent then clears bash's continuation state.
+  the completion line): the `waypoint` client refuses such payloads up front
+  by parsing them with the host's `bash -n` (no execution), returning bash's
+  diagnostic with exit status 2 and never taking the fork lock. Should one
+  reach the server anyway (another client, or a host without bash), nothing
+  completes until the client disconnects or the backstop fires; the Ctrl-C
+  sent then clears bash's continuation state.
 - **Shell death**: a liveness check turns "completion will never arrive"
   into an immediate `dead` response instead of a hang.
 - **Memory bounds**: request headers are limited to 32 bytes, command payloads
@@ -85,7 +96,9 @@ Consequences:
   during a command it is captured as that command's output.
 - No incremental streaming; up to 16 MiB of output is delivered when the
   command completes.
-- The payload is one bash input string, not an argv — quoting is the
-  caller's responsibility.
+- The payload is one bash input string, not an argv. The CLI enforces this:
+  `exec <session> <fork> --` takes exactly one argument and refuses more, so
+  quoting inside that string is the caller's responsibility and nothing is
+  ever re-joined or re-quoted on the way in.
 - Fully interactive programs (REPLs, pagers) block the exec until the
   client disconnects; the protocol is command/response.
