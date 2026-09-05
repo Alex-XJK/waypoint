@@ -89,6 +89,76 @@ Consequences:
   to 1 MiB, and retained command output to 16 MiB. The PTY drainer always
   consumes excess bytes so a noisy child cannot block the supervisor.
 
+## Syntax precheck
+
+Before taking the fork lock, the client hands the payload to the host's bash
+with `-n` (`set -n`, "read commands but do not execute them" — documented
+under the `set` builtin, which is where bash's single-letter options live).
+The script goes in on **stdin**, not as `-c` text and not as a file name, so
+a payload can be as large as the 1 MiB request limit allows without meeting
+the 128 KiB per-argument ceiling:
+
+```text
+printf '%s' "$payload" | bash -n
+```
+
+`-n` runs the parser and nothing else: no command is forked, no path is
+looked up, no expansion happens. `ls -al lalala` passes whether or not
+`lalala` exists; `rm -rf /` passes and does nothing. The question it answers
+is only "is this a complete bash input?" — the fork's own shell answers
+everything else.
+
+Two parser outcomes matter, and they are reported differently:
+
+- An unterminated quote, an open `if`/`for`/`case`, a stray `)`: bash prints
+  a diagnostic and exits **2**. The client returns that diagnostic (minus the
+  `bash: ` prefix) as `ErrCommandSyntax`; the CLI exits 2, like `bash -c`.
+- An unterminated here-document: bash prints only a **warning** and exits
+  **0** —
+
+  ```text
+  bash: line 4: warning: here-document at line 1 delimited by end-of-file (wanted `EOF')
+  ```
+
+  — because at end of a script that is a recoverable condition. In a fork it
+  is not: everything after the `<<EOF` line, the completion line included,
+  is swallowed as heredoc body and the command waits for a delimiter that
+  never arrives. The client therefore also refuses any payload whose
+  diagnostics contain `delimited by end-of-file`, regardless of exit status.
+
+The heredoc case is the one callers actually hit, and usually through
+indentation: a terminator with leading whitespace is data, not a delimiter.
+
+```bash
+if true; then
+    cat <<EOF
+    hello
+    EOF          # <- four spaces: not a terminator; the heredoc is still open
+fi
+```
+
+bash wants the bare word at column 0. The only indented form is `<<-EOF`,
+and it strips **tabs** only, never spaces. Agents that indent a heredoc body
+to match the surrounding block, then indent the closing `EOF` to match the
+body, produce exactly this — the precheck turns what would be a silent hang
+into an immediate `warning: here-document … delimited by end-of-file`.
+
+To see the difference in a terminal:
+
+```bash
+printf 'cat <<EOF\nhello\nEOF\necho after\n'   | bash -n; echo "exit=$?"   # 0, silent
+printf 'cat <<EOF\nhello\necho after\n'         | bash -n; echo "exit=$?"   # 0, but warns
+printf 'cat <<EOF\nhello\n  EOF\necho after\n' | bash -n; echo "exit=$?"   # 0, but warns
+printf 'echo "unterminated\n'                   | bash -n; echo "exit=$?"   # 2
+```
+
+What the check cannot see: a payload ending in a backslash is *complete*
+input (the continuation simply ends), so it passes; the server-side blank
+line in the framing is what keeps it from joining the completion line.
+And the host's bash is not the fork's — a construct the fork's older bash
+rejects would pass here and fail there, at run time, as it would under
+`bash -c`.
+
 ## Known limitations (by design, for now)
 
 - stdout and stderr are merged: both are the same PTY.

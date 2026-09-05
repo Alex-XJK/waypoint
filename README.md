@@ -298,8 +298,10 @@ fork's shell byte for byte, as `bash -c` would receive it. Quote the whole
 command; pipes, redirections, `$VAR` and globs are then resolved inside the
 fork. Passing several arguments (`-- cat "a b"`) is refused rather than joined —
 it usually means a host shell has already parsed the command once. A command
-bash cannot parse (an unterminated quote, an open `if`) is refused before it
-reaches the fork, with bash's own diagnostic and exit status 2. `exec` exits
+bash cannot parse (an unterminated quote, an open `if`, a here-document whose
+closing `EOF` is indented and so never closes) is refused before it reaches the
+fork, with bash's own diagnostic and exit status 2 — see
+[docs/exec-protocol.md](docs/exec-protocol.md#syntax-precheck). `exec` exits
 with the command's own exit code. Commands on the same fork serialize;
 commands on different forks run concurrently.
 
