@@ -20,6 +20,7 @@ on minimal overhead by directly orchestrating existing kernel features and redes
 - **Minimal Overhead**: Direct system calls without unnecessary container abstractions
 - **Minimal File IO**: Uses multiple lower-layer designs to achieve true inter-checkpoint deduplication
 - **Simple CLI**: Straightforward command-line interface for checkpoint operations
+- **Bash Completion**: Completes commands, flags, host directories, sessions, and checkpoints
 - **Session Management**: Automatic cleanup and resource management
 
 ## Architecture 🧱
@@ -70,7 +71,8 @@ For full details, see [Installing Waypoint](./docs/INSTALL.md).
 ### Scripted Setup (Recommended)
 
 This path uses the repository `Makefile` to install system packages, build the
-binaries, install the CLI/helper pair, and run a root-level host check.
+binaries, install the CLI/helper pair and Bash completion, and run a root-level
+host check.
 
 ```bash
 git clone https://github.com/Alex-XJK/waypoint.git
@@ -146,8 +148,8 @@ CGO_ENABLED=0 go build -o bash_init ./cmd/bash-init
 #### Check Waypoint Version
 
 ```bash
-./waypoint version
-# Output: waypoint version v0.7.0
+waypoint version
+# Output: waypoint version v0.6.3
 ```
 
 You can also run the root-level host check from the setup script after manual
@@ -231,6 +233,9 @@ Save the session ID for future operations!
 Special options:
 - `--quiet` to output only the session ID, work directory, and bash PID, separated by commas.
 
+Since v0.6.3, sessions created with `build` apply the built image's `ENV` and
+`WORKDIR` settings instead of silently replacing them with the host defaults.
+
 > Credit: This `buildah`-based workflow was originally designed by [Tianle Zhou](https://www.linkedin.com/in/tian-le-zhou-99a145221/)
 in his TBench integration for v0.2.0.
 
@@ -263,8 +268,11 @@ the same fork serialize; commands on different forks run concurrently.
 
 ### 3. Checkpoint a Fork
 
-A checkpoint is an immutable snapshot of a fork's filesystem and memory. Use
-`checkpoint` to snapshot the `main` fork into a named checkpoint:
+Since v0.6.3, managed shell sessions also use unattended defaults for common
+pagers, editors, Git authentication, package-management tools, and Python
+tooling so automation does not stall on an interactive prompt.
+
+### 3. Create Checkpoints
 
 ```bash
 sudo ./waypoint checkpoint a1b2c3d4e5f6g7h8 checkpoint-name
