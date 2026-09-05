@@ -96,7 +96,7 @@ func LoadCheckpointMetadata(sessionID, checkpointID string) (*Metadata, error) {
 	if err := validateCheckpointID(checkpointID); err != nil {
 		return nil, err
 	}
-	sessionInfo, err := loadSessionInfo(sessionID)
+	sessionInfo, err := LoadSessionInfo(sessionID)
 	if err != nil {
 		return nil, err
 	}
