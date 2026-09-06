@@ -298,10 +298,11 @@ func openCompletionFifo(hostPath string) (<-chan string, error) {
 }
 
 // initShellSession blanks the prompt state (PS1/PS2/PROMPT_COMMAND may be set
-// by rc files) and waits for the shell to acknowledge over the FIFO.
+// by rc files), disables history expansion so `!` stays literal as under
+// `bash -c`, and waits for the shell to acknowledge over the FIFO.
 func initShellSession(ptyMaster *os.File, completions <-chan string) error {
 	nonce := newNonce()
-	init := fmt.Sprintf("unset PROMPT_COMMAND; PS1=; PS2=; builtin printf '%%s 0\\n' '%s' > %s\n",
+	init := fmt.Sprintf("unset PROMPT_COMMAND; PS1=; PS2=; set +H; builtin printf '%%s 0\\n' '%s' > %s\n",
 		nonce, completionFifoGuestPath)
 	if _, err := ptyMaster.WriteString(init); err != nil {
 		return err
@@ -382,11 +383,7 @@ func handleClient(conn net.Conn, ptyMaster *os.File, shellMutex *sync.Mutex, out
 	outputBuffer.Reset()
 
 	nonce := newNonce()
-	if !strings.HasSuffix(command, "\n") {
-		command += "\n"
-	}
-	command += fmt.Sprintf("builtin printf '%%s %%s\\n' '%s' \"$?\" > %s\n", nonce, completionFifoGuestPath)
-	if _, err := ptyMaster.WriteString(command); err != nil {
+	if _, err := ptyMaster.WriteString(frameCommand(command, nonce, completionFifoGuestPath)); err != nil {
 		return
 	}
 
@@ -448,6 +445,17 @@ func handleClient(conn net.Conn, ptyMaster *os.File, shellMutex *sync.Mutex, out
 			return
 		}
 	}
+}
+
+// frameCommand builds the bytes written to the PTY for one command: the
+// command, a blank line, then the completion line reporting `$?` to the FIFO
+// at fifoPath. The blank line is required: a payload ending in `\` would
+// otherwise continue onto the completion line. It leaves `$?` untouched.
+func frameCommand(command, nonce, fifoPath string) string {
+	if !strings.HasSuffix(command, "\n") {
+		command += "\n"
+	}
+	return command + "\n" + fmt.Sprintf("builtin printf '%%s %%s\\n' '%s' \"$?\" > %s\n", nonce, fifoPath)
 }
 
 // interruptShell aborts whatever the shell is doing: Ctrl-C clears a parser

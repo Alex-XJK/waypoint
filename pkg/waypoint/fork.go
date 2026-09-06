@@ -6,12 +6,14 @@ package waypoint
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -204,11 +206,14 @@ func (m *Manager) DestroyFork(forkID string) error {
 	})
 }
 
-// ExecuteForkCommand runs one shell command string in the fork's persistent
-// shell. Extra args are joined with spaces into the command string, so the
-// payload is always a single bash input, not an argv.
-func (m *Manager) ExecuteForkCommand(forkID, command string, args ...string) (*ExecResult, error) {
+// ExecuteForkCommand runs one bash input string in the fork's persistent
+// shell. The string is sent unchanged (there is no argv form) after a syntax
+// check that runs before the fork lock is taken.
+func (m *Manager) ExecuteForkCommand(forkID, command string) (*ExecResult, error) {
 	if err := validateForkID(forkID); err != nil {
+		return nil, err
+	}
+	if err := checkCommandSyntax(command); err != nil {
 		return nil, err
 	}
 	var result *ExecResult
@@ -220,11 +225,7 @@ func (m *Manager) ExecuteForkCommand(forkID, command string, args ...string) (*E
 		if f.Status != ForkStatusRunning {
 			return fmt.Errorf("fork %s is not running (status=%s)", forkID, f.Status)
 		}
-		commandString := command
-		if len(args) > 0 {
-			commandString += " " + strings.Join(args, " ")
-		}
-		commandString += "\n"
+		commandString := command + "\n"
 		var execErr error
 		result, execErr = execCommand(f.SocketPath, commandString)
 		if errors.Is(execErr, ErrForkShellDead) {
@@ -234,6 +235,40 @@ func (m *Manager) ExecuteForkCommand(forkID, command string, args ...string) (*E
 		return execErr
 	})
 	return result, err
+}
+
+// ErrCommandSyntax reports a command refused before it was sent because bash
+// could not parse it as a complete input.
+var ErrCommandSyntax = errors.New("command syntax error")
+
+// checkCommandSyntax parses command with the host's `bash -n` (parse only,
+// nothing runs) and returns ErrCommandSyntax for input that can never
+// complete, which would leave the fork's shell stuck in a continuation
+// prompt. Hosts without bash skip the check.
+func checkCommandSyntax(command string) error {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		return nil
+	}
+	cmd := exec.Command(bash, "-n")
+	cmd.Args[0] = "bash" // bash prefixes diagnostics with argv[0]; keep it short
+	// Feed the script on stdin: -c would hit the argument length limit.
+	cmd.Stdin = strings.NewReader(command)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	diag := strings.TrimSpace(stderr.String())
+	// A here-document that runs to end of input is only a warning to
+	// `bash -n`, but in the fork it would swallow everything after it.
+	if runErr == nil && !strings.Contains(diag, "delimited by end-of-file") {
+		return nil
+	}
+	if diag == "" {
+		diag = runErr.Error()
+	}
+	// The caller names the tool; drop bash's own name from each line.
+	diag = strings.ReplaceAll(diag, "bash: ", "")
+	return fmt.Errorf("%w: %s", ErrCommandSyntax, diag)
 }
 
 // --- exec protocol client ---

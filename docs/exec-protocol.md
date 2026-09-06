@@ -56,7 +56,10 @@ Consequences:
 
 - PTY echo is disabled and `PS1`/`PS2`/`PROMPT_COMMAND` are blanked during a
   startup handshake, so the PTY carries *only* program output — no marker
-  scraping, echo stripping, or prompt heuristics.
+  scraping, echo stripping, or prompt heuristics. The handshake also runs
+  `set +H`, so `!` is literal as under `bash -c`.
+- A blank line separates the payload from the completion line, so a payload
+  ending in `\` (a line continuation) cannot swallow it. `$?` is unaffected.
 - The startup handshake runs before the socket is created, so the socket's
   existence proves the shell executes commands (not just that bash_init is
   alive).
@@ -70,13 +73,36 @@ Consequences:
   and waits briefly for the completion line so the next command starts in
   sync.
 - **Parser desync** (a payload with an unterminated quote/heredoc swallows
-  the completion line): nothing completes until the client disconnects or
-  the backstop fires; the Ctrl-C sent then clears bash's continuation state.
+  the completion line): the client refuses such payloads up front (see
+  [Syntax precheck](#syntax-precheck)). Should one reach the server anyway,
+  nothing completes until the client disconnects or the backstop fires; the
+  Ctrl-C sent then clears bash's continuation state.
 - **Shell death**: a liveness check turns "completion will never arrive"
   into an immediate `dead` response instead of a hang.
 - **Memory bounds**: request headers are limited to 32 bytes, command payloads
   to 1 MiB, and retained command output to 16 MiB. The PTY drainer always
   consumes excess bytes so a noisy child cannot block the supervisor.
+
+## Syntax precheck
+
+Before taking the fork lock, the client parses the payload with the host's
+`bash -n` (parse only; nothing is executed or expanded). The payload is fed on
+stdin, so it is not subject to the per-argument length limit. Hosts without
+bash skip the check.
+
+- A syntax error (an unterminated quote, an open `if`/`for`/`case`, a stray
+  `)`) makes bash exit 2 with a diagnostic. The client returns it as
+  `ErrCommandSyntax`, minus the `bash: ` prefix, and the CLI exits 2 like
+  `bash -c`.
+- An unterminated here-document is only a *warning* to `bash -n` (exit 0), but
+  in a fork it would swallow the completion line, so payloads whose diagnostics
+  contain `delimited by end-of-file` are refused too. The usual cause is an
+  indented terminator: `EOF` must start at column 0, and `<<-EOF` strips tabs
+  only, never spaces.
+
+The check is not exhaustive: a trailing `\` is complete input and passes (the
+framing's blank line handles it), and a construct the fork's bash rejects but
+the host's accepts fails at run time, as it would under `bash -c`.
 
 ## Known limitations (by design, for now)
 
@@ -85,7 +111,7 @@ Consequences:
   during a command it is captured as that command's output.
 - No incremental streaming; up to 16 MiB of output is delivered when the
   command completes.
-- The payload is one bash input string, not an argv — quoting is the
-  caller's responsibility.
+- The payload is one bash input string, not an argv; the CLI accepts exactly
+  one argument after `--`, and quoting inside it is the caller's responsibility.
 - Fully interactive programs (REPLs, pagers) block the exec until the
   client disconnects; the protocol is command/response.
