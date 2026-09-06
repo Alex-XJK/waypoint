@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.7.0 — Concurrent Fork Architecture
+**Many live forks from one immutable checkpoint, running and diverging in parallel**
+- Redesigned sessions as an immutable checkpoint DAG plus live forks, each running in private PID, mount, IPC, and UTS namespaces over its own OverlayFS layer and sharing only the host network.
+- Added `fork`, `snapshot` (with `--park`), `destroy`, `suspend`, and `cp` to create, seal, retire, pause, and exchange files with live forks; `list --json` reports checkpoints and forks.
+- Replaced the destructive `restore` with forking from any checkpoint, and made `exec` target a fork with a single Bash command string.
+- Rewrote the exec protocol with out-of-band completion signalling, real exit codes, and bounded request and output sizes.
+- Added optional tmpfs CRIU images and phase timing, a configurable session registry directory, hardened teardown and identifier validation, and a statically linked `bash_init`.
+- Added architecture and exec-protocol guides, and an asserting end-to-end test scripts.
+
 ## v0.6.3 — Image Environment and Bash Completion
 **Dockerfile runtime fidelity and command-line usability improvements**
 - Applied `ENV` and `WORKDIR` settings from built images to Waypoint shell sessions.

@@ -23,9 +23,10 @@ Fork     = a live, mutable instance of one checkpoint   (a running shell)
 
 - **Checkpoint**: sealed OverlayFS upper layer + CRIU memory image. Immutable.
   Nodes form a DAG via `ParentID`; `LayerIDs` is the resolved layer chain.
-- **Fork**: its own upper/work dirs, its own PID+mount+net+IPC+UTS namespaces,
-  its own restored shell + control socket. Many can run at once from one
-  checkpoint.
+- **Fork**: its own upper/work dirs, its own PID+mount+IPC+UTS namespaces (the
+  host network namespace is shared, so forks share a port space with each other
+  and the host), its own restored shell + control socket. Many can run at once
+  from one checkpoint.
 - **`main`** is just the first fork, created by `init --shell`.
 - **snapshot** seals a live fork into a new checkpoint and rebases the fork
   onto it — this is what makes recursive forking ordinary. The CLI's
@@ -107,7 +108,7 @@ Two binaries, one library:
   `criu dump` command, including the `--external mnt[...]:waypoint-work` mapping
   so CRIU treats the overlay as externally managed); and the restore side —
   `runRestoreHelper` / `RunForkRestoreChildFromArgs` / `restoreForkChild`
-  re-exec into fresh mount/net/IPC namespaces, mount this fork's overlay at
+  re-exec into fresh mount/IPC namespaces, mount this fork's overlay at
   the canonical path, and `criu restore` the image. Host compatibility (criu
   present, recent enough, kernel features, the ARM64 PAC / CRIU-4.0 rule) is
   validated out of band by `./setup check`, not at runtime.
@@ -380,7 +381,7 @@ CLI (main.go)
          startup failures relay the loader's error via the shell log)
        compute canonical socket:
          <session>/temp/shell_<session>.sock
-       start host bash_init in NEWPID|NEWNS|NEWNET|NEWIPC|NEWUTS namespaces
+       start host bash_init in NEWPID|NEWNS|NEWIPC|NEWUTS namespaces
          with a fixed OCI-style guest env (PATH, HOME, TERM, LANG — never
          the invoking user's environment, which would be baked into every
          checkpoint):
@@ -418,7 +419,6 @@ waypoint-provided namespaces)
       mount a private devpts on /dev/pts      (newinstance, ptmxmode=0666)
       symlink /dev/ptmx -> pts/ptmx
     mount /proc, /sys
-    bring loopback up
   execve("/.waypoint/bash_init", socket, "/")
 
 bash_init second image (loaded from inside the overlay)
@@ -459,9 +459,8 @@ CLI (main.go)
          withSessionLock: newForkRecord + mkdir upper/work/temp + save fork.json
          withForkLock:
            runRestoreHelper -> re-exec `__waypoint_restore_fork_child`
-             new NEWNS|NEWNET|NEWIPC namespaces          (restoreForkChild)
+             new NEWNS|NEWIPC namespaces                 (restoreForkChild)
              mount f1's overlay at <session>/work        (mountOverlay)
-             bring loopback up
              criu restore --restore-detached --pidfile   (CRIU rebuilds the
                                                           pid and uts ns from
                                                           the image)
