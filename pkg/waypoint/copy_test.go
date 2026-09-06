@@ -389,7 +389,11 @@ func TestCopyToForkRejectsTrailingSlashSymlinkSource(t *testing.T) {
 	}
 }
 
-func TestCopyRejectsDestinationTypeConflicts(t *testing.T) {
+// Type conflicts at the destination are resolved by replacing the existing
+// entry, except that a directory is never replaced by a non-directory (see
+// TestCopyRejectsRegularFileOverDirectory). A symlink is replaced rather than
+// written through: the link entry is swapped, so what it points at is untouched.
+func TestCopyReplacesDestinationTypeConflicts(t *testing.T) {
 	destinationPath := t.TempDir()
 	destination, err := os.OpenRoot(destinationPath)
 	if err != nil {
@@ -408,16 +412,32 @@ func TestCopyRejectsDestinationTypeConflicts(t *testing.T) {
 	if err := os.Symlink("target", filepath.Join(destinationPath, "link")); err != nil {
 		t.Fatal(err)
 	}
-	if err := copyIntoRoot(hostCopySource{}, fileSource, destination, "link"); err == nil {
-		t.Fatal("regular file replaced a destination symlink")
+
+	// A regular file replaces the symlink itself; the file it pointed at is
+	// left untouched (the write did not follow the link).
+	if err := copyIntoRoot(hostCopySource{}, fileSource, destination, "link"); err != nil {
+		t.Fatalf("copyIntoRoot(file over symlink): %v", err)
 	}
+	if info, err := os.Lstat(filepath.Join(destinationPath, "link")); err != nil {
+		t.Fatal(err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("link is still a symlink; it should have been replaced")
+	}
+	assertFileContents(t, filepath.Join(destinationPath, "link"), "data")
 	assertFileContents(t, linkTarget, "sentinel")
 
+	// A directory replaces an existing regular file.
 	directorySource := t.TempDir()
-	if err := copyIntoRoot(hostCopySource{}, directorySource, destination, "target"); err == nil {
-		t.Fatal("directory replaced a destination regular file")
+	writeCopyTestFile(t, filepath.Join(directorySource, "inner"), "inner", 0o644)
+	if err := copyIntoRoot(hostCopySource{}, directorySource, destination, "target"); err != nil {
+		t.Fatalf("copyIntoRoot(directory over file): %v", err)
 	}
-	assertFileContents(t, linkTarget, "sentinel")
+	if info, err := os.Lstat(linkTarget); err != nil {
+		t.Fatal(err)
+	} else if !info.IsDir() {
+		t.Fatal("target is not a directory; the regular file should have been replaced")
+	}
+	assertFileContents(t, filepath.Join(linkTarget, "inner"), "inner")
 	assertNoCopyTemps(t, destinationPath)
 }
 
@@ -485,5 +505,116 @@ func assertNoCopyTemps(t *testing.T, dir string) {
 		if strings.HasPrefix(entry.Name(), ".waypoint-copy-") {
 			t.Fatalf("temporary copy entry was not cleaned up: %s", filepath.Join(dir, entry.Name()))
 		}
+	}
+}
+
+// A destination that is a symlink is replaced by the copied file, not written
+// through: the entry itself is swapped inside the root, so a symlink pointing
+// outside the root cannot redirect the write. This is the leaf case of the
+// break-filter regression, where an agent left /tests/filter.py -> /app/filter.py.
+func TestCopyReplacesSymlinkLeafWithoutWritingThrough(t *testing.T) {
+	rootPath := t.TempDir()
+	outsidePath := t.TempDir()
+	sentinel := filepath.Join(outsidePath, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// An absolute symlink out of the root, standing where the file will land.
+	if err := os.Symlink(sentinel, filepath.Join(rootPath, "target")); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(source, []byte("replacement"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if err := copyIntoRoot(hostCopySource{}, source, root, "target"); err != nil {
+		t.Fatalf("copyIntoRoot() over a symlink leaf: %v", err)
+	}
+	// The link is gone; a real file with the source contents is in its place.
+	info, err := os.Lstat(filepath.Join(rootPath, "target"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("destination is still a symlink; it should have been replaced")
+	}
+	assertFileContents(t, filepath.Join(rootPath, "target"), "replacement")
+	// The write must not have followed the link out of the root.
+	assertFileContents(t, sentinel, "sentinel")
+	assertNoCopyTemps(t, rootPath)
+}
+
+// The break-filter regression proper: merging a source directory that holds a
+// real filter.py into a destination directory whose filter.py is a symlink.
+// The symlink child is replaced; unrelated siblings are kept.
+func TestCopyDirectoryMergeReplacesSymlinkChild(t *testing.T) {
+	source := t.TempDir()
+	writeCopyTestFile(t, filepath.Join(source, "filter.py"), "REAL-FROM-TESTS", 0o644)
+	writeCopyTestFile(t, filepath.Join(source, "test_outputs.py"), "checks", 0o644)
+
+	rootPath := t.TempDir()
+	destination := filepath.Join(rootPath, "tests")
+	if err := os.MkdirAll(destination, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCopyTestFile(t, filepath.Join(destination, "keep"), "keep", 0o644)
+	// What an agent following the task's hint leaves behind.
+	if err := os.Symlink("/app/filter.py", filepath.Join(destination, "filter.py")); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if err := copyIntoRoot(hostCopySource{}, source, root, "tests"); err != nil {
+		t.Fatalf("copyIntoRoot(dir merge over symlink child): %v", err)
+	}
+	info, err := os.Lstat(filepath.Join(destination, "filter.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("tests/filter.py is still a symlink; it should have been replaced")
+	}
+	assertFileContents(t, filepath.Join(destination, "filter.py"), "REAL-FROM-TESTS")
+	assertFileContents(t, filepath.Join(destination, "test_outputs.py"), "checks")
+	assertFileContents(t, filepath.Join(destination, "keep"), "keep")
+	assertNoCopyTemps(t, destination)
+}
+
+// A directory is never replaced by a file: the one type mismatch that stays a
+// hard error, since silently discarding a directory would lose data.
+func TestCopyRejectsRegularFileOverDirectory(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rootPath, "target", "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(source, []byte("file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	err = copyIntoRoot(hostCopySource{}, source, root, "target")
+	if err == nil {
+		t.Fatal("copyIntoRoot(file over directory) succeeded; want an error")
+	}
+	if !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("error = %v, want it to mention the directory conflict", err)
 	}
 }
