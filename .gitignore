@@ -30,6 +30,11 @@ go.work.sum
 # env file
 .env
 
+# Local examples/notes not meant for the public repo
+/review.md
+/review-latent-bugs.md
+/examples/agent-search/
+
 # Editor/IDE
 .idea/
 .vscode/

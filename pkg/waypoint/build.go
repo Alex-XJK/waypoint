@@ -1,11 +1,13 @@
 package waypoint
 
-// Dockerfile-based build process
+// Environment building: buildah-based rootfs builds from a Dockerfile, and
+// StartShell, which stages bash_init into the overlay and launches it in
+// fresh namespaces.
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/sha1"
+	"debug/elf"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,6 +21,49 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+// BuildEnvironment builds a rootfs from a Dockerfile, mounts the session
+// overlay on top of it, and starts the shell inside.
+func (m *Manager) BuildEnvironment(dockerfileDir string, quiet bool) (string, int, error) {
+	originalDir := filepath.Join(m.baseDir, "original")
+
+	// Ensure originalDir is clean
+	if err := os.RemoveAll(originalDir); err != nil {
+		return "", 0, fmt.Errorf("failed to clean original directory: %w", err)
+	}
+	if err := os.MkdirAll(originalDir, 0755); err != nil {
+		return "", 0, fmt.Errorf("failed to create original directory: %w", err)
+	}
+
+	// Build from Dockerfile to create a virtual system environment
+	var imageConfig ImageConfig
+	if err := BuildFromDockerfile(dockerfileDir, originalDir, quiet, &imageConfig); err != nil {
+		return "", 0, fmt.Errorf("failed to build from Dockerfile: %w", err)
+	}
+
+	m.imageEnv = imageConfig.Env
+	m.imageWorkDir = imageConfig.WorkingDir
+	m.originalDir = originalDir
+
+	// Initialize overlay environment on top of it
+	workDir, err := m.InitEnvironment(originalDir)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to initialize overlay environment: %w", err)
+	}
+
+	// Launch bash_init in the background inside fresh namespaces
+	pid, _, err := m.StartShell(workDir)
+	if err != nil {
+		return workDir, pid, fmt.Errorf("failed to start shell in environment: %w", err)
+	}
+
+	// Update session info with originalDir, workOverlay, shell PID, and socket path
+	if err := updateSessionEnvironment(m.sessionID, m.originalDir, m.workOverlay); err != nil {
+		return workDir, pid, fmt.Errorf("failed to update session info: %w", err)
+	}
+
+	return workDir, pid, nil
+}
 
 // imageRefComponent sanitizes s (a build-context directory basename) into a
 // string usable inside a buildah/Docker image reference. Reference name
@@ -123,104 +168,62 @@ func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool, cfg *Im
 		return err
 	}
 
-	// 5. Copy rootfs -> workspace
-	if _, err := run(exec.Command(
-		"rsync", "-a",
-		rootfs+"/",
-		workspaceDir,
-	), false); err != nil {
-		if _, err := run(exec.Command(
-			"bash", "-lc",
-			fmt.Sprintf("cp -a '%s/.' '%s'", rootfs, workspaceDir),
-		), false); err != nil {
-			return fmt.Errorf("failed to copy rootfs: %w", err)
-		}
-	}
+	// 5. Copy rootfs -> workspace. The sandbox /dev (device nodes, devpts,
+	// shm) is assembled at session start by bash_init's mountDeviceRuntime.
+	return reflinkCopy(rootfs, workspaceDir)
+}
 
-	// 6. Ensure basic char devices exist
-	devDir := filepath.Join(workspaceDir, "dev")
-	if err := os.MkdirAll(devDir, 0755); err != nil {
-		return fmt.Errorf("failed to create dev directory: %w", err)
+// reflinkCopy copies the contents of srcDir into dstDir with cp
+// --reflink=auto: instant copy-on-write clones on reflink-capable
+// filesystems (xfs, btrfs), silently degrading to a regular copy elsewhere.
+func reflinkCopy(srcDir, dstDir string) error {
+	out, err := exec.Command("cp", "-a", "--reflink=auto", srcDir+"/.", dstDir).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("copy %s -> %s failed: %w: %s", srcDir, dstDir, err, strings.TrimSpace(string(out)))
 	}
-
-	// Create a mimic /dev/shm with 0x1777
-	shmDir := filepath.Join(devDir, "shm")
-	if fi, err := os.Lstat(shmDir); err == nil {
-		if !fi.IsDir() {
-			if rmErr := os.Remove(shmDir); rmErr != nil {
-				return fmt.Errorf("failed to remove existing %s: %w", shmDir, rmErr)
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("failed to stat %s: %w", shmDir, err)
-	}
-	if err := os.MkdirAll(shmDir, 0o1777); err != nil {
-		return fmt.Errorf("failed to create shm directory: %w", err)
-	}
-	if err := os.Chmod(shmDir, 0o1777); err != nil {
-		return fmt.Errorf("failed to chmod %s: %w", shmDir, err)
-	}
-	_ = os.Chown(shmDir, 0, 0)
-
-	type devSpec struct {
-		name  string
-		major uint32
-		minor uint32
-		perm  os.FileMode
-	}
-	devices := []devSpec{
-		{"null", 1, 3, 0o666},
-		{"zero", 1, 5, 0o666},
-		{"random", 1, 8, 0o666},
-		{"urandom", 1, 9, 0o666},
-	}
-
-	// Helper to (re)create a char device with given major/minor
-	makeChar := func(path string, major, minor uint32, perm os.FileMode) error {
-		// Remove existing non-char file
-		if fi, err := os.Lstat(path); err == nil {
-			if fi.Mode()&os.ModeDevice == 0 || fi.Mode()&os.ModeCharDevice == 0 {
-				if rmErr := os.Remove(path); rmErr != nil {
-					return fmt.Errorf("failed to remove existing %s: %w", path, rmErr)
-				}
-			}
-		}
-		// Create node if missing
-		if _, err := os.Lstat(path); os.IsNotExist(err) {
-			dev := unix.Mkdev(major, minor)
-			mode := uint32(unix.S_IFCHR | uint32(perm&0o777))
-			if err := unix.Mknod(path, mode, int(dev)); err != nil {
-				return fmt.Errorf("mknod %s failed (major=%d minor=%d): %w", path, major, minor, err)
-			}
-		}
-		// Ensure permissions are as requested (umask-safe)
-		if err := os.Chmod(path, perm); err != nil {
-			return fmt.Errorf("chmod %s failed: %w", path, err)
-		}
-		// Ensure ownership root:root (best-effort)
-		_ = os.Chown(path, 0, 0)
-		return nil
-	}
-
-	for _, d := range devices {
-		p := filepath.Join(devDir, d.name)
-		if err := makeChar(p, d.major, d.minor, d.perm); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
+// StageEnvironment snapshots srcDir into the session's private original/
+// directory, which serves as the overlay lowerdir for the session's whole
+// lifetime. Sessions never use the caller's directory directly: OverlayFS
+// does not support a lower layer changing underneath a mounted overlay, so
+// the source must be immune to later edits.
+func (m *Manager) StageEnvironment(srcDir string) (string, error) {
+	absDir, err := filepath.Abs(srcDir)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(absDir); err != nil {
+		return "", fmt.Errorf("source directory not usable: %w", err)
+	}
+	originalDir := filepath.Join(m.baseDir, "original")
+	if err := os.RemoveAll(originalDir); err != nil {
+		return "", fmt.Errorf("failed to clean original directory: %w", err)
+	}
+	if err := os.MkdirAll(originalDir, 0o755); err != nil {
+		return "", err
+	}
+	if err := reflinkCopy(absDir, originalDir); err != nil {
+		return "", err
+	}
+	return originalDir, nil
+}
+
+// PrepareNetworkDeps seeds minimal name-resolution files into a session
+// rootfs when the image ships none. Called by InitEnvironment against the
+// merged overlay view, so both `init` and `build` sessions get it and the
+// staged files land in the main fork's upper layer, never in the source.
 func PrepareNetworkDeps(rootfs string) error {
 	// DNS
 	if err := copyIfBlank(rootfs, "/etc/resolv.conf"); err != nil {
 		return err
 	}
 
-	// Minimal local files for name resolution
+	// Minimal local files for name resolution; "waypoint" is the sandbox
+	// hostname set by bash_init.
 	const hosts = "" +
-		"127.0.0.1 localhost\n" +
+		"127.0.0.1 localhost waypoint\n" +
 		"::1 localhost ip6-localhost ip6-loopback\n"
 	if err := writeIfBlank(filepath.Join(rootfs, "/etc/hosts"), []byte(hosts), 0o644); err != nil {
 		return err
@@ -235,17 +238,73 @@ func PrepareNetworkDeps(rootfs string) error {
 		return err
 	}
 
-	// APT signature verification
-	if err := ensureBinAndDeps(rootfs, "/usr/bin/gpgv"); err != nil {
-		return err
-	}
-
-	_ = copyIfBlank(rootfs, "/usr/share/keyrings/ubuntu-archive-keyring.gpg")
-	_ = copyIfBlank(rootfs, "/usr/share/keyrings/ubuntu-archive-removed-keys.gpg")
-	_ = copyIfBlank(rootfs, "/etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg")
-	_ = copyIfBlank(rootfs, "/etc/apt/trusted.gpg.d/ubuntu-keyring-2012-cdimage.gpg")
-
 	return nil
+}
+
+// baseGuestEnv is the fixed, OCI-style environment every session starts with.
+// It deliberately does not inherit the invoking user's: the guest environment
+// is process state, so anything here is baked into every checkpoint and fork
+// of the session, and inheriting would make guest behavior depend on whoever
+// happened to run `waypoint init`.
+var baseGuestEnv = []string{
+	"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+	"HOME=/root",
+	"TERM=xterm",
+	"LANG=C.UTF-8",
+}
+
+// unattendedGuestEnv keeps interactive tooling from stalling a session that
+// has nobody on the other end. A fork's shell is driven over a socket, so a
+// pager waiting for a keypress or apt waiting for a confirmation does not
+// merely look wrong — it hangs the command until the exec timeout.
+//
+// These belong in the session's fixed environment rather than in bash_init's
+// inherited one: they are part of what a checkpoint captures, so every fork
+// and every recursive snapshot must see exactly the same set.
+var unattendedGuestEnv = []string{
+	// Pagers: stream output directly instead of waiting for navigation input.
+	"PAGER=cat",
+	"GIT_PAGER=cat",
+	"SYSTEMD_PAGER=cat",
+
+	// Editors: return immediately instead of opening an interactive editor.
+	"EDITOR=true",
+	"VISUAL=true",
+	"GIT_EDITOR=true",
+	"GIT_SEQUENCE_EDITOR=true",
+
+	// Git authentication: fail instead of prompting; accept new SSH host keys.
+	"GIT_TERMINAL_PROMPT=0",
+	"GIT_ASKPASS=/bin/true",
+	"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+
+	// Debian tools: disable prompts and report restarts without performing them.
+	"DEBIAN_FRONTEND=noninteractive",
+	"NEEDRESTART_MODE=l",
+
+	// opam 2.0 uses OPAMYES; newer releases prefer OPAMCONFIRMLEVEL.
+	"OPAMYES=1",
+	"OPAMCONFIRMLEVEL=unsafe-yes",
+
+	// Python/pip: emit output promptly and disable prompts or dynamic UI.
+	"PYTHONUNBUFFERED=1",
+	"PIP_NO_INPUT=1",
+	"PIP_DISABLE_PIP_VERSION_CHECK=1",
+	"PIP_PROGRESS_BAR=off",
+}
+
+// waypointPlumbingEnv is bash_init's own configuration. bash_init strips
+// every WAYPOINT_* variable before handing the environment to the shell, so
+// these never reach the guest.
+var waypointPlumbingEnv = []string{
+	"WAYPOINT_NAMESPACED=1",
+	"WAYPOINT_REEXEC_PATH=/.waypoint/bash_init",
+}
+
+// ImageConfig is the part of a built image's OCI config the session adopts.
+type ImageConfig struct {
+	Env        []string
+	WorkingDir string
 }
 
 type imageInspect struct {
@@ -257,74 +316,126 @@ type imageInspect struct {
 	} `json:"OCIv1"`
 }
 
+// inspectImageConfig reads the built image's env and working directory. It
+// reads the *image*, not the Dockerfile, so values inherited from the base
+// image (a `FROM python:3.12` PATH, say) come along too -- parsing the
+// Dockerfile would see only what that file itself declares.
 func inspectImageConfig(imageTag string, run func(*exec.Cmd, bool) (string, error)) (ImageConfig, error) {
 	out, err := run(exec.Command("buildah", "inspect", "--type", "image", imageTag), true)
 	if err != nil {
 		return ImageConfig{}, err
 	}
-
 	var inspected imageInspect
 	if err := json.Unmarshal([]byte(out), &inspected); err != nil {
 		return ImageConfig{}, fmt.Errorf("failed to parse buildah inspect output: %w", err)
 	}
-
 	return ImageConfig{
 		Env:        inspected.OCIv1.Config.Env,
 		WorkingDir: inspected.OCIv1.Config.WorkingDir,
 	}, nil
 }
 
-func hasEnvKey(env []string, key string) bool {
-	prefix := key + "="
-	for _, entry := range env {
-		if strings.HasPrefix(entry, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
+// sessionEnv assembles the environment bash_init is launched with: the fixed
+// OCI-style base, then the built image's env, then the unattended settings,
+// then Waypoint's own variables.
+//
+// Order is the whole design. Each layer overrides the one before it:
+//
+//   - the image overrides the base, so a `FROM python:3.12` PATH wins and an
+//     image declaring none simply keeps the default;
+//   - the unattended settings override the image, because they are an
+//     anti-hang floor rather than a preference -- a fork's shell is driven
+//     over a socket, so an image that put PAGER back to less would hang
+//     commands until the exec timeout;
+//   - WAYPOINT_* comes last and can never be shadowed by an image, because
+//     bash_init's re-exec depends on it.
+//
+// Overrides are collapsed here rather than left for os/exec to dedup, so the
+// guest environment stays a property of this function and no duplicate key
+// ever reaches the shell. The result is process state, baked into every
+// checkpoint and fork of this session, which is why forks need no separate
+// handling.
 func (m *Manager) sessionEnv() []string {
-	var env []string
-	if len(m.imageEnv) == 0 {
-		env = os.Environ()
-	} else {
-		env = append(env, m.imageEnv...)
-		if !hasEnvKey(env, "PATH") {
-			env = append(env, FallbackPath)
-		}
-		if !hasEnvKey(env, "HOME") {
-			env = append(env, "HOME=/root")
-		}
-		if term := os.Getenv("TERM"); term != "" && !hasEnvKey(env, "TERM") {
-			env = append(env, "TERM="+term)
+	layered := make([]string, 0,
+		len(baseGuestEnv)+len(m.imageEnv)+len(unattendedGuestEnv)+len(waypointPlumbingEnv))
+	layered = append(layered, baseGuestEnv...)
+	layered = append(layered, m.imageEnv...)
+	layered = append(layered, unattendedGuestEnv...)
+	layered = append(layered, waypointPlumbingEnv...)
+
+	// Keep each key's final value, at the position that value was set.
+	winner := make(map[string]int, len(layered))
+	for i, entry := range layered {
+		if key := envKey(entry); key != "" {
+			winner[key] = i
 		}
 	}
-
+	env := make([]string, 0, len(layered))
+	for i, entry := range layered {
+		key := envKey(entry)
+		// A malformed entry has no key to override or be overridden by; an
+		// image is free to carry one, so pass it through untouched.
+		if key == "" || winner[key] == i {
+			env = append(env, entry)
+		}
+	}
 	return env
 }
 
-// StartShell launches a new chroot-embedded bash_init process at the given workDir.
+// envKey returns the KEY of a KEY=VALUE entry, or "" if it has no key.
+func envKey(entry string) string {
+	if i := strings.IndexByte(entry, '='); i > 0 {
+		return entry[:i]
+	}
+	return ""
+}
+
+// StartShell launches bash_init in fresh namespaces, pivoted into workDir.
 // On success, it updates the session info with the shell PID and socket path for later use.
 func (m *Manager) StartShell(workDir string) (int, string, error) {
-	// Locate bash_init binary
+	// Locate bash_init binary and stage it inside the overlay
 	bashInitSrc := DefaultBashInitSrc
 	if _, err := os.Stat(bashInitSrc); os.IsNotExist(err) {
 		return ShellNotEnabled, "", fmt.Errorf("bash_init binary not found at %s", bashInitSrc)
 	}
+	// bash_init re-execs from inside the session rootfs, where host
+	// libraries are unavailable, so it must be statically linked.
+	if err := requireStaticBinary(bashInitSrc); err != nil {
+		return ShellNotEnabled, "", err
+	}
+	if err := copyFile(bashInitSrc, filepath.Join(workDir, ".waypoint", "bash_init")); err != nil {
+		return ShellNotEnabled, "", fmt.Errorf("failed to stage bash_init in session root: %w", err)
+	}
 
-	socketPath := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.sock", m.sessionID))
+	canonicalSocketPath := m.canonicalSocketPath()
+	hostSocketPath := filepath.Join(workDir, strings.TrimPrefix(canonicalSocketPath, string(filepath.Separator)))
+	if err := os.MkdirAll(filepath.Dir(hostSocketPath), 0o777); err != nil {
+		return ShellNotEnabled, "", fmt.Errorf("failed to create shell socket directory: %w", err)
+	}
+	logPath := m.shellLogPath()
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return ShellNotEnabled, "", fmt.Errorf("failed to create shell log directory: %w", err)
+	}
 
 	// Judge /bin/bash pre-requisite for bash_init
 	bashPath := filepath.Join(workDir, "bin/bash")
 	if _, err := os.Stat(bashPath); os.IsNotExist(err) {
 		return ShellNotEnabled, "", fmt.Errorf("bash pre-requisite not met: %s does not exist", bashPath)
 	}
+	// The rootfs must ship bash's own libraries; nothing is healed from the
+	// host. A rootfs missing one fails the startup handshake, and the shell
+	// log surfaced below carries the loader's error naming the library.
 
-	cmd := exec.Command(bashInitSrc, socketPath, workDir, m.imageWorkDir)
+	cmd := exec.Command(bashInitSrc, canonicalSocketPath, workDir, m.imageWorkDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid: true, // new session = no controlling TTY
+		Cloneflags: uintptr(unix.CLONE_NEWPID | unix.CLONE_NEWNS | unix.CLONE_NEWIPC | unix.CLONE_NEWUTS),
+		Setsid:     true, // new session = no controlling TTY
 	}
+	// Sessions get a fixed, OCI-style environment instead of inheriting the
+	// invoking user's: the guest environment is process state, so anything
+	// passed here is baked into every checkpoint and fork of this session (and
+	// would make guest behavior depend on the host shell's config). See
+	// sessionEnv for the layering.
 	cmd.Env = m.sessionEnv()
 
 	// stdin -> /dev/null
@@ -332,14 +443,14 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	if err != nil {
 		return ShellNotEnabled, "", fmt.Errorf("failed to open /dev/null: %w", err)
 	}
+	defer devNull.Close()
 	cmd.Stdin = devNull
 
-	// stdout/stderr -> log file
-	logPath := filepath.Join(m.baseDir, "temp", fmt.Sprintf("shell_%s.log", m.sessionID))
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		return ShellNotEnabled, "", fmt.Errorf("failed to open log file: %w", err)
+		return ShellNotEnabled, "", fmt.Errorf("failed to open shell startup log: %w", err)
 	}
+	defer logFile.Close()
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
@@ -347,10 +458,29 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	if err := cmd.Start(); err != nil {
 		return ShellNotEnabled, "", fmt.Errorf("failed to start bash_init: %w", err)
 	}
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
 
 	// Update shell PID and socket path in session info
 	m.shellPid = cmd.Process.Pid
-	m.shellSocket = socketPath
+	m.shellStartTime, _ = procStartTime(m.shellPid) // 0 on failure = unverified kill
+	m.shellSocket = socketPathThroughProcRoot(m.shellPid, canonicalSocketPath)
+	// Must outlast bash_init's 10s startup handshake: a shell that dies on
+	// startup (e.g. a rootfs missing one of bash's libraries) is reported
+	// through the shell log, which only carries the shell's own error output
+	// once the handshake has given up.
+	if err := waitForShellSocket(m.shellSocket, waitCh, logPath, 15*time.Second); err != nil {
+		_ = cmd.Process.Kill()
+		m.shellPid = ShellNotEnabled
+		m.shellStartTime = 0
+		m.shellSocket = ""
+		return ShellNotEnabled, "", err
+	}
+	if err := m.saveMainFork(m.shellPid, m.shellSocket, canonicalSocketPath, logPath); err != nil {
+		return m.shellPid, m.shellSocket, fmt.Errorf("failed to save main fork: %w", err)
+	}
 
 	// Save updated session info
 	if err := saveSessionInfo(m.sessionID, m); err != nil {
@@ -360,51 +490,65 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	return m.shellPid, m.shellSocket, nil
 }
 
-func ensureBinAndDeps(rootfs, bin string) error {
-	if err := copyIfBlank(rootfs, bin); err != nil {
-		return err
-	}
+func waitForShellSocket(path string, waitCh <-chan error, logPath string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		select {
+		case err := <-waitCh:
+			if err == nil {
+				err = fmt.Errorf("bash_init exited")
+			}
+			return fmt.Errorf("bash_init exited before shell socket became ready: %w\nstartup log %s:\n%s", err, logPath, readRecentFile(logPath, 16*1024))
+		default:
+		}
 
-	deps, err := lddPaths(bin)
-	if err != nil {
-		return err
+		if err := dialUnixSocket(path, 100*time.Millisecond); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for shell socket %s: %v\nstartup log %s:\n%s", path, lastErr, logPath, readRecentFile(logPath, 16*1024))
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
-	for _, dep := range deps {
-		if err := copyIfBlank(rootfs, dep); err != nil {
-			return err
+}
+
+func readRecentFile(path string, maxBytes int) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("(unable to read log: %v)", err)
+	}
+	if len(data) > maxBytes {
+		data = data[len(data)-maxBytes:]
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return "(empty)"
+	}
+	return string(data)
+}
+
+// requireStaticBinary rejects a dynamically linked bash_init (one with an
+// ELF interpreter). Non-ELF or unreadable files pass; staging fails on
+// those with clearer errors later.
+func requireStaticBinary(path string) error {
+	f, err := elf.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	for _, p := range f.Progs {
+		if p.Type == elf.PT_INTERP {
+			return fmt.Errorf("%s is dynamically linked and cannot re-exec inside arbitrary session rootfses; rebuild it statically: CGO_ENABLED=0 go build ./cmd/bash-init", path)
 		}
 	}
 	return nil
 }
 
-func lddPaths(bin string) ([]string, error) {
-	out, err := exec.Command("ldd", bin).Output()
-	if err != nil {
-		return nil, err
-	}
-
-	var deps []string
-	seen := map[string]bool{}
-
-	s := bufio.NewScanner(bytes.NewReader(out))
-	for s.Scan() {
-		line := s.Text()
-
-		if strings.Contains(line, "not found") {
-			return nil, fmt.Errorf("ldd missing dependency: %s", strings.TrimSpace(line))
-		}
-
-		for _, f := range strings.Fields(line) {
-			if strings.HasPrefix(f, "/") && !seen[f] {
-				seen[f] = true
-				deps = append(deps, f)
-				break
-			}
-		}
-	}
-	return deps, s.Err()
-}
-
+// copyIfBlank copies a host file to the same path inside the rootfs if the
+// destination is missing or empty.
 func copyIfBlank(rootfs, hostAbs string) error {
 	if _, err := os.Stat(hostAbs); err != nil {
 		return nil
@@ -445,51 +589,4 @@ func isMissingOrBlank(path string) bool {
 		return true
 	}
 	return len(bytes.TrimSpace(data)) == 0
-}
-
-func (m *Manager) BuildEnvironment(dockerfileDir string, quiet bool) (string, int, error) {
-	originalDir := filepath.Join(m.baseDir, "original")
-
-	// Ensure originalDir is clean
-	if err := os.RemoveAll(originalDir); err != nil {
-		return "", 0, fmt.Errorf("failed to clean original directory: %w", err)
-	}
-	if err := os.MkdirAll(originalDir, 0755); err != nil {
-		return "", 0, fmt.Errorf("failed to create original directory: %w", err)
-	}
-
-	// Build from Dockerfile to create a virtual system environment
-	var imageConfig ImageConfig
-	buildahErr := BuildFromDockerfile(dockerfileDir, originalDir, quiet, &imageConfig)
-	if buildahErr != nil {
-		return "", 0, fmt.Errorf("failed to build from Dockerfile: %w", buildahErr)
-	}
-
-	m.imageEnv = imageConfig.Env
-	m.imageWorkDir = imageConfig.WorkingDir
-	if pndErr := PrepareNetworkDeps(originalDir); pndErr != nil {
-		return "", 0, fmt.Errorf("failed to prepare network: %w", pndErr)
-	}
-
-	// Now that we have a built environment ready.
-	m.originalDir = originalDir
-
-	// Initialize overlay environment on top of it
-	workDir, overlayErr := m.InitEnvironment(originalDir)
-	if overlayErr != nil {
-		return "", 0, fmt.Errorf("failed to initialize overlay environment: %w", overlayErr)
-	}
-
-	// Launch new chroot-embedded bash_init in background to set up the environment
-	pid, _, err := m.StartShell(workDir)
-	if err != nil {
-		return workDir, pid, fmt.Errorf("failed to start shell in environment: %w", err)
-	}
-
-	// Update session info with originalDir, workOverlay, shell PID, and socket path
-	if err := updateSessionEnvironment(m.sessionID, m.originalDir, m.workOverlay); err != nil {
-		return workDir, pid, fmt.Errorf("failed to update session info: %w", err)
-	}
-
-	return workDir, pid, nil
 }
