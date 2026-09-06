@@ -77,20 +77,26 @@ The installed completion is discovered automatically by the standard
 complete commands and host-directory arguments with Tab:
 
 ```bash
-waypoint res<Tab>
+waypoint sna<Tab>
 waypoint init /path/to/proj<Tab>
 ```
 
 Ubuntu's standard `sudo` completion delegates to command-specific helpers, so
 completion also works after `sudo waypoint`.
 
-The helper completes subcommands, supported flags, and directory arguments for
-`init` and `build`. It also uses the existing `waypoint list` command to
-complete session IDs for commands that take a session. For `restore` and
-`info`, it uses `waypoint list <session>` to complete existing checkpoint IDs.
-The new checkpoint ID accepted by `create`, PIDs, and `exec` arguments remain
-user-supplied. Live-state completion is best effort: failed or unrecognized
-`list` output produces no candidates and never interrupts the command line.
+The helper completes public subcommands and aliases, supported flags, directory
+arguments for `init` and `build`, and local files and directories for `cp`. It
+uses only the existing `waypoint list` and `waypoint list <session>` commands,
+with simple text filtering, to complete session, checkpoint, and fork IDs. For
+`cp`, fork IDs are offered as `fork-id:/` prefixes. It recognizes `snapshot`'s
+`--park` flag anywhere among its arguments and offers the required `--`
+separator for `exec`.
+
+New checkpoint and fork IDs, fork counts, guest commands, and guest file paths
+remain user-supplied. The current CLI has no guest-filesystem listing command;
+completion does not execute commands inside a fork. Live-state completion is
+best effort: failed or unrecognized `list` output produces no candidates and
+never interrupts the command line.
 
 For development, print or source the repository copy without installing it:
 
@@ -99,6 +105,9 @@ make completion
 source <(./setup completion)
 ```
 
+Run the focused completion checks with `bash scripts/test-bash-completion.sh`.
+They also run as part of `make test` and require no live Waypoint sessions.
+
 ## Host Dependencies
 
 Required for normal operation:
@@ -106,8 +115,7 @@ Required for normal operation:
 - Linux with root privileges
 - OverlayFS support
 - CRIU, including the `criu` and `crit` commands
-- `mount`, `umount`, and `findmnt`
-- `lsof`, `fuser`, and `ps` for cleanup and diagnostics
+- `cp` and `uname` (coreutils)
 - `/bin/bash` inside the workspace/rootfs when using `--shell`
 
 Required for building from source:
@@ -118,10 +126,6 @@ Required for building from source:
 Optional for `waypoint build`:
 
 - `buildah`
-- `rsync`
-- `bash`
-- `ldd`
-- `gpgv`
 
 Run `sudo ./setup check`, `sudo make check`, or `sudo make doctor` to inspect the current host.
 The check requires root so it can run CRIU the same way Waypoint does. Plain `criu check` is a hard gate; `criu check --all` is reported as an advisory warning because optional missing kernel features may not affect every workload. The check is diagnostic only; it does not add a Waypoint CLI sub-command.

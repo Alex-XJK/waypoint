@@ -13,6 +13,7 @@ BASH_COMPLETION_SRC="$ROOT_DIR/contrib/bash-completion/waypoint"
 SYSCONFDIR="${SYSCONFDIR:-/etc}"
 CONFIG_DIR="${CONFIG_DIR:-$SYSCONFDIR/waypoint}"
 CONFIG_PATH="${CONFIG_PATH:-$CONFIG_DIR/config.json}"
+CRIU_MIN_VERSION="${CRIU_MIN_VERSION:-4.0}"
 
 red=''; green=''; yellow=''; blue=''; reset=''
 if [[ -t 1 ]]; then
@@ -30,7 +31,7 @@ Usage: ./setup <command>
 
 Commands:
   build        Build bin/waypoint and bin/bash_init
-  test         Run Go tests
+  test         Run Bash completion and Go tests
   install      Install binaries, Bash completion, and default system config
   uninstall    Remove files installed by ./setup install
   check        Check host commands and kernel features used by Waypoint
@@ -80,13 +81,18 @@ build() {
   (
     cd "$ROOT_DIR"
     "$GO" build -trimpath -o "$BIN_DIR/waypoint" ./cmd/waypoint
-    "$GO" build -trimpath -o "$BIN_DIR/bash_init" ./cmd/bash-init
+    # bash_init is staged into the session rootfs and re-execs there as PID 1.
+    # A dynamic build then needs its ELF loader and libs copied in alongside it;
+    # a static one just runs. Build it static to remove that failure mode.
+    CGO_ENABLED=0 "$GO" build -trimpath -o "$BIN_DIR/bash_init" ./cmd/bash-init
   )
   ok "built $BIN_DIR/waypoint"
   ok "built $BIN_DIR/bash_init"
 }
 
 test_all() {
+  log "running Bash completion tests"
+  bash "$ROOT_DIR/scripts/test-bash-completion.sh"
   need_cmd "$GO" >/dev/null
   log "running Go tests"
   (cd "$ROOT_DIR" && "$GO" test ./...)
@@ -149,8 +155,8 @@ clean() {
 
 check_command_set() {
   local status=0
-  local required=(criu crit mount umount findmnt lsof fuser ps bash ldd)
-  local optional=(buildah rsync gpgv)
+  local required=(criu cp bash)
+  local optional=(buildah)
 
   log "checking required host commands"
   for cmd in "${required[@]}"; do
@@ -189,6 +195,22 @@ check_kernel() {
 
   log "checking CRIU"
   if command -v criu >/dev/null 2>&1; then
+    local criu_ver
+    criu_ver="$(criu --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -n1)"
+    if [[ -n "$criu_ver" ]]; then
+      # CRIU < 4.0 does not checkpoint arm64 pointer-authentication (PAC)
+      # keys, so PAC-built binaries (bash, glibc userland) die with SIGILL
+      # after restore. Require >= 4.0 on aarch64; report the version elsewhere.
+      if [[ "$(uname -m)" == "aarch64" ]] && ! version_ge "$criu_ver" "$CRIU_MIN_VERSION"; then
+        err "criu $criu_ver is too old for aarch64; Waypoint requires criu >= $CRIU_MIN_VERSION"
+        status=1
+      else
+        ok "criu version: $criu_ver"
+      fi
+    else
+      warn "could not determine criu version"
+    fi
+
     if criu_output="$(criu check 2>&1)"; then
       ok "criu check passed"
     else
@@ -346,12 +368,7 @@ deps_ubuntu() {
     bash \
     bash-completion \
     buildah \
-    gpgv \
-    lsof \
     make \
-    procps \
-    psmisc \
-    rsync \
     util-linux
 
   install_criu

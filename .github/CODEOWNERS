@@ -1,0 +1,23 @@
+# Entrypoints and core implementation.
+/cmd/*/*.go                 @Alex-XJK
+/pkg/waypoint/*.go          @Alex-XJK
+
+# Build and dependency configuration.
+/setup                     @Alex-XJK
+/go.mod                    @Alex-XJK
+/Makefile                  @Alex-XJK
+
+# Public project identity, attribution, and release history.
+/README.md                 @Alex-XJK
+/CITATION.cff              @Alex-XJK
+/CHANGELOG.md              @Alex-XJK
+/LICENSE                   @Alex-XJK
+/NOTICE                    @Alex-XJK
+/CONTRIBUTORS.md            @Alex-XJK
+
+# Changes to ownership rules should also request the project owner's review.
+/.github/CODEOWNERS         @Alex-XJK
+
+# The last matching rule wins. Empty owners exclude Go tests from the rules above.
+/cmd/*/*_test.go
+/pkg/waypoint/*_test.go

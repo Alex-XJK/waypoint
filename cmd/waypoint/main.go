@@ -6,14 +6,98 @@ package main
 // Designed and developed by Alex Jiakai Xu (https://alex-xjk.github.io/), DAPLab @ Columbia University (https://daplab.cs.columbia.edu/)
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
 
-var Version = "v0.6.3"
+var Version = "v0.7.0"
+
+// printExecResult writes the command output to stdout and exits with the
+// command's own exit code.
+func printExecResult(result *waypoint.ExecResult) {
+	fmt.Print(result.Output)
+	if result.Output != "" && !strings.HasSuffix(result.Output, "\n") {
+		fmt.Println()
+	}
+	if result.TimedOut {
+		fmt.Fprintln(os.Stderr, "Error: command timed out")
+	}
+	if result.ExitCode != 0 {
+		os.Exit(result.ExitCode)
+	}
+}
+
+// execUsage is the usage line for `exec`.
+const execUsage = "Usage: exec <session> <fork-id> -- '<bash command line>'"
+
+// parseExecCommand returns the bash command line from the arguments after
+// `exec <session> <fork-id> --`. Exactly one argument is accepted; several
+// are refused rather than joined, which would lose the caller's quoting.
+func parseExecCommand(rest []string) (string, error) {
+	switch len(rest) {
+	case 0:
+		return "", fmt.Errorf("%s\n       exec takes one argument after --: the bash command line", execUsage)
+	case 1:
+		return rest[0], nil
+	default:
+		return "", fmt.Errorf("exec takes one command string; got %d arguments\n"+
+			"       Quote the whole command so the fork's shell parses it: -- %s",
+			len(rest), shellQuote(strings.Join(rest, " ")))
+	}
+}
+
+// shellQuote renders s as one POSIX single-quoted word, for the hint above.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// runExec runs command in the fork and exits with the command's status.
+// A syntax error is reported on stderr with exit status 2, as bash does.
+func runExec(sessionID, forkID, command string) {
+	manager, err := waypoint.LoadManager(sessionID)
+	if err != nil {
+		fmt.Printf("Error loading session: %v\n", err)
+		os.Exit(1)
+	}
+	result, err := manager.ExecuteForkCommand(forkID, command)
+	if errors.Is(err, waypoint.ErrCommandSyntax) {
+		fmt.Fprintf(os.Stderr, "waypoint exec: %v\n", err)
+		os.Exit(2)
+	}
+	if err != nil {
+		fmt.Printf("Error executing command: %v\n", err)
+		os.Exit(1)
+	}
+	printExecResult(result)
+}
+
+type forkResult struct {
+	fork *waypoint.Fork
+	err  error
+}
+
+// forkCheckpointsConcurrently starts every requested materialization at once
+// and stores each result in its request slot so callers can print stable output.
+func forkCheckpointsConcurrently(count int, create func(int) (*waypoint.Fork, error)) []forkResult {
+	results := make([]forkResult, count)
+	var wg sync.WaitGroup
+	wg.Add(count)
+	for i := range results {
+		go func(i int) {
+			defer wg.Done()
+			results[i].fork, results[i].err = create(i)
+		}(i)
+	}
+	wg.Wait()
+	return results
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -21,10 +105,16 @@ func main() {
 		fmt.Println("Commands:")
 		fmt.Println("  init <work-directory> [--quiet] [--shell]    - Initialize environment")
 		fmt.Println("  build <dockerfile-directory> [--quiet]       - Build environment from Dockerfile")
-		fmt.Println("  create <session> <checkpoint-id> [pid | -1]  - Create checkpoint")
-		fmt.Println("  restore <session> <checkpoint-id>            - Restore checkpoint")
-		fmt.Println("  exec <session> <command> [args...]           - Execute command in environment")
-		fmt.Println("  list [session]                               - List sessions or checkpoints")
+		fmt.Println("  checkpoint <session> <checkpoint-id>         - Snapshot main fork")
+		fmt.Println("  fork <session> <checkpoint-id> [--id ID] [--n K] - Materialize live fork(s)")
+		fmt.Println("  exec <session> <fork-id> -- '<command>'      - Run one bash command line in a fork")
+		fmt.Println("  cp <session> <source> <destination>          - Copy host path <-> fork-id:/path")
+		fmt.Println("  snapshot <session> <fork-id> <checkpoint-id> [--park] - Snapshot a live fork (--park: don't resume it)")
+		fmt.Println("  create <session> <checkpoint-id>             - Legacy alias for checkpoint")
+		fmt.Println("  fork-exec <session> <fork-id> <command>      - Legacy alias for exec")
+		fmt.Println("  destroy <session> <fork-id>                  - Destroy a live fork")
+		fmt.Println("  list <session> [--json]                      - List checkpoints and forks")
+		fmt.Println("  suspend <session>                            - End all live forks; keep checkpoints on disk")
 		fmt.Println("  cleanup <session> [--force]                  - Clean up session")
 		fmt.Println("  info [session [checkpoint-id]]               - Show system, session, or checkpoint info")
 		fmt.Println("  version                                      - Show version")
@@ -34,6 +124,18 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "__waypoint_restore_fork_child":
+		if err := waypoint.RunForkRestoreChildFromArgs(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+
+	case "__waypoint_flush_images":
+		if err := waypoint.RunImageFlushFromArgs(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+
 	case "init":
 		if len(os.Args) < 3 {
 			fmt.Println("Usage: init <work-directory> [--quiet] [--shell]")
@@ -66,7 +168,12 @@ func main() {
 			os.Exit(1)
 		}
 
-		overlayPath, err := manager.InitEnvironment(workDir)
+		stagedDir, err := manager.StageEnvironment(workDir)
+		if err != nil {
+			fmt.Printf("Error staging environment: %v\n", err)
+			os.Exit(1)
+		}
+		overlayPath, err := manager.InitEnvironment(stagedDir)
 		if err != nil {
 			fmt.Printf("Error initializing environment: %v\n", err)
 			os.Exit(1)
@@ -138,25 +245,13 @@ func main() {
 			fmt.Printf("\nSave the session ID for future operations!\n")
 		}
 
-	case "create":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: create <session> <checkpoint-id> [pid | -1]")
-			fmt.Println("  If pid not provided, checkpoint the shell if enabled; otherwise, skip memory checkpoint")
-			fmt.Println("  Use -1 to force skip memory checkpoint")
+	case "checkpoint", "create":
+		if len(os.Args) != 4 {
+			fmt.Printf("Usage: %s <session> <checkpoint-id>\n", os.Args[1])
 			os.Exit(1)
 		}
 		sessionID := os.Args[2]
 		checkpointID := os.Args[3]
-
-		pid := waypoint.PidNotProvided
-		err := error(nil)
-		if len(os.Args) > 4 {
-			pid, err = strconv.Atoi(os.Args[4])
-			if err != nil {
-				fmt.Printf("Invalid PID: %s\n", os.Args[4])
-				os.Exit(1)
-			}
-		}
 
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
@@ -164,63 +259,171 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := manager.CreateCheckpointNew(pid, checkpointID); err != nil {
+		ckpt, err := manager.SnapshotFork(waypoint.MainForkID, checkpointID)
+		if err != nil {
 			fmt.Printf("Error creating checkpoint: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("Checkpoint '%s' created successfully\n", checkpointID)
+		if ckpt.Metadata != nil && ckpt.Metadata.Snapshot != nil {
+			fmt.Printf("phases %s\n", ckpt.Metadata.Snapshot)
+		}
 
-	case "restore":
-		if len(os.Args) != 4 {
-			fmt.Println("Usage: restore <session> <checkpoint-id>")
+	case "fork":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: fork <session> <checkpoint-id> [--id ID] [--n K]")
 			os.Exit(1)
 		}
 		sessionID := os.Args[2]
 		checkpointID := os.Args[3]
+		count := 1
+		forkID := ""
+		for i := 4; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--id":
+				if i+1 >= len(os.Args) {
+					fmt.Println("Error: --id requires a value")
+					os.Exit(1)
+				}
+				forkID = os.Args[i+1]
+				i++
+			case "--n":
+				if i+1 >= len(os.Args) {
+					fmt.Println("Error: --n requires a value")
+					os.Exit(1)
+				}
+				parsed, err := strconv.Atoi(os.Args[i+1])
+				if err != nil || parsed <= 0 {
+					fmt.Printf("Invalid fork count: %s\n", os.Args[i+1])
+					os.Exit(1)
+				}
+				count = parsed
+				i++
+			default:
+				fmt.Printf("Error: unknown flag: %s\n", os.Args[i])
+				os.Exit(1)
+			}
+		}
+		if forkID != "" && count != 1 {
+			fmt.Println("Error: --id can only be used when creating one fork")
+			os.Exit(1)
+		}
 
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
 			fmt.Printf("Error loading session: %v\n", err)
 			os.Exit(1)
 		}
-
-		newPID, err := manager.RestoreCheckpointNew(checkpointID)
-		if err != nil {
-			fmt.Printf("Error restoring checkpoint: %v\n", err)
+		results := forkCheckpointsConcurrently(count, func(_ int) (*waypoint.Fork, error) {
+			spec := waypoint.ForkSpec{}
+			if forkID != "" {
+				spec.ID = forkID
+			}
+			return manager.ForkCheckpoint(checkpointID, spec)
+		})
+		failed := false
+		for _, result := range results {
+			if result.err != nil {
+				fmt.Printf("Error creating fork: %v\n", result.err)
+				failed = true
+				continue
+			}
+			f := result.fork
+			line := fmt.Sprintf("%s pid=%d socket=%s duration=%s", f.ID, f.PID, f.SocketPath, f.RestoreDuration)
+			if f.RestoreBreakdown != nil {
+				line += " " + f.RestoreBreakdown.String()
+			}
+			fmt.Println(line)
+		}
+		if failed {
 			os.Exit(1)
 		}
-		fmt.Printf("Checkpoint '%s' restored, new PID: %d\n", checkpointID, newPID)
 
-	case "exec":
+	case "fork-exec":
+		// Legacy alias: same contract as exec, minus the `--`.
 		if len(os.Args) < 4 {
-			fmt.Println("Usage: exec <session> <command> [args...]")
-			fmt.Println("  Execute a command in the checkpoint environment")
-			fmt.Println("  If shell enabled, command runs using the shell's sandbox; otherwise, it runs directly in the work overlay")
+			fmt.Println("Usage: fork-exec <session> <fork-id> '<bash command line>'")
+			os.Exit(1)
+		}
+		command, err := parseExecCommand(os.Args[4:])
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		runExec(os.Args[2], os.Args[3], command)
+
+	case "destroy":
+		if len(os.Args) != 4 {
+			fmt.Println("Usage: destroy <session> <fork-id>")
 			os.Exit(1)
 		}
 		sessionID := os.Args[2]
-		command := os.Args[3]
-		args := os.Args[4:]
+		forkID := os.Args[3]
 
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
 			fmt.Printf("Error loading session: %v\n", err)
 			os.Exit(1)
 		}
-
-		output, err := manager.ExecuteCommand(command, args...)
-		if err != nil {
-			fmt.Printf("Error executing command: %v\n", err)
+		if err := manager.DestroyFork(forkID); err != nil {
+			fmt.Printf("Error destroying fork: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println(output)
+		fmt.Printf("Fork '%s' destroyed successfully\n", forkID)
+
+	case "snapshot":
+		park := false
+		args := []string{}
+		for _, a := range os.Args[2:] {
+			if a == "--park" {
+				park = true
+			} else {
+				args = append(args, a)
+			}
+		}
+		if len(args) != 3 {
+			fmt.Println("Usage: snapshot <session> <fork-id> <checkpoint-id> [--park]")
+			os.Exit(1)
+		}
+		sessionID, forkID, checkpointID := args[0], args[1], args[2]
+
+		manager, err := waypoint.LoadManager(sessionID)
+		if err != nil {
+			fmt.Printf("Error loading session: %v\n", err)
+			os.Exit(1)
+		}
+		var ckpt *waypoint.Checkpoint
+		if park {
+			ckpt, err = manager.ParkFork(forkID, checkpointID)
+		} else {
+			ckpt, err = manager.SnapshotFork(forkID, checkpointID)
+		}
+		if err != nil {
+			fmt.Printf("Error snapshotting fork: %v\n", err)
+			os.Exit(1)
+		}
+		if park {
+			fmt.Printf("Fork '%s' parked as checkpoint '%s'\n", forkID, checkpointID)
+		} else {
+			fmt.Printf("Fork '%s' snapshotted as checkpoint '%s'\n", forkID, checkpointID)
+		}
+		if ckpt.Metadata != nil && ckpt.Metadata.Snapshot != nil {
+			fmt.Printf("phases %s\n", ckpt.Metadata.Snapshot)
+		}
+
+	case "exec":
+		if len(os.Args) < 5 || os.Args[4] != "--" {
+			fmt.Println(execUsage)
+			os.Exit(1)
+		}
+		command, err := parseExecCommand(os.Args[5:])
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		runExec(os.Args[2], os.Args[3], command)
 
 	case "list":
-		if len(os.Args) > 3 {
-			fmt.Println("Usage: list [session]")
-			os.Exit(1)
-		}
-
 		if len(os.Args) == 2 {
 			sessions, err := waypoint.ListSessions()
 			if err != nil {
@@ -239,6 +442,16 @@ func main() {
 		}
 
 		sessionID := os.Args[2]
+		asJSON := false
+		for i := 3; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--json":
+				asJSON = true
+			default:
+				fmt.Printf("Error: unknown flag: %s\n", os.Args[i])
+				os.Exit(1)
+			}
+		}
 
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
@@ -246,19 +459,50 @@ func main() {
 			os.Exit(1)
 		}
 
-		checkpoints, err := manager.ListCheckpoints()
+		listing, err := manager.ListSession()
 		if err != nil {
-			fmt.Printf("Error listing checkpoints: %v\n", err)
+			fmt.Printf("Error listing session: %v\n", err)
 			os.Exit(1)
 		}
-		if len(checkpoints) == 0 {
+		if asJSON {
+			data, err := json.MarshalIndent(listing, "", "  ")
+			if err != nil {
+				fmt.Printf("Error encoding listing: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(string(data))
+			break
+		}
+		if len(listing.Checkpoints) == 0 {
 			fmt.Println("No checkpoints found")
 		} else {
-			fmt.Println("Available checkpoints:")
-			for _, cp := range checkpoints {
-				fmt.Printf("  %s\n", cp)
+			fmt.Println("Checkpoints:")
+			for _, cp := range listing.Checkpoints {
+				fmt.Printf("  %s parent=%s status=%s layers=%s\n", cp.ID, cp.ParentID, cp.Status, strings.Join(cp.LayerIDs, ","))
 			}
 		}
+		if len(listing.Forks) > 0 {
+			fmt.Println("Live forks:")
+			for _, f := range listing.Forks {
+				fmt.Printf("  %s checkpoint=%s status=%s pid=%d socket=%s\n", f.ID, f.BaseCheckpointID, f.Status, f.PID, f.SocketPath)
+			}
+		}
+
+	case "suspend":
+		if len(os.Args) != 3 {
+			fmt.Println("Usage: suspend <session>")
+			os.Exit(1)
+		}
+		manager, err := waypoint.LoadManager(os.Args[2])
+		if err != nil {
+			fmt.Printf("Error loading session: %v\n", err)
+			os.Exit(1)
+		}
+		if err := manager.Suspend(); err != nil {
+			fmt.Printf("Error suspending session: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Session '%s' suspended; checkpoints remain on disk — `waypoint fork` any of them to resume\n", os.Args[2])
 
 	case "cleanup":
 		if len(os.Args) < 3 {
@@ -267,13 +511,22 @@ func main() {
 		}
 		sessionID := os.Args[2]
 
+		force := false
+		for i := 3; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--force":
+				force = true
+			default:
+				fmt.Printf("Error: unknown flag: %s\n", os.Args[i])
+				os.Exit(1)
+			}
+		}
+
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
 			fmt.Printf("Error loading session: %v\n", err)
 			os.Exit(1)
 		}
-
-		force := len(os.Args) > 3 && os.Args[3] == "--force"
 
 		if force {
 			if err := manager.CleanupForce(); err != nil {
@@ -296,6 +549,12 @@ func main() {
 		}
 		if err := printInfo(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "Error collecting info: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "cp":
+		if err := runCopy(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error copying: %v\n", err)
 			os.Exit(1)
 		}
 
