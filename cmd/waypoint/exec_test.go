@@ -30,9 +30,8 @@ func TestParseExecCommandRejectsMissingCommand(t *testing.T) {
 	}
 }
 
-// Several arguments used to be joined with spaces and re-parsed by the fork's
-// shell, so `-- cat "/root/a b"` ran `cat /root/a b`. They are refused, and
-// the hint shows the caller the single-string spelling of what they typed.
+// Several arguments are refused, not joined; the hint shows the single-string
+// spelling.
 func TestParseExecCommandRejectsMultipleArguments(t *testing.T) {
 	_, err := parseExecCommand([]string{"cat", "/root/a b", "it's"})
 	if err == nil {

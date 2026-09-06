@@ -23,8 +23,7 @@ func TestCheckCommandSyntaxAcceptsCompleteInput(t *testing.T) {
 		"cat <<'EOF'\nline one\nline two\nEOF\n",
 		"if true; then echo x; fi",
 		"for i in 1 2; do echo $i; done &",
-		// A trailing continuation is complete input to bash; the server's
-		// framing keeps it from swallowing the completion line.
+		// A trailing backslash is complete input; bash_init's framing handles it.
 		"echo trailing \\",
 		"",
 	} {
@@ -34,9 +33,7 @@ func TestCheckCommandSyntaxAcceptsCompleteInput(t *testing.T) {
 	}
 }
 
-// Inputs that can never complete would leave the fork's shell waiting in a
-// continuation prompt, with the completion line swallowed, until the client
-// gave up. They are refused before the fork lock is taken.
+// Input that can never complete is refused before the fork lock is taken.
 func TestCheckCommandSyntaxRejectsIncompleteInput(t *testing.T) {
 	requireBash(t)
 	cases := map[string]string{

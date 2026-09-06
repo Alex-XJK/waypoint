@@ -115,11 +115,12 @@ not snapshot unsaved fork edits. `create` and `fork-exec` are legacy aliases; pr
 the primary commands. Names beginning `__waypoint_` are internal re-exec entry points.
 
 `exec` requires `--` followed by exactly one argument: the Bash input string,
-delivered to the fork's shell unchanged. Extra arguments are refused, never
-joined; a string bash cannot parse is refused before the fork lock is taken. Preserve the PTY protocol's completion signaling and command exit status;
-stdout/stderr share the PTY. `cp` requires exactly one fork endpoint and uses exact
-destination paths. It supports regular files/directories, with explicit limits on
-symlinks and metadata preservation documented in `pkg/waypoint/copy.go`.
+delivered to the fork's shell unchanged. Extra arguments are refused, not joined;
+unparseable input is refused before the fork lock is taken. Preserve the PTY
+protocol's completion signaling and command exit status; stdout/stderr share the
+PTY. `cp` requires exactly one fork endpoint and uses exact destination paths. It
+supports regular files/directories, with explicit limits on symlinks and metadata
+preservation documented in `pkg/waypoint/copy.go`.
 
 Changes to public commands should account for help/usage, documentation, completion,
 and their tests. Completion obtains dynamic IDs through existing read-only CLI

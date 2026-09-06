@@ -293,17 +293,13 @@ sudo waypoint exec a1b2c3d4e5f6g7h8 main -- 'cat hello_world.txt'
 sudo waypoint exec a1b2c3d4e5f6g7h8 main -- 'cd /app; export ENV_VAR=start'
 ```
 
-`--` is followed by exactly one argument: the bash command line, passed to the
-fork's shell byte for byte, as `bash -c` would receive it. Quote the whole
-command; pipes, redirections, `$VAR` and globs are then resolved inside the
-fork. Passing several arguments (`-- cat "a b"`) is refused rather than joined —
-it usually means a host shell has already parsed the command once. A command
-bash cannot parse (an unterminated quote, an open `if`, a here-document whose
-closing `EOF` is indented and so never closes) is refused before it reaches the
-fork, with bash's own diagnostic and exit status 2 — see
-[docs/exec-protocol.md](docs/exec-protocol.md#syntax-precheck). `exec` exits
-with the command's own exit code. Commands on the same fork serialize;
-commands on different forks run concurrently.
+Everything after `--` is one argument: the bash command line, parsed by the
+fork's shell as `bash -c` would. Quote the whole command; several arguments are
+refused rather than joined. Input bash cannot parse (an unterminated quote or
+here-document, an open `if`) is refused with exit status 2 before it reaches the
+fork; see [docs/exec-protocol.md](docs/exec-protocol.md#syntax-precheck).
+`exec` exits with the command's own exit code. Commands on the same fork
+serialize; commands on different forks run concurrently.
 
 Since v0.6.3, managed shell sessions also use unattended defaults for common
 pagers, editors, Git authentication, package-management tools, and Python

@@ -440,23 +440,19 @@ assert_absent "the failed exec created no fork directory" "$(fork_dir typofork)"
 OUT="$("$W" fork "$SESSION" A --id typofork 2>&1)"
 assert_contains "the mistyped fork ID is still usable afterwards" "pid=" "$OUT"
 
-# exec takes exactly one bash string. Several arguments used to be joined with
-# spaces and re-parsed by the fork's shell, which lost the caller's quoting.
+# exec takes exactly one bash string; extra arguments are refused, not joined.
 assert_fails "exec with more than one argument after --" "$W" exec "$SESSION" f1 -- echo two words
-# The fork's shell parses the string the way bash -c would: history expansion
-# is off, so '!' inside double quotes is literal.
+# History expansion is off in the fork, so '!' inside double quotes is literal.
 OUT="$("$W" exec "$SESSION" f1 -- 'echo "hi!there"' 2>&1)"
 assert_contains "'!' inside double quotes is literal in the fork" "hi!there" "$OUT"
-# Input bash cannot parse is refused before it reaches the shell, with bash's
-# exit status for syntax errors; the fork stays in sync.
+# Unparseable input is refused before it reaches the shell, with exit 2.
 if OUT="$("$W" exec "$SESSION" f1 -- 'echo "unterminated' 2>&1)"; then
   bad "unterminated quote is refused up front — got success"
 elif [ $? -eq 2 ]; then ok "unterminated quote is refused up front with exit 2 ($(echo "$OUT" | head -1))"
 else bad "unterminated quote is refused up front — expected exit 2, got $?"; fi
 OUT="$("$W" exec "$SESSION" f1 -- 'echo still-in-sync' 2>&1)"
 assert_contains "the fork is still usable after a refused command" "still-in-sync" "$OUT"
-# A trailing line continuation is complete input; it must not swallow the
-# completion line (bash_init separates the two with a blank line).
+# A trailing line continuation must not swallow the completion line.
 OUT="$(timeout 20 "$W" exec "$SESSION" f1 -- 'echo trailing \' 2>&1 || echo "TIMED-OUT rc=$?")"
 assert_contains "a trailing backslash still completes" "trailing" "$OUT"
 assert_not_contains "a trailing backslash does not hang the exec" "TIMED-OUT" "$OUT"

@@ -20,8 +20,7 @@ import (
 var Version = "v0.7.0"
 
 // printExecResult writes the command output to stdout and exits with the
-// command's own exit code, so a caller can branch on `waypoint exec` the way
-// it would on `bash -c`.
+// command's own exit code.
 func printExecResult(result *waypoint.ExecResult) {
 	fmt.Print(result.Output)
 	if result.Output != "" && !strings.HasSuffix(result.Output, "\n") {
@@ -35,17 +34,12 @@ func printExecResult(result *waypoint.ExecResult) {
 	}
 }
 
-// execUsage is shared by `exec` and its legacy alias so the contract reads
-// the same everywhere: one argument, the whole bash command line.
+// execUsage is the usage line for `exec`.
 const execUsage = "Usage: exec <session> <fork-id> -- '<bash command line>'"
 
-// parseExecCommand extracts the single command string from the arguments
-// after `exec <session> <fork-id> --`. The fork's shell parses that string
-// itself, exactly as `bash -c` would, so it must arrive as one argument:
-// several arguments used to be joined with spaces and re-parsed inside the
-// fork, which lost every quote the caller had written. That is almost always
-// a sign that a host shell already parsed the command once (and expanded
-// `$VAR` and globs against the host), so it is refused rather than repaired.
+// parseExecCommand returns the bash command line from the arguments after
+// `exec <session> <fork-id> --`. Exactly one argument is accepted; several
+// are refused rather than joined, which would lose the caller's quoting.
 func parseExecCommand(rest []string) (string, error) {
 	switch len(rest) {
 	case 0:
@@ -64,10 +58,8 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// runExec executes command in the fork and exits with the command's status.
-// A command bash cannot parse is reported the way bash itself would report
-// it, with bash's exit status for syntax errors, so a caller sees the same
-// signal it would get from `bash -c`.
+// runExec runs command in the fork and exits with the command's status.
+// A syntax error is reported on stderr with exit status 2, as bash does.
 func runExec(sessionID, forkID, command string) {
 	manager, err := waypoint.LoadManager(sessionID)
 	if err != nil {

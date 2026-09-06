@@ -207,10 +207,8 @@ func (m *Manager) DestroyFork(forkID string) error {
 }
 
 // ExecuteForkCommand runs one bash input string in the fork's persistent
-// shell — the same bytes `bash -c` would receive. There is deliberately no
-// argv form: the fork's shell parses the string itself, so joining separate
-// arguments here would only re-introduce the quoting loss the caller just
-// avoided. The string is syntax-checked before the fork lock is taken.
+// shell. The string is sent unchanged (there is no argv form) after a syntax
+// check that runs before the fork lock is taken.
 func (m *Manager) ExecuteForkCommand(forkID, command string) (*ExecResult, error) {
 	if err := validateForkID(forkID); err != nil {
 		return nil, err
@@ -243,15 +241,10 @@ func (m *Manager) ExecuteForkCommand(forkID, command string) (*ExecResult, error
 // could not parse it as a complete input.
 var ErrCommandSyntax = errors.New("command syntax error")
 
-// checkCommandSyntax parses command with the host's bash (`bash -n`: parse
-// only, run nothing). An input that can never complete — an unterminated
-// quote, an open `if`, a here-document with no delimiter — is refused here
-// instead of being fed to the fork's shell, where it would sit in a
-// continuation prompt swallowing the completion line until the client gives
-// up. The host's bash is not the fork's, but this is a grammar check and bash
-// grammar is stable across the versions in play; a host without bash skips
-// the check. The script goes in on stdin so payload size is not bounded by
-// the argument length limit.
+// checkCommandSyntax parses command with the host's `bash -n` (parse only,
+// nothing runs) and returns ErrCommandSyntax for input that can never
+// complete, which would leave the fork's shell stuck in a continuation
+// prompt. Hosts without bash skip the check.
 func checkCommandSyntax(command string) error {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
@@ -259,6 +252,7 @@ func checkCommandSyntax(command string) error {
 	}
 	cmd := exec.Command(bash, "-n")
 	cmd.Args[0] = "bash" // bash prefixes diagnostics with argv[0]; keep it short
+	// Feed the script on stdin: -c would hit the argument length limit.
 	cmd.Stdin = strings.NewReader(command)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

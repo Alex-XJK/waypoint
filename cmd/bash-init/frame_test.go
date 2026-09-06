@@ -9,10 +9,8 @@ import (
 	"testing"
 )
 
-// runFramed feeds framed bytes to a non-interactive bash and returns what the
-// command printed and what the completion line wrote to the FIFO stand-in.
-// Continuation and `$?` behave the same on a PTY, which needs root to
-// exercise here.
+// runFramed feeds framed bytes to a non-interactive bash and returns the
+// command's output and what the completion line wrote to a stand-in FIFO.
 func runFramed(t *testing.T, framed string) (stdout, completion string) {
 	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
@@ -44,9 +42,8 @@ func TestFrameCommandReportsExitStatus(t *testing.T) {
 	}
 }
 
-// A payload ending in a backslash is a line continuation. Without the blank
-// line frameCommand inserts, the completion line is joined onto the command
-// as its arguments and nothing ever reaches the FIFO.
+// A trailing backslash is a line continuation; the blank line frameCommand
+// inserts keeps it from swallowing the completion line.
 func TestFrameCommandSurvivesTrailingContinuation(t *testing.T) {
 	const command = "echo trailing \\"
 
@@ -58,10 +55,8 @@ func TestFrameCommandSurvivesTrailingContinuation(t *testing.T) {
 		t.Fatalf("completion = %q, want %q", completion, "n2 0\n")
 	}
 
-	// Control: the old framing (no separator) demonstrates the failure the
-	// blank line exists to prevent. The continuation turns the completion
-	// line into echo's arguments — redirect included — so what lands in the
-	// FIFO is echo's output, which the nonce parser rejects: no completion.
+	// Control: without the separator the completion line becomes echo's
+	// arguments and no valid completion reaches the FIFO.
 	old := command + "\n" + "builtin printf '%s %s\\n' 'n3' \"$?\" > " + completionFifoGuestPath + "\n"
 	_, completion = runFramed(t, old)
 	if _, ok := parseCompletion(strings.TrimSpace(completion), "n3"); ok {
