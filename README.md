@@ -316,9 +316,12 @@ sudo waypoint cp a1b2c3d4e5f6g7h8 main:/app/result.txt ./result.txt
 
 Exactly one endpoint must use `fork-id:/absolute/path`; the other is a host path.
 Destinations are exact paths: directory contents merge into the destination
-directory, and regular files replace the destination file. Regular files and
-directories are supported; source symlinks and special files are not. Copies
-preserve file permission bits, but not ownership or timestamps.
+directory, and any other existing entry is replaced rather than followed. Regular
+files and directories are supported; source symlinks and special files are not.
+Copies preserve file permission bits, but not ownership or timestamps.
+
+> **Warning:** this applies to host destinations too: copying out onto `./results`
+when that is a symlink replaces the link instead of writing through it.
 
 ### 3. Create Checkpoints
 
