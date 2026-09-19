@@ -140,6 +140,22 @@ type childRestoreTiming struct {
 	CriuWallMs float64 `json:"criu_wall_ms"`
 }
 
+// writeCriuActionScript drops the one-line wrapper criu's --action-script wants.
+// The option takes a FILE, not a command line, so the subcommand cannot simply
+// be appended to the binary's path.
+func writeCriuActionScript(f *Fork) (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(f.RootDir, "criu-action.sh")
+	body := "#!/bin/sh\nexec " + exe + " " + criuActionSubcommand + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func restoreForkChild(f *Fork) error {
 	mountStart := time.Now()
 	if err := prepareForkMountNamespace(f); err != nil {
@@ -160,6 +176,18 @@ func restoreForkChild(f *Fork) error {
 		// absolute -o path, stats-restore via --work-dir.
 		"--work-dir", f.RootDir,
 		"-vv", "-o", f.LogPath,
+	}
+	// Fix the pid allocator while the tasks exist but are still stopped. criu
+	// puts every task back under its original pid and leaves ns_last_pid alone,
+	// so anything the tree forks next lands BELOW its parent; see
+	// advanceNsLastPid. It has to be this hook and not after the restore
+	// returns: criu resumes the tree as it finishes, and postfix's master forks
+	// pickup in that window -- measured, pid 13 under a parent at 247, and the
+	// next checkpoint of that tree was unrestorable.
+	if script, err := writeCriuActionScript(f); err == nil {
+		args = append(args, "--action-script", script)
+	} else {
+		fmt.Fprintf(os.Stderr, "warning: no criu action script for %s: %v\n", f.ID, err)
 	}
 	if f.MountPoint != "" {
 		args = append(args, "-r", f.MountPoint)
