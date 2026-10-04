@@ -214,9 +214,15 @@ func (m *Manager) StageEnvironment(srcDir string) (string, error) {
 // rootfs when the image ships none. Called by InitEnvironment against the
 // merged overlay view, so both `init` and `build` sessions get it and the
 // staged files land in the main fork's upper layer, never in the source.
-func PrepareNetworkDeps(rootfs string) error {
+// In private network mode resolv.conf names pasta's DNS forwarder.
+func PrepareNetworkDeps(rootfs, network string) error {
 	// DNS
-	if err := copyIfBlank(rootfs, "/etc/resolv.conf"); err != nil {
+	if network == NetworkPrivate {
+		host, _ := os.ReadFile("/etc/resolv.conf")
+		if err := writeIfBlank(filepath.Join(rootfs, "/etc/resolv.conf"), privateResolvConf(host), 0o644); err != nil {
+			return err
+		}
+	} else if err := copyIfBlank(rootfs, "/etc/resolv.conf"); err != nil {
 		return err
 	}
 
@@ -454,8 +460,19 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
-	// Start the bash_init process in the background
-	if err := cmd.Start(); err != nil {
+	// Start the bash_init process in the background; in private network mode,
+	// inside main's own namespace.
+	var network ForkNetwork
+	start := cmd.Start
+	if m.privateNetwork() {
+		network, err = m.newForkNetwork(MainForkID)
+		if err != nil {
+			return ShellNotEnabled, "", fmt.Errorf("failed to set up the session network: %w", err)
+		}
+		start = func() error { return startInNetNS(network.NetNS, cmd) }
+	}
+	if err := start(); err != nil {
+		network.releaseNetwork()
 		return ShellNotEnabled, "", fmt.Errorf("failed to start bash_init: %w", err)
 	}
 	waitCh := make(chan error, 1)
@@ -473,12 +490,13 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	// once the handshake has given up.
 	if err := waitForShellSocket(m.shellSocket, waitCh, logPath, 15*time.Second); err != nil {
 		_ = cmd.Process.Kill()
+		network.releaseNetwork()
 		m.shellPid = ShellNotEnabled
 		m.shellStartTime = 0
 		m.shellSocket = ""
 		return ShellNotEnabled, "", err
 	}
-	if err := m.saveMainFork(m.shellPid, m.shellSocket, canonicalSocketPath, logPath); err != nil {
+	if err := m.saveMainFork(m.shellPid, m.shellSocket, canonicalSocketPath, logPath, network); err != nil {
 		return m.shellPid, m.shellSocket, fmt.Errorf("failed to save main fork: %w", err)
 	}
 
@@ -557,6 +575,9 @@ func copyIfBlank(rootfs, hostAbs string) error {
 	if !isMissingOrBlank(dst) {
 		return nil
 	}
+	if err := removeSymlink(dst); err != nil {
+		return err
+	}
 	return copyFile(hostAbs, dst)
 }
 
@@ -564,8 +585,20 @@ func writeIfBlank(dst string, data []byte, mode os.FileMode) error {
 	if !isMissingOrBlank(dst) {
 		return nil
 	}
+	if err := removeSymlink(dst); err != nil {
+		return err
+	}
 	_ = os.MkdirAll(filepath.Dir(dst), 0o755)
 	return os.WriteFile(dst, data, mode)
+}
+
+// removeSymlink removes path if it is a symlink, so a write creates a file
+// in the rootfs instead of following a link that may lead out of it.
+func removeSymlink(path string) error {
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return os.Remove(path)
+	}
+	return nil
 }
 
 func copyFile(src, dst string) error {

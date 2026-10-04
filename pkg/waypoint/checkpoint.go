@@ -222,11 +222,30 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 
 	start := time.Now()
 	if err := m.withForkLock(f.ID, func() error {
+		var netMs float64
+		if m.privateNetwork() {
+			netStart := time.Now()
+			network, err := m.newForkNetwork(f.ID)
+			if err != nil {
+				f.Status = ForkStatusFailed
+				_ = m.saveFork(f)
+				return fmt.Errorf("failed to set up network for fork %s: %w", f.ID, err)
+			}
+			f.ForkNetwork = network
+			netMs = durMs(time.Since(netStart))
+			// The restore helper reads the record from disk.
+			if err := m.saveFork(f); err != nil {
+				f.releaseNetwork()
+				return err
+			}
+		}
 		bd, err := m.restoreForkAndWait(f)
+		bd.NetMs = netMs
 		if PhaseStats {
 			f.RestoreBreakdown = bd // keep partial phases on failure for debugging
 		}
 		if err != nil {
+			f.releaseNetwork()
 			f.Status = ForkStatusFailed
 			_ = m.saveFork(f)
 			return err
@@ -375,6 +394,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 		// memory image and the sealed delta layer; discard the fork's runtime
 		// remains instead of re-restoring it. A cleanup failure doesn't fail
 		// the park — the checkpoint is already durable.
+		f.releaseNetwork()
 		_ = os.Remove(f.SocketPath)
 		if err := os.RemoveAll(f.RootDir); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: parked fork %s left runtime dir behind: %v\n", f.ID, err)

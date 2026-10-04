@@ -156,7 +156,7 @@ clean() {
 check_command_set() {
   local status=0
   local required=(criu cp bash)
-  local optional=(buildah)
+  local optional=(buildah pasta)
 
   log "checking required host commands"
   for cmd in "${required[@]}"; do
@@ -370,6 +370,11 @@ deps_ubuntu() {
     buildah \
     make \
     util-linux
+
+  # pasta, for the private network mode; not packaged on older releases.
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y passt; then
+    warn "passt is unavailable; the private network mode needs pasta"
+  fi
 
   install_criu
   install_go
