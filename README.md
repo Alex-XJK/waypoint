@@ -192,7 +192,8 @@ You can create a configuration file to set global options. Example content:
   "bash_init_src": "/custom/compiled/bash_init",
   "preserve_session_on_cleanup": false,
   "tmpfs_images": false,
-  "phase_stats": false
+  "phase_stats": false,
+  "network": "shared"
 }
 ```
 
@@ -212,6 +213,13 @@ The optional `tmpfs_images` setting (`WAYPOINT_TMPFS_IMAGES`) writes CRIU images
 tmpfs and flushes them to disk asynchronously; images are not durable until that
 flush completes. `phase_stats` (`WAYPOINT_PHASE_STATS`) adds checkpoint/fork timing
 breakdowns. Both options default to `false`.
+
+`network` (`WAYPOINT_NETWORK`) is `shared` (default) or `private`. In `shared`
+mode every fork runs in the host network namespace. In `private` mode each fork,
+including `main`, gets its own network namespace, so forks of one checkpoint can
+all listen on the same port; outbound traffic goes through a
+[pasta](https://passt.top) process per fork (package `passt`). A session keeps
+the mode it was created with.
 
 ### 1. Initialize Environment
 
@@ -316,9 +324,12 @@ sudo waypoint cp a1b2c3d4e5f6g7h8 main:/app/result.txt ./result.txt
 
 Exactly one endpoint must use `fork-id:/absolute/path`; the other is a host path.
 Destinations are exact paths: directory contents merge into the destination
-directory, and regular files replace the destination file. Regular files and
-directories are supported; source symlinks and special files are not. Copies
-preserve file permission bits, but not ownership or timestamps.
+directory, and any other existing entry is replaced rather than followed. Regular
+files and directories are supported; source symlinks and special files are not.
+Copies preserve file permission bits, but not ownership or timestamps.
+
+> **Warning:** this applies to host destinations too: copying out onto `./results`
+when that is a symlink replaces the link instead of writing through it.
 
 ### 3. Create Checkpoints
 
@@ -585,9 +596,10 @@ Each session gets:
 - Shared immutable layers with a private writable overlay for each live fork
 - A dedicated shell supervisor and process tree for each live fork
 
-Forks use separate filesystem views and process namespaces. Networking is shared
-with the host by design; forks do not receive private IP addresses or separate
-port spaces.
+Forks use separate filesystem views and process namespaces. By default they
+share the host network namespace, and with it one port space. In `private`
+network mode each fork has its own network namespace and port space, with every
+fork configured identically.
 
 ### Terminal Session Management
 
@@ -604,7 +616,7 @@ port spaces.
 
 - Requires root privileges (CRIU and OverlayFS requirement)
 - Linux-specific (depends on CRIU and OverlayFS)
-- Forks share host networking, so services using the same ports can conflict; network connections may not survive checkpoint/restore
+- In the default `shared` network mode, forks share host networking, so services using the same ports conflict; `private` mode gives each fork its own port space. Network connections may not survive checkpoint/restore
 - Exec uses one persistent PTY: stdout/stderr are combined, and output is returned when the command finishes rather than streamed
 - A checkpoint captures supported process/filesystem state; it does not provide a full security boundary for untrusted workloads
 

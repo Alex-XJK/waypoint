@@ -50,6 +50,14 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 	} else if _, err := findMountID(pid, "/"); err == nil {
 		args = append(args, "--external", "mnt[/]:waypoint-work")
 	}
+	netNS, err := externalNetNSArg(pid)
+	if err != nil {
+		return fmt.Errorf("failed to create memory checkpoint: %w", err)
+	}
+	if netNS != "" {
+		args = append(args, "--external", netNS)
+		args = append(args, networkLockArgs(m.networkLock)...)
+	}
 
 	cmd := exec.Command("criu", args...)
 	var stderr bytes.Buffer
@@ -95,8 +103,9 @@ func unescapeMountInfoPath(path string) string {
 // --- restore ---
 
 // runRestoreHelper re-executes this binary as a helper child inside fresh
-// mount/net/IPC namespaces; the child mounts the fork's overlay and runs
-// `criu restore` there (see RunForkRestoreChildFromArgs).
+// mount and IPC namespaces; the child mounts the fork's overlay and runs
+// `criu restore` there (see RunForkRestoreChildFromArgs). A fork with a
+// ForkNetwork is restored into its own network namespace.
 func runRestoreHelper(f *Fork) error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -193,7 +202,20 @@ func restoreForkChild(f *Fork) error {
 		args = append(args, "-r", f.MountPoint)
 		args = append(args, "--external", fmt.Sprintf("mnt[waypoint-work]:%s", f.MountPoint))
 	}
+	var extraFiles []*os.File
+	if f.NetNS != "" {
+		ns, err := os.Open(f.NetNS)
+		if err != nil {
+			return fmt.Errorf("open fork network namespace: %w", err)
+		}
+		defer ns.Close()
+		// ExtraFiles[0] is fd 3 in criu.
+		extraFiles = append(extraFiles, ns)
+		args = append(args, "--inherit-fd", "fd[3]:"+criuNetNSKey)
+		args = append(args, networkLockArgs(f.NetworkLock)...)
+	}
 	cmd := exec.Command("criu", args...)
+	cmd.ExtraFiles = extraFiles
 	cmd.Dir = f.RootDir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -236,24 +258,4 @@ func readChildRestoreTiming(f *Fork) (childRestoreTiming, error) {
 	_ = os.Remove(path)
 	err = json.Unmarshal(data, &t)
 	return t, err
-}
-
-// bringLoopbackUp raises lo inside the fresh network namespace so restored
-// processes keep their loopback connections.
-func bringLoopbackUp() error {
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(fd)
-
-	ifr, err := unix.NewIfreq("lo")
-	if err != nil {
-		return err
-	}
-	if err := unix.IoctlIfreq(fd, unix.SIOCGIFFLAGS, ifr); err != nil {
-		return err
-	}
-	ifr.SetUint16(ifr.Uint16() | unix.IFF_UP | unix.IFF_RUNNING)
-	return unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, ifr)
 }

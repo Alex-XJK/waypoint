@@ -49,6 +49,7 @@ type CriuRestoreStats struct {
 // clobbered by concurrent forks of the same checkpoint).
 type RestoreBreakdown struct {
 	TotalMs       float64 `json:"total_ms,omitempty"`        // fork-lock acquire -> running
+	NetMs         float64 `json:"net_ms,omitempty"`          // private network mode: namespace + pasta setup
 	HelperMs      float64 `json:"helper_ms"`                 // restore helper: re-exec + namespaces + mount + criu + pidfile
 	MountMs       float64 `json:"mount_ms"`                  // overlay + pseudo-fs mounts (inside helper)
 	CriuWallMs    float64 `json:"criu_wall_ms"`              // criu restore process wall (inside helper)
@@ -66,6 +67,9 @@ func (b *RestoreBreakdown) String() string {
 		b.HelperMs, b.MountMs, b.CriuWallMs, b.CriuForkMs, b.CriuRestoreMs, b.SockWaitMs)
 	if b.PagesRestored > 0 {
 		fmt.Fprintf(&sb, " pages_mib=%.1f", float64(b.PagesRestored)/256)
+	}
+	if b.NetMs > 0 {
+		fmt.Fprintf(&sb, " net_ms=%.1f", b.NetMs)
 	}
 	return sb.String()
 }

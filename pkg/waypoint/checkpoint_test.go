@@ -19,6 +19,7 @@ func TestLoadCheckpointMetadataLoadsConfig(t *testing.T) {
 		"WAYPOINT_TMPFS_IMAGES",
 		"WAYPOINT_TMPFS_DIR",
 		"WAYPOINT_PHASE_STATS",
+		"WAYPOINT_NETWORK",
 	} {
 		t.Setenv(key, "")
 	}
