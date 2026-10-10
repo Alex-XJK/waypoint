@@ -299,15 +299,12 @@ func (m *Manager) restoreForkAndWait(f *Fork) (*RestoreBreakdown, error) {
 	return bd, nil
 }
 
-// criuActionSubcommand is the hidden entry point criu's --action-script calls.
+// criuActionSubcommand is the hidden subcommand criu's --action-script runs.
 const criuActionSubcommand = "__waypoint_criu_action"
 
-// RunCriuAction is that entry point. criu names the hook in
-// CRTOOLS_SCRIPT_ACTION and the restored init in CRTOOLS_INIT_PID. Only
-// pre-resume is acted on: by then the tasks exist, so the namespace and its
-// /proc are there to read, and they are still stopped, so nothing has forked
-// yet. Any other action is a no-op, and every failure is a warning -- an action
-// script that exits non-zero aborts the restore.
+// RunCriuAction handles criu's pre-resume hook, when the tasks exist but are
+// still stopped. Failures are only warnings: a failing action script aborts
+// the restore.
 func RunCriuAction() error {
 	if os.Getenv("CRTOOLS_SCRIPT_ACTION") != "pre-resume" {
 		return nil
@@ -320,25 +317,10 @@ func RunCriuAction() error {
 	return nil
 }
 
-// advanceNsLastPid moves the restored pid namespace's allocator past the pids
-// criu just put back, so that what the tree forks next sorts above its parents.
-// Best effort: the restore has already succeeded and nothing here may undo it.
-//
-// criu restores every task under its original pid but leaves ns_last_pid alone.
-// Measured inside a restored fork: ns_last_pid 16 while the tree's highest pid
-// was 670, and the next processes came back as 23, 24, 25. A daemon that forks
-// per request then builds an inverted tree -- postfix's master at 247 with
-// pickup 12, smtpd 73, cleanup 74, local 75 and lmtp 83 under it. Dumping that
-// tree succeeds; restoring it never does, because criu has to wind the
-// allocator backwards to recreate a child whose pid precedes its parent's, and
-// the parent dies on the way ("247 killed by signal 11: Segmentation fault",
-// then "Restoring FAILED"). Measured on tb2.1 mailman: the checkpoint taken
-// after a restore materialized 0/6, the four taken before any restore 4/4.
-//
-// The write must come from inside the target namespace. The sysctl keys off the
-// writing task's pid namespace, not the procfs it was reached through, so
-// writing the host's file would move the HOST's allocator. nsenter forks, which
-// puts the writing child in the namespace.
+// advanceNsLastPid sets ns_last_pid to the tree's highest pid. criu leaves it
+// unchanged, so new children get pids below their parents and a later
+// checkpoint of the tree fails to restore. The sysctl applies to the writer's
+// pid namespace, hence nsenter.
 func advanceNsLastPid(rootPid int) {
 	if rootPid <= 0 {
 		return
@@ -358,9 +340,8 @@ func advanceNsLastPid(rootPid int) {
 	}
 }
 
-// maxNamespacedPid returns the highest pid in the tree's own /proc, which is
-// mounted inside its pid namespace and therefore lists namespaced pids. A tree
-// with no /proc of its own yields 0 and the caller does nothing.
+// maxNamespacedPid returns the highest pid in the tree's own /proc, or 0 if it
+// has none.
 func maxNamespacedPid(rootPid int) (int, error) {
 	ents, err := os.ReadDir(fmt.Sprintf("/proc/%d/root/proc", rootPid))
 	if err != nil {

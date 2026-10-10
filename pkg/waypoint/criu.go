@@ -149,9 +149,8 @@ type childRestoreTiming struct {
 	CriuWallMs float64 `json:"criu_wall_ms"`
 }
 
-// writeCriuActionScript drops the one-line wrapper criu's --action-script wants.
-// The option takes a FILE, not a command line, so the subcommand cannot simply
-// be appended to the binary's path.
+// writeCriuActionScript writes the wrapper script; --action-script takes a
+// file, not a command line.
 func writeCriuActionScript(f *Fork) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -186,13 +185,8 @@ func restoreForkChild(f *Fork) error {
 		"--work-dir", f.RootDir,
 		"-vv", "-o", f.LogPath,
 	}
-	// Fix the pid allocator while the tasks exist but are still stopped. criu
-	// puts every task back under its original pid and leaves ns_last_pid alone,
-	// so anything the tree forks next lands BELOW its parent; see
-	// advanceNsLastPid. It has to be this hook and not after the restore
-	// returns: criu resumes the tree as it finishes, and postfix's master forks
-	// pickup in that window -- measured, pid 13 under a parent at 247, and the
-	// next checkpoint of that tree was unrestorable.
+	// advanceNsLastPid runs before the tree resumes; once restore returns, the
+	// tree may already have forked.
 	if script, err := writeCriuActionScript(f); err == nil {
 		args = append(args, "--action-script", script)
 	} else {

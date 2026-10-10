@@ -1,9 +1,7 @@
 package waypoint
 
-// Private network mode: each fork runs in its own network namespace, pinned
-// under NetRuntimeDir and connected outward by a pasta(1) process. Dumps mark
-// the namespace external; restores put the tree into the fork's pinned one.
-// Snapshot keeps a fork's namespace; park, destroy and teardown release it.
+// Private network mode: a network namespace per fork, pinned under
+// NetRuntimeDir, with pasta(1) for outbound traffic.
 
 import (
 	"fmt"
@@ -26,28 +24,24 @@ const (
 	// criuNetNSKey names the external network namespace in criu images.
 	criuNetNSKey = "waypoint-net"
 
-	// dnsForwardAddr is the guest resolver in private mode; pasta forwards
-	// queries sent to it to the host's resolver.
+	// dnsForwardAddr is the guest resolver; pasta forwards it to the host's.
 	dnsForwardAddr = "169.254.1.1"
 )
 
-// NetRuntimeDir holds each private-mode fork's namespace pin and pasta PID
-// file, under <session>/<fork>. pasta opens both without CAP_DAC_OVERRIDE, so
-// they stay out of the session dir, whose ancestors may be private to a user.
+// NetRuntimeDir holds namespace pins and pasta PID files. It is outside the
+// session dir because pasta opens them without CAP_DAC_OVERRIDE.
 var NetRuntimeDir = "/run/waypoint"
 
 func (m *Manager) sessionNetDir() string {
 	return filepath.Join(NetRuntimeDir, m.sessionID)
 }
 
-// ForkNetwork is a private-mode fork's namespace pin and pasta process; the
-// zero value means the host network namespace.
+// ForkNetwork is a fork's namespace pin and pasta; zero means the host's.
 type ForkNetwork struct {
 	NetNS          string `json:"netns,omitempty"`
 	PastaPID       int    `json:"pasta_pid,omitempty"`
 	PastaStartTime uint64 `json:"pasta_start_time,omitempty"`
-	// NetworkLock is the session's criu --network-lock method, for the
-	// restore helper, which reads only the fork record.
+	// NetworkLock is copied here because the restore helper reads only the fork record.
 	NetworkLock string `json:"network_lock,omitempty"`
 }
 
@@ -55,8 +49,7 @@ func (m *Manager) privateNetwork() bool {
 	return m.network == NetworkPrivate
 }
 
-// detectNetworkLock returns "nftables" if criu supports that --network-lock
-// method, else "" (criu's default, iptables).
+// detectNetworkLock returns "nftables" if criu supports it, else "" (iptables).
 func detectNetworkLock() string {
 	if exec.Command("criu", "check", "--feature", "network_lock_nftables").Run() == nil {
 		return "nftables"
@@ -64,7 +57,6 @@ func detectNetworkLock() string {
 	return ""
 }
 
-// networkLockArgs returns the criu arguments selecting method.
 func networkLockArgs(method string) []string {
 	if method == "" {
 		return nil
@@ -72,9 +64,8 @@ func networkLockArgs(method string) []string {
 	return []string{"--network-lock", method}
 }
 
-// newForkNetwork creates fork forkID's namespace and starts its pasta; the
-// namespace is configured on return. pasta logs to the fork's root dir,
-// which must exist.
+// newForkNetwork creates the fork's namespace and starts its pasta, which logs
+// to the fork's root dir.
 func (m *Manager) newForkNetwork(forkID string) (ForkNetwork, error) {
 	dir := filepath.Join(m.sessionNetDir(), forkID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -96,8 +87,7 @@ func (m *Manager) newForkNetwork(forkID string) (ForkNetwork, error) {
 	return ForkNetwork{NetNS: pin, PastaPID: pid, PastaStartTime: startTime, NetworkLock: m.networkLock}, nil
 }
 
-// releaseNetwork stops pasta, which holds the pin open, then removes the pin
-// and the fork's runtime dir, and zeroes n.
+// releaseNetwork stops pasta (it holds the pin open), then removes the pin.
 func (n *ForkNetwork) releaseNetwork() {
 	if n.PastaPID > 0 {
 		if err := killTree(n.PastaPID, n.PastaStartTime); err != nil {
@@ -113,8 +103,7 @@ func (n *ForkNetwork) releaseNetwork() {
 	*n = ForkNetwork{}
 }
 
-// sweepSessionNetwork kills the session's remaining pasta processes and
-// removes its runtime dir, including plumbing no fork record points to.
+// sweepSessionNetwork kills the session's pasta processes, including orphans.
 func (m *Manager) sweepSessionNetwork() {
 	if m.sessionID == "" {
 		return
@@ -125,9 +114,8 @@ func (m *Manager) sweepSessionNetwork() {
 	_ = os.RemoveAll(dir)
 }
 
-// withThreadNetNS runs fn on a locked OS thread that enter has moved to
-// another network namespace, then moves the thread back. If that fails, the
-// thread stays locked and exits with the goroutine.
+// withThreadNetNS runs fn on a locked thread moved by enter. If moving back
+// fails, the thread stays locked and exits with the goroutine.
 func withThreadNetNS(enter, fn func() error) error {
 	errCh := make(chan error, 1)
 	go func() {
@@ -155,8 +143,7 @@ func withThreadNetNS(enter, fn func() error) error {
 	return <-errCh
 }
 
-// createNetNS creates a network namespace with loopback up and pins it with
-// a bind mount at pin.
+// createNetNS creates a namespace with lo up and bind-mounts it at pin.
 func createNetNS(pin string) error {
 	file, err := os.OpenFile(pin, os.O_CREATE|os.O_EXCL|os.O_RDONLY, 0o444)
 	if err != nil {
@@ -184,7 +171,6 @@ func createNetNS(pin string) error {
 	return err
 }
 
-// releaseNetNS unmounts and removes a namespace pin.
 func releaseNetNS(pin string) {
 	if err := unix.Unmount(pin, 0); err != nil && err != unix.EINVAL && err != unix.ENOENT {
 		_ = unix.Unmount(pin, unix.MNT_DETACH)
@@ -192,7 +178,6 @@ func releaseNetNS(pin string) {
 	_ = os.Remove(pin)
 }
 
-// startInNetNS starts cmd in the network namespace pinned at pin.
 func startInNetNS(pin string, cmd *exec.Cmd) error {
 	ns, err := os.Open(pin)
 	if err != nil {
@@ -210,7 +195,6 @@ func startInNetNS(pin string, cmd *exec.Cmd) error {
 	)
 }
 
-// bringLoopbackUp raises lo in the calling thread's network namespace.
 func bringLoopbackUp() error {
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
 	if err != nil {
@@ -229,9 +213,8 @@ func bringLoopbackUp() error {
 	return unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, ifr)
 }
 
-// pastaArgs is the pasta command line for the namespace pinned at pin. No
-// ports are forwarded. The default gateway mapping stays on: the gateway
-// address reaches host loopback services, including a loopback resolver.
+// pastaArgs forwards no ports; the gateway address still reaches host
+// loopback services such as a local resolver.
 func pastaArgs(pidFile, pin string) []string {
 	return []string{
 		// As root, pasta otherwise drops to nobody, which cannot enter the pin.
@@ -248,9 +231,8 @@ func pastaArgs(pidFile, pin string) []string {
 	}
 }
 
-// startPasta starts pasta for the namespace pinned at pin and returns the
-// daemon's PID from pidFile; the namespace is configured once the foreground
-// process exits. Output goes to a file: the daemon could hold a pipe open.
+// startPasta returns the daemon's PID. Output goes to a file because the
+// daemon could hold a pipe open.
 func startPasta(pin, pidFile, logPath string) (int, error) {
 	bin, err := exec.LookPath("pasta")
 	if err != nil {
@@ -277,8 +259,8 @@ func startPasta(pin, pidFile, logPath string) (int, error) {
 	return pid, nil
 }
 
-// externalNetNSArg returns the criu dump --external value marking the network
-// namespace of pid as external, or "" if it is this thread's (the host's).
+// externalNetNSArg returns criu's --external value for pid's network
+// namespace, or "" if it is the host's.
 func externalNetNSArg(pid int) (string, error) {
 	var tree, self unix.Stat_t
 	if err := unix.Stat(fmt.Sprintf("/proc/%d/ns/net", pid), &tree); err != nil {
@@ -293,8 +275,7 @@ func externalNetNSArg(pid int) (string, error) {
 	return fmt.Sprintf("net[%d]:%s", tree.Ino, criuNetNSKey), nil
 }
 
-// privateResolvConf is the private-mode guest resolv.conf: pasta's forwarder
-// as the only nameserver, plus the host's search domains and options.
+// privateResolvConf keeps the host's search and options lines.
 func privateResolvConf(host []byte) []byte {
 	var b strings.Builder
 	fmt.Fprintf(&b, "nameserver %s\n", dnsForwardAddr)
@@ -312,7 +293,7 @@ func privateResolvConf(host []byte) []byte {
 }
 
 // killSessionPasta kills pasta processes whose --netns is under dir,
-// re-checked after a pidfd pins each process.
+// re-checking each after pinning it with a pidfd.
 func killSessionPasta(dir string) {
 	base := filepath.Clean(dir)
 	entries, err := os.ReadDir("/proc")
@@ -343,8 +324,6 @@ func isSessionPasta(pid int, base string) bool {
 	return pastaServes(strings.Split(strings.TrimRight(string(data), "\x00"), "\x00"), base)
 }
 
-// pastaServes reports whether argv is a pasta command line whose --netns
-// argument is under base.
 func pastaServes(argv []string, base string) bool {
 	if len(argv) == 0 || !strings.HasPrefix(filepath.Base(argv[0]), "pasta") {
 		return false
