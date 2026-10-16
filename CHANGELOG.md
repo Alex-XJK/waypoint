@@ -5,7 +5,7 @@
 - Added the `private` network mode (`WAYPOINT_NETWORK=private` or `network` in the config file): each fork, including `main`, gets its own network namespace and port space, with outbound traffic through a per-fork pasta process. `shared` remains the default.
 - Fixed restored trees handing out pids below the ones they already hold, so a child could get a lower pid than its parent; `ns_last_pid` is now advanced in CRIU's pre-resume hook.
 - Made `cp` replace an existing non-directory destination, symlinks included, instead of following it or failing, and unlink it only right before the rename.
-- Added runtime tests for private networking and the restored pid allocator.
+- Added runtime tests for private networking and the restored pid allocator, and a benchmark script for the basic operations.
 - Added the v0.7.0 architecture diagram and updated the citation to the StateFork paper.
 
 ## v0.7.0 — Concurrent Fork Architecture

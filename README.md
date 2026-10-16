@@ -454,6 +454,9 @@ The demo covers the CLI lifecycle. The search workflow uses an offline Dockerfil
 and exercises preparation copies, concurrent candidates, recursive snapshots,
 backtracking, result export, and cleanup.
 
+`sudo ./scripts/benchmark.sh` reports how many milliseconds each basic operation
+takes on the current host, in both network modes.
+
 ## Example Workflow 🧩
 
 ### Parallel Forking with a Shell Session
