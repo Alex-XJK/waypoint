@@ -17,7 +17,7 @@ authors:
     given-names: Kostis
 identifiers:
   - type: doi
-    value: 10.48550/arXiv.2510.05556
+    value: 10.48550/arXiv.2609.38648
 repository-code: 'https://github.com/Alex-XJK/waypoint'
 abstract: >-
   A lightweight checkpoint/restore tool that captures both
@@ -25,19 +25,27 @@ abstract: >-
   on top of CRIU and OverlayFS for fast, isolated process
   state management.
 license: Apache-2.0
-version: 0.7.0
-date-released: '2026-09-05'
+version: 0.7.1
+date-released: '2026-10-15'
 references:
   - type: article
-    title: "Toward Systems Foundations for Agentic Exploration"
+    title: "StateFork: Branchable Infrastructure for Agent Exploration"
     authors:
       - family-names: Xu
         given-names: Jiakai
       - family-names: Zhou
         given-names: Tianle
+      - family-names: Liargkovas
+        given-names: Georgios
+      - family-names: Gillai
+        given-names: Danielle
+      - family-names: Fu
+        given-names: Ruizhe
+      - family-names: Shen
+        given-names: Patrick
       - family-names: Wu
         given-names: Eugene
       - family-names: Kaffes
         given-names: Kostis
-    year: 2025
-    url: https://arxiv.org/abs/2510.05556
+    year: 2026
+    url: https://arxiv.org/abs/2609.38648

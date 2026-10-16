@@ -197,6 +197,9 @@ Choose validation for the affected behavior:
 - For changes to private network mode, also run `sudo ./scripts/test-private-network.sh`
   (per-fork ports, egress through pasta, and namespace lifecycle across snapshot,
   park, destroy, suspend, and cleanup).
+- For changes to restore or the CRIU action script, also run
+  `sudo ./scripts/test-ns-last-pid.sh` (new pids after checkpoint, fork, and a
+  second-generation fork stay above the restored tree's).
 - `sudo ./scripts/test-search-workflow.sh` adds an offline Dockerfile build, file
   transfer, concurrent branching, recursive snapshots/backtracking, export, and
   cleanup workload. Its header documents prerequisites and scaling options.

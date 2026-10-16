@@ -158,7 +158,7 @@ sudo env BIN_DIR="$PWD" ./setup install
 
 ```bash
 sudo waypoint version
-# Output: waypoint version v0.7.0
+# Output: waypoint version v0.7.1
 ```
 
 You can also run the root-level host check from the setup script after manual
@@ -562,10 +562,9 @@ location while images are flushed to disk.
 
 ## Technical Details ⌨️
 
-The original v0.6.0 diagram is retained for reference; the sections below describe
-the v0.7.0 checkpoint/fork design.
+![v0.7.0 Architecture Diagram](./docs/waypoint-v070.drawio.png)
 
-![Historical v0.6.0 Architecture Diagram](./docs/waypoint-v060.drawio.png)
+The [v0.6.0 diagram](./docs/waypoint-v060.drawio.png) is kept for reference.
 
 ### OverlayFS Initialization
 
@@ -624,13 +623,13 @@ fork configured identically.
 
 If you use waypoint in academic research, please cite:
 ```bibtex
-@misc{xu2025systemsfoundationsagenticexploration,
-      title={Toward Systems Foundations for Agentic Exploration}, 
-      author={Jiakai Xu and Tianle Zhou and Eugene Wu and Kostis Kaffes},
-      year={2025},
-      eprint={2510.05556},
+@misc{xu2026statefork,
+      title={StateFork: Branchable Infrastructure for Agent Exploration},
+      author={Jiakai Xu and Tianle Zhou and Georgios Liargkovas and Danielle Gillai and Ruizhe Fu and Patrick Shen and Eugene Wu and Kostis Kaffes},
+      year={2026},
+      eprint={2609.38648},
       archivePrefix={arXiv},
-      primaryClass={cs.DC},
-      url={https://arxiv.org/abs/2510.05556}
+      primaryClass={cs.OS},
+      url={https://arxiv.org/abs/2609.38648}
 }
 ```

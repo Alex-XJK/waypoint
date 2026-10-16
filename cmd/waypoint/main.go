@@ -17,7 +17,7 @@ import (
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
 
-var Version = "v0.7.0"
+var Version = "v0.7.1"
 
 // printExecResult writes the command output to stdout and exits with the
 // command's own exit code.
