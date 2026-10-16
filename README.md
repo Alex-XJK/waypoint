@@ -1,7 +1,6 @@
 # <img src="./docs/Waypoint-logo-notext.png" height="30" /> Waypoint
 
-A lightweight checkpoint/restore tool that captures both filesystem and memory state with minimal overhead. 
-Built on top of CRIU and OverlayFS for fast, isolated process state management.
+Branchable agent containers: checkpoint a running sandbox (files, memory and live terminal sessions) and fork it into many independent live copies. Built on CRIU and OverlayFS.
 
 > **Naming note:** Waypoint was previously called **Checkpoint-lite**. Some older blog posts, videos, and public announcements may still use the Checkpoint-lite name; they refer to the same project lineage.
 
@@ -104,11 +103,13 @@ commands, such as `./setup build`, `sudo ./setup install`, and
 #### Prerequisites
 
 - Linux system with root privileges
-- CRIU installed and configured, including the `criu` and `crit` commands; CRIU 4.0 or newer is required on aarch64 by the default host check
 - OverlayFS support (most modern Linux distributions)
-- Go 1.25 or the version listed in `go.mod` (for building from source)
+- CRIU installed and configured, including the `criu` and `crit` commands; CRIU 4.0 or newer is required on aarch64 by the default host check
 - Host utilities used by Waypoint: `cp` and `uname` (coreutils); teardown and mount handling are pure syscalls
+- `/bin/bash` inside the workspace/rootfs when using `--shell`
+- Go 1.25 or the version listed in `go.mod` (for building from source)
 - Optional: `buildah` for the build from Dockerfile approach (since v0.5.0)
+- Optional: `pasta` (package `passt`) for the `private` network mode (since v0.7.1)
 
 #### Install Go (just for reference)
 
@@ -615,7 +616,7 @@ fork configured identically.
 
 - Requires root privileges (CRIU and OverlayFS requirement)
 - Linux-specific (depends on CRIU and OverlayFS)
-- In the default `shared` network mode, forks share host networking, so services using the same ports conflict; `private` mode gives each fork its own port space. Network connections may not survive checkpoint/restore
+- In the default `shared` network mode, forks share host networking, so services using the same ports conflict; forking a checkpoint that already listens on a port gives no error, but the copies share that port and a fork's connections may reach another fork's server. `private` mode gives each fork its own port space. Network connections may not survive checkpoint/restore
 - Exec uses one persistent PTY: stdout/stderr are combined, and output is returned when the command finishes rather than streamed
 - A checkpoint captures supported process/filesystem state; it does not provide a full security boundary for untrusted workloads
 

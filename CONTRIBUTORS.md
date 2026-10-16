@@ -25,6 +25,7 @@ This project thrives thanks to the efforts and expertise of the following people
 - Applied built-image `ENV` and `WORKDIR` settings to Dockerfile-based sessions.
 - Extended the reach of the concurrent fork model with the `cp` verb for host-to-fork file and directory transfer, and by letting sessions and forks share the host network namespace.
 - Designed a user field verification and Bash command pre-validation module to enhance the robustness.
+- Fixed restored process trees handing out pids below the ones they already hold, by advancing `ns_last_pid` in CRIU's pre-resume hook.
 
 
 ### Rohan Timmaraju
