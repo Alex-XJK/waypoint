@@ -364,7 +364,9 @@ way; see `imagestore.go`.
 ## Networking
 
 In the default `shared` network mode every fork runs in the host network
-namespace: one port space for all forks and the host.
+namespace: one port space for all forks and the host. Forks of a checkpoint
+that holds a listening socket still restore, each with its own listener on the
+same port, and a connection to that port may reach any of them.
 
 In `private` mode (`network` in `config.json`, or `WAYPOINT_NETWORK=private`)
 each fork, `main` included, owns a network namespace pinned at

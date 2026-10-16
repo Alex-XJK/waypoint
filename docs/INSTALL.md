@@ -114,7 +114,8 @@ Required for normal operation:
 
 - Linux with root privileges
 - OverlayFS support
-- CRIU, including the `criu` and `crit` commands
+- CRIU, including the `criu` and `crit` commands; the host check requires CRIU
+  4.0 or newer on aarch64
 - `cp` and `uname` (coreutils)
 - `/bin/bash` inside the workspace/rootfs when using `--shell`
 

@@ -20,13 +20,12 @@ identifiers:
     value: 10.48550/arXiv.2609.38648
 repository-code: 'https://github.com/Alex-XJK/waypoint'
 abstract: >-
-  A lightweight checkpoint/restore tool that captures both
-  filesystem and memory state with minimal overhead. Built
-  on top of CRIU and OverlayFS for fast, isolated process
-  state management.
+  Branchable agent containers: checkpoint a running sandbox
+  (files, memory and live terminal sessions) and fork it into
+  many independent live copies. Built on CRIU and OverlayFS.
 license: Apache-2.0
 version: 0.7.1
-date-released: '2026-10-15'
+date-released: '2026-10-16'
 references:
   - type: article
     title: "StateFork: Branchable Infrastructure for Agent Exploration"

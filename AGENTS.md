@@ -203,6 +203,9 @@ Choose validation for the affected behavior:
 - `sudo ./scripts/test-search-workflow.sh` adds an offline Dockerfile build, file
   transfer, concurrent branching, recursive snapshots/backtracking, export, and
   cleanup workload. Its header documents prerequisites and scaling options.
+- `sudo ./scripts/benchmark.sh` times each basic operation (median/min/max ms) for
+  comparing hosts or spotting performance regressions; it asserts no behavior
+  beyond success and cleanup.
 - Run Waypoint runtime operations as root through `sudo` or a root test harness.
   Use private test sessions/paths, clean only resources created by the test, and
   verify that their processes and mounts are gone. Use the same registry/config
