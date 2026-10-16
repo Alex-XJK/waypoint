@@ -32,6 +32,7 @@ type checkpointInfoOutput struct {
 type dependenciesInfo struct {
 	CRIU      commandInfo   `json:"criu"`
 	Buildah   commandInfo   `json:"buildah"`
+	Pasta     commandInfo   `json:"pasta"`
 	OverlayFS overlayFSInfo `json:"overlayfs"`
 }
 
@@ -78,6 +79,7 @@ func collectSystemInfo() systemInfoOutput {
 		Dependencies: dependenciesInfo{
 			CRIU:      inspectCommand("criu", "--version"),
 			Buildah:   inspectCommand("buildah", "--version"),
+			Pasta:     inspectCommand("pasta", "--version"),
 			OverlayFS: inspectOverlayFS(),
 		},
 	}

@@ -158,7 +158,7 @@ sudo env BIN_DIR="$PWD" ./setup install
 
 ```bash
 sudo waypoint version
-# Output: waypoint version v0.7.0
+# Output: waypoint version v0.7.1
 ```
 
 You can also run the root-level host check from the setup script after manual
@@ -192,7 +192,8 @@ You can create a configuration file to set global options. Example content:
   "bash_init_src": "/custom/compiled/bash_init",
   "preserve_session_on_cleanup": false,
   "tmpfs_images": false,
-  "phase_stats": false
+  "phase_stats": false,
+  "network": "shared"
 }
 ```
 
@@ -212,6 +213,13 @@ The optional `tmpfs_images` setting (`WAYPOINT_TMPFS_IMAGES`) writes CRIU images
 tmpfs and flushes them to disk asynchronously; images are not durable until that
 flush completes. `phase_stats` (`WAYPOINT_PHASE_STATS`) adds checkpoint/fork timing
 breakdowns. Both options default to `false`.
+
+`network` (`WAYPOINT_NETWORK`) is `shared` (default) or `private`. In `shared`
+mode every fork runs in the host network namespace. In `private` mode each fork,
+including `main`, gets its own network namespace, so forks of one checkpoint can
+all listen on the same port; outbound traffic goes through a
+[pasta](https://passt.top) process per fork (package `passt`). A session keeps
+the mode it was created with.
 
 ### 1. Initialize Environment
 
@@ -554,10 +562,9 @@ location while images are flushed to disk.
 
 ## Technical Details ⌨️
 
-The original v0.6.0 diagram is retained for reference; the sections below describe
-the v0.7.0 checkpoint/fork design.
+![v0.7.0 Architecture Diagram](./docs/waypoint-v070.drawio.png)
 
-![Historical v0.6.0 Architecture Diagram](./docs/waypoint-v060.drawio.png)
+The [v0.6.0 diagram](./docs/waypoint-v060.drawio.png) is kept for reference.
 
 ### OverlayFS Initialization
 
@@ -588,9 +595,10 @@ Each session gets:
 - Shared immutable layers with a private writable overlay for each live fork
 - A dedicated shell supervisor and process tree for each live fork
 
-Forks use separate filesystem views and process namespaces. Networking is shared
-with the host by design; forks do not receive private IP addresses or separate
-port spaces.
+Forks use separate filesystem views and process namespaces. By default they
+share the host network namespace, and with it one port space. In `private`
+network mode each fork has its own network namespace and port space, with every
+fork configured identically.
 
 ### Terminal Session Management
 
@@ -607,7 +615,7 @@ port spaces.
 
 - Requires root privileges (CRIU and OverlayFS requirement)
 - Linux-specific (depends on CRIU and OverlayFS)
-- Forks share host networking, so services using the same ports can conflict; network connections may not survive checkpoint/restore
+- In the default `shared` network mode, forks share host networking, so services using the same ports conflict; `private` mode gives each fork its own port space. Network connections may not survive checkpoint/restore
 - Exec uses one persistent PTY: stdout/stderr are combined, and output is returned when the command finishes rather than streamed
 - A checkpoint captures supported process/filesystem state; it does not provide a full security boundary for untrusted workloads
 
@@ -615,13 +623,13 @@ port spaces.
 
 If you use waypoint in academic research, please cite:
 ```bibtex
-@misc{xu2025systemsfoundationsagenticexploration,
-      title={Toward Systems Foundations for Agentic Exploration}, 
-      author={Jiakai Xu and Tianle Zhou and Eugene Wu and Kostis Kaffes},
-      year={2025},
-      eprint={2510.05556},
+@misc{xu2026statefork,
+      title={StateFork: Branchable Infrastructure for Agent Exploration},
+      author={Jiakai Xu and Tianle Zhou and Georgios Liargkovas and Danielle Gillai and Ruizhe Fu and Patrick Shen and Eugene Wu and Kostis Kaffes},
+      year={2026},
+      eprint={2609.38648},
       archivePrefix={arXiv},
-      primaryClass={cs.DC},
-      url={https://arxiv.org/abs/2510.05556}
+      primaryClass={cs.OS},
+      url={https://arxiv.org/abs/2609.38648}
 }
 ```

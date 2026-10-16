@@ -5,10 +5,13 @@ package waypoint
 // sealing the fork's overlay upper into a new layer).
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -222,11 +225,30 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 
 	start := time.Now()
 	if err := m.withForkLock(f.ID, func() error {
+		var netMs float64
+		if m.privateNetwork() {
+			netStart := time.Now()
+			network, err := m.newForkNetwork(f.ID)
+			if err != nil {
+				f.Status = ForkStatusFailed
+				_ = m.saveFork(f)
+				return fmt.Errorf("failed to set up network for fork %s: %w", f.ID, err)
+			}
+			f.ForkNetwork = network
+			netMs = durMs(time.Since(netStart))
+			// The restore helper reads the record from disk.
+			if err := m.saveFork(f); err != nil {
+				f.releaseNetwork()
+				return err
+			}
+		}
 		bd, err := m.restoreForkAndWait(f)
+		bd.NetMs = netMs
 		if PhaseStats {
 			f.RestoreBreakdown = bd // keep partial phases on failure for debugging
 		}
 		if err != nil {
+			f.releaseNetwork()
 			f.Status = ForkStatusFailed
 			_ = m.saveFork(f)
 			return err
@@ -275,6 +297,63 @@ func (m *Manager) restoreForkAndWait(f *Fork) (*RestoreBreakdown, error) {
 	}
 	bd.SockWaitMs = durMs(time.Since(sockStart))
 	return bd, nil
+}
+
+// criuActionSubcommand is the hidden subcommand criu's --action-script runs.
+const criuActionSubcommand = "__waypoint_criu_action"
+
+// RunCriuAction handles criu's pre-resume hook, when the tasks exist but are
+// still stopped. Failures are only warnings: a failing action script aborts
+// the restore.
+func RunCriuAction() error {
+	if os.Getenv("CRTOOLS_SCRIPT_ACTION") != "pre-resume" {
+		return nil
+	}
+	rootPid, err := strconv.Atoi(os.Getenv("CRTOOLS_INIT_PID"))
+	if err != nil {
+		return nil
+	}
+	advanceNsLastPid(rootPid)
+	return nil
+}
+
+// advanceNsLastPid sets ns_last_pid to the tree's highest pid. criu leaves it
+// unchanged, so new children get pids below their parents and a later
+// checkpoint of the tree fails to restore. The sysctl applies to the writer's
+// pid namespace, hence nsenter.
+func advanceNsLastPid(rootPid int) {
+	if rootPid <= 0 {
+		return
+	}
+	top, err := maxNamespacedPid(rootPid)
+	if err != nil || top <= 0 {
+		return
+	}
+	cmd := exec.Command("nsenter", "-t", strconv.Itoa(rootPid), "-p", "--",
+		"sh", "-c", fmt.Sprintf("echo %d > /proc/sys/kernel/ns_last_pid", top))
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"warning: could not advance ns_last_pid of pid %d to %d: %v\n%s",
+			rootPid, top, err, out.String())
+	}
+}
+
+// maxNamespacedPid returns the highest pid in the tree's own /proc, or 0 if it
+// has none.
+func maxNamespacedPid(rootPid int) (int, error) {
+	ents, err := os.ReadDir(fmt.Sprintf("/proc/%d/root/proc", rootPid))
+	if err != nil {
+		return 0, err
+	}
+	top := 0
+	for _, e := range ents {
+		if n, err := strconv.Atoi(e.Name()); err == nil && n > top {
+			top = n
+		}
+	}
+	return top, nil
 }
 
 func (c *CRIUMaterializer) Snapshot(f *Fork, id string) (*Checkpoint, error) {
@@ -375,6 +454,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 		// memory image and the sealed delta layer; discard the fork's runtime
 		// remains instead of re-restoring it. A cleanup failure doesn't fail
 		// the park — the checkpoint is already durable.
+		f.releaseNetwork()
 		_ = os.Remove(f.SocketPath)
 		if err := os.RemoveAll(f.RootDir); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: parked fork %s left runtime dir behind: %v\n", f.ID, err)
