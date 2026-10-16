@@ -23,8 +23,9 @@ This project thrives thanks to the efforts and expertise of the following people
 - Added CRIU file-lock support for lock-holding processes.
 - Added inode reverse-map and deleted-file remapping support for Node.js workloads with inotify watches and unlinked-but-open files.
 - Applied built-image `ENV` and `WORKDIR` settings to Dockerfile-based sessions.
-- Extended the reach of the concurrent fork model with the `cp` verb for host-to-fork file and directory transfer, and by letting sessions and forks share the host network namespace.
+- Extended the reach of the concurrent fork model with the `cp` verb for host-to-fork file and directory transfer.
 - Designed a user field verification and Bash command pre-validation module to enhance the robustness.
+- Fixed restored process trees handing out pids below the ones they already hold with CRIU's pre-resume hook.
 
 
 ### Rohan Timmaraju

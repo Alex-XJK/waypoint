@@ -114,7 +114,8 @@ Required for normal operation:
 
 - Linux with root privileges
 - OverlayFS support
-- CRIU, including the `criu` and `crit` commands
+- CRIU, including the `criu` and `crit` commands; the host check requires CRIU
+  4.0 or newer on aarch64
 - `cp` and `uname` (coreutils)
 - `/bin/bash` inside the workspace/rootfs when using `--shell`
 
@@ -126,6 +127,10 @@ Required for building from source:
 Optional for `waypoint build`:
 
 - `buildah`
+
+Optional for the `private` network mode:
+
+- `pasta`, from the `passt` package
 
 Run `sudo ./setup check`, `sudo make check`, or `sudo make doctor` to inspect the current host.
 The check requires root so it can run CRIU the same way Waypoint does. Plain `criu check` is a hard gate; `criu check --all` is reported as an advisory warning because optional missing kernel features may not affect every workload. The check is diagnostic only; it does not add a Waypoint CLI sub-command.

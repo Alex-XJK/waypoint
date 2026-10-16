@@ -23,10 +23,11 @@ Fork     = a live, mutable instance of one checkpoint   (a running shell)
 
 - **Checkpoint**: sealed OverlayFS upper layer + CRIU memory image. Immutable.
   Nodes form a DAG via `ParentID`; `LayerIDs` is the resolved layer chain.
-- **Fork**: its own upper/work dirs, its own PID+mount+IPC+UTS namespaces (the
-  host network namespace is shared, so forks share a port space with each other
-  and the host), its own restored shell + control socket. Many can run at once
-  from one checkpoint.
+- **Fork**: its own upper/work dirs, its own PID+mount+IPC+UTS namespaces, its
+  own restored shell + control socket. Many can run at once from one checkpoint.
+  The network namespace is the host's by default, so forks share a port space
+  with each other and the host; in `private` network mode each fork has its own
+  (see [Networking](#networking)).
 - **`main`** is just the first fork, created by `init --shell`.
 - **snapshot** seals a live fork into a new checkpoint and rebases the fork
   onto it — this is what makes recursive forking ordinary. The CLI's
@@ -109,9 +110,16 @@ Two binaries, one library:
   so CRIU treats the overlay as externally managed); and the restore side —
   `runRestoreHelper` / `RunForkRestoreChildFromArgs` / `restoreForkChild`
   re-exec into fresh mount/IPC namespaces, mount this fork's overlay at
-  the canonical path, and `criu restore` the image. Host compatibility (criu
-  present, recent enough, kernel features, the ARM64 PAC / CRIU-4.0 rule) is
-  validated out of band by `./setup check`, not at runtime.
+  the canonical path, and `criu restore` the image. A fork with its own network
+  namespace is dumped with that namespace marked external and restored into it
+  with `--inherit-fd`. Host compatibility (criu present, recent enough, kernel
+  features, the ARM64 PAC / CRIU-4.0 rule) is validated out of band by
+  `./setup check`, not at runtime.
+- `netns.go` — `private` network mode: `newForkNetwork` (create a fork's
+  network namespace, pinned under `/run/waypoint`, and start its pasta),
+  `releaseNetwork` / `sweepSessionNetwork` (teardown), `startInNetNS` (start
+  `main`'s `bash_init` inside its namespace), `externalNetNSArg` (the dump's
+  `--external net[...]`), and the guest `resolv.conf`.
 - `overlay.go` — the CoW layer: `InitEnvironment` (first overlay mount for
   `main`), the single `mountOverlay` used both on the host and inside a
   restore child's namespace, runtime pseudo-fs mounts (`/proc`, `/sys`), and
@@ -165,12 +173,15 @@ Two binaries, one library:
     work/                   OverlayFS scratch space
     temp/                   currently unused
     restore.log restore.pid
+    pasta.log               pasta's startup output (private network mode)
   locks/
     session.lock            session-wide flock
     fork-<fork>.lock        stable per-fork flock
 
 /tmp/waypoint-sessions-info/<session>.json   global registry (find a session)
 /dev/shm/waypoint/<session>/<ckpt>/          tmpfs images (tmpfs_images only)
+/run/waypoint/<session>/<fork>/netns         network namespace pin, and
+/run/waypoint/<session>/<fork>/pasta.pid       pasta's PID (private network mode)
 ```
 
 `/tmp/waypoint-sessions/<session>/temp/shell_<session>.sock` is the canonical
@@ -350,6 +361,36 @@ background flusher copies the images — atomically repointed at
 `checkpoints/<ckpt>/criu.disk` (durable). Restores follow the symlink either
 way; see `imagestore.go`.
 
+## Networking
+
+In the default `shared` network mode every fork runs in the host network
+namespace: one port space for all forks and the host. Forks of a checkpoint
+that holds a listening socket still restore, each with its own listener on the
+same port, and a connection to that port may reach any of them.
+
+In `private` mode (`network` in `config.json`, or `WAYPOINT_NETWORK=private`)
+each fork, `main` included, owns a network namespace pinned at
+`/run/waypoint/<session>/<fork>/netns`, and a pasta process connects it to the
+outside through host sockets. pasta copies the host's addresses and routes into
+the namespace, so every fork is configured identically, and nothing is added to
+the host (no bridge, routes, or firewall rules). No ports are forwarded in
+either direction. The pasta gateway address reaches the host's loopback
+services, which is also how DNS reaches a loopback host resolver: a guest
+`resolv.conf` seeded by Waypoint names pasta's forwarder, `169.254.1.1`.
+
+The namespace is fork runtime, not checkpoint state. The dump marks it
+external (`--external net[<inode>]:waypoint-net`) and the restore joins the
+fork's pinned namespace (`--inherit-fd fd[3]:waypoint-net`), so a checkpoint
+holding listening sockets or loopback connections can be restored into any
+number of forks at once. A new fork gets a new namespace; a snapshot restores
+the fork into the one it had; park, destroy, suspend, and cleanup release it.
+criu locks the namespace around each dump and restore; the session records
+whether it uses criu's nftables method (when criu supports it) or the default
+iptables method, so that a dump and the restore that unlocks it agree.
+
+A session keeps the mode it was created with (`network` in its registry
+record); sessions from earlier releases are `shared`.
+
 ## Three flows end to end
 
 ### `waypoint init <rootfs> --shell`
@@ -381,7 +422,9 @@ CLI (main.go)
          startup failures relay the loader's error via the shell log)
        compute canonical socket:
          <session>/temp/shell_<session>.sock
+       private network mode: create main's network namespace + pasta
        start host bash_init in NEWPID|NEWNS|NEWIPC|NEWUTS namespaces
+         (private network mode: inside main's network namespace)
          with a fixed OCI-style guest env (PATH, HOME, TERM, LANG — never
          the invoking user's environment, which would be baked into every
          checkpoint):
@@ -458,6 +501,7 @@ CLI (main.go)
        CRIUMaterializer.Materialize:
          withSessionLock: newForkRecord + mkdir upper/work/temp + save fork.json
          withForkLock:
+           private network mode: create f1's network namespace + pasta
            runRestoreHelper -> re-exec `__waypoint_restore_fork_child`
              new NEWNS|NEWIPC namespaces                 (restoreForkChild)
              mount f1's overlay at <session>/work        (mountOverlay)

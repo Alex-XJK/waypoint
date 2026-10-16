@@ -43,7 +43,7 @@ func (m *Manager) InitEnvironment(originalDir string) (string, error) {
 
 	// Seed name-resolution files through the merged view (into main's
 	// upper) so init and build sessions behave identically.
-	if err := PrepareNetworkDeps(m.workOverlay); err != nil {
+	if err := PrepareNetworkDeps(m.workOverlay, m.network); err != nil {
 		_ = unix.Unmount(m.workOverlay, unix.MNT_DETACH)
 		return "", fmt.Errorf("failed to prepare network deps: %w", err)
 	}

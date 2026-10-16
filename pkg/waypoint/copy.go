@@ -21,7 +21,8 @@ import (
 
 // CopyToFork copies hostSource to the exact guestDestination path in a running
 // fork. Parent directories are created as needed. Existing directories are
-// merged; regular files are replaced atomically.
+// merged; any other existing entry, including a symlink, is replaced atomically
+// rather than followed. A directory is never replaced by a non-directory.
 //
 // Regular files and directories are supported. Source symlinks, devices,
 // sockets, and named pipes are rejected. Permission bits are preserved for
@@ -59,7 +60,11 @@ func (m *Manager) CopyToFork(forkID, hostSource, guestDestination string) error 
 
 // CopyFromFork copies guestSource from a running fork to the exact
 // hostDestination path. Parent directories are created as needed. Existing
-// directories are merged; regular files are replaced atomically.
+// directories are merged; any other existing entry is replaced atomically
+// rather than followed. A directory is never replaced by a non-directory.
+//
+// Warning: the destination is a host path, so a symlink there is replaced, not
+// written through.
 //
 // The supported file types and preserved metadata are the same as CopyToFork.
 func (m *Manager) CopyFromFork(forkID, guestSource, hostDestination string) error {
@@ -260,8 +265,10 @@ func copyRegularFile(source *os.File, sourceInfo os.FileInfo, destination *os.Ro
 
 	base := filepath.Base(destinationName)
 	if info, err := parent.Lstat(base); err == nil {
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("destination %s exists and is not a regular file", destinationName)
+		// The rename below replaces any non-directory, symlink included, without
+		// following it; only a directory has to be refused.
+		if info.IsDir() {
+			return fmt.Errorf("destination %s exists and is a directory", destinationName)
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("inspect destination %s: %w", destinationName, err)
@@ -316,19 +323,22 @@ func copyDirectory(sourceName string, sourceDir *os.File, sourceInfo os.FileInfo
 	defer parent.Close()
 
 	base := filepath.Base(destinationName)
+	replaceNonDir := false
 	destinationInfo, err := parent.Lstat(base)
-	if err == nil {
-		if !destinationInfo.IsDir() {
-			return fmt.Errorf("destination %s exists and is not a directory", destinationName)
-		}
+	switch {
+	case err == nil && destinationInfo.IsDir():
+		// Merge into the existing directory.
 		destinationDir, err := parent.OpenRoot(base)
 		if err != nil {
 			return fmt.Errorf("open destination directory %s: %w", destinationName, err)
 		}
 		defer destinationDir.Close()
 		return copyDirectoryContents(sourceName, sourceDir, destinationDir)
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
+	case err == nil:
+		// rename(2) cannot put a directory over a non-directory. Unlink just
+		// before the rename, so the destination is not absent for the copy.
+		replaceNonDir = true
+	case !errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("inspect destination %s: %w", destinationName, err)
 	}
 
@@ -359,6 +369,11 @@ func copyDirectory(sourceName string, sourceDir *os.File, sourceInfo os.FileInfo
 	}
 	if err := chmodRootDirectory(parent, tempName, sourceInfo.Mode().Perm()); err != nil {
 		return err
+	}
+	if replaceNonDir {
+		if err := parent.Remove(base); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("replace destination %s: %w", destinationName, err)
+		}
 	}
 	if err := parent.Rename(tempName, base); err != nil {
 		return fmt.Errorf("install destination directory %s: %w", destinationName, err)

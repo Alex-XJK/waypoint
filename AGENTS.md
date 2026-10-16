@@ -31,8 +31,9 @@ a separate architecture explanation is unnecessary.
 Waypoint is a Linux tool for checkpointing and concurrently forking live process
 state together with filesystem state. It combines CRIU process-tree dumps/restores,
 OverlayFS copy-on-write layers, and a persistent Bash shell supervised on a PTY.
-The runtime requires root and suitable kernel features. It shares host networking;
-it does not provide a complete container security boundary.
+The runtime requires root and suitable kernel features. Forks share host networking
+by default, or each get their own network namespace in `private` network mode; it
+does not provide a complete container security boundary.
 
 Start with [docs/architecture.md](docs/architecture.md) for the overall design,
 [docs/exec-protocol.md](docs/exec-protocol.md) for shell communication, and
@@ -158,6 +159,8 @@ holds registry records. Both default under `/tmp`. Use durable locations for bot
 when persistence across reboots matters. Keep runtime paths short enough for Unix
 sockets and valid for OverlayFS mount options. `WAYPOINT_TMPFS_IMAGES` and
 `WAYPOINT_PHASE_STATS` are opt-in; pending tmpfs images are not durable until flushed.
+`WAYPOINT_NETWORK=private` (opt-in, needs pasta) gives each fork of a new session its
+own network namespace; a session keeps the mode it was created with.
 
 Installation and dependency setup modify the host. `sudo ./setup install` installs
 the CLI, static helper, Bash completion, and a helper-path config, preserving existing
@@ -191,9 +194,18 @@ Choose validation for the affected behavior:
   protocol, run `sudo ./scripts/demo.sh` as the baseline runtime check, plus focused
   coverage for the change. It rebuilds binaries and asserts CLI behavior and cleanup;
   its Dockerfile section requires Buildah and reports a skip if unavailable.
+- For changes to private network mode, also run `sudo ./scripts/test-private-network.sh`
+  (per-fork ports, egress through pasta, and namespace lifecycle across snapshot,
+  park, destroy, suspend, and cleanup).
+- For changes to restore or the CRIU action script, also run
+  `sudo ./scripts/test-ns-last-pid.sh` (new pids after checkpoint, fork, and a
+  second-generation fork stay above the restored tree's).
 - `sudo ./scripts/test-search-workflow.sh` adds an offline Dockerfile build, file
   transfer, concurrent branching, recursive snapshots/backtracking, export, and
   cleanup workload. Its header documents prerequisites and scaling options.
+- `sudo ./scripts/benchmark.sh` times each basic operation (median/min/max ms) for
+  comparing hosts or spotting performance regressions; it asserts no behavior
+  beyond success and cleanup.
 - Run Waypoint runtime operations as root through `sudo` or a root test harness.
   Use private test sessions/paths, clean only resources created by the test, and
   verify that their processes and mounts are gone. Use the same registry/config

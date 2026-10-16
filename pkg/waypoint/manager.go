@@ -34,6 +34,10 @@ type Manager struct {
 	// as they do under docker. Empty for `init` sessions, which have no image.
 	imageEnv     []string
 	imageWorkDir string
+	// network is the session's network mode, set at creation; empty means
+	// NetworkShared. networkLock is its criu --network-lock method.
+	network     string
+	networkLock string
 }
 
 // SessionInfo holds information about a checkpoint session.
@@ -49,6 +53,8 @@ type SessionInfo struct {
 	ShellSocket    string   `json:"shell_socket,omitempty"`
 	ImageEnv       []string `json:"image_env,omitempty"`
 	ImageWorkDir   string   `json:"image_workdir,omitempty"`
+	Network        string   `json:"network,omitempty"`
+	NetworkLock    string   `json:"network_lock,omitempty"`
 }
 
 // PID values for special cases
@@ -74,6 +80,10 @@ func NewManagerWithSession() (*Manager, string, error) {
 	manager := newManager(filepath.Join(DefaultSessionsDir, sessionID))
 	manager.sessionID = sessionID
 	manager.shellPid = ShellNotEnabled
+	manager.network = NetworkMode
+	if manager.privateNetwork() {
+		manager.networkLock = detectNetworkLock()
+	}
 
 	if err := saveSessionInfo(sessionID, manager); err != nil {
 		return nil, "", fmt.Errorf("failed to save session info: %w", err)
@@ -103,6 +113,8 @@ func LoadManager(sessionID string) (*Manager, error) {
 	manager.shellSocket = sessionInfo.ShellSocket
 	manager.imageEnv = sessionInfo.ImageEnv
 	manager.imageWorkDir = sessionInfo.ImageWorkDir
+	manager.network = sessionInfo.Network
+	manager.networkLock = sessionInfo.NetworkLock
 
 	return manager, nil
 }
@@ -152,6 +164,8 @@ func saveSessionInfo(sessionID string, manager *Manager) error {
 		ShellSocket:    manager.shellSocket,
 		ImageEnv:       manager.imageEnv,
 		ImageWorkDir:   manager.imageWorkDir,
+		Network:        manager.network,
+		NetworkLock:    manager.networkLock,
 	}
 	return writeSessionInfo(&sessionInfo)
 }

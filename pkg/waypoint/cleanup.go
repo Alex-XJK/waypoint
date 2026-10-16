@@ -38,6 +38,7 @@ func (m *Manager) Cleanup() error {
 		}
 	}
 
+	m.sweepSessionNetwork()
 	unmountAll(sessionMounts(m.baseDir))
 
 	if PreserveSessionOnCleanup {
@@ -74,6 +75,7 @@ func (m *Manager) Suspend() error {
 		}
 	}
 	m.killStragglers()
+	m.sweepSessionNetwork()
 	unmountAll(sessionMounts(m.baseDir))
 
 	m.preserveTmpfsImages()
@@ -97,9 +99,11 @@ func (m *Manager) CleanupForce() error {
 			if f.PID > 0 {
 				_ = killTree(f.PID, f.StartTime)
 			}
+			f.releaseNetwork()
 		}
 	}
 	m.killStragglers()
+	m.sweepSessionNetwork()
 
 	fmt.Println("Unmounting session mounts...")
 	unmountAll(sessionMounts(m.baseDir))
