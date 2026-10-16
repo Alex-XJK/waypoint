@@ -54,6 +54,7 @@ type Fork struct {
 	// StartTime is the PID's /proc stat starttime, recorded at spawn so
 	// kills can verify the identity (PID-reuse safety). 0 = unknown.
 	StartTime       uint64     `json:"start_time,omitempty"`
+	ForkNetwork                // private network mode only
 	CreatedAt       int64      `json:"created_at"`
 	RestoreDuration string     `json:"restore_duration,omitempty"`
 	Status          ForkStatus `json:"status"`
@@ -159,7 +160,7 @@ func newForkRecord(m *Manager, checkpointID string, metadata *Metadata, spec For
 
 // saveMainFork records the `main` fork right after `init --shell`; main is
 // just another fork, running directly on the session's work overlay.
-func (m *Manager) saveMainFork(pid int, socketPath, canonicalSocket, logPath string) error {
+func (m *Manager) saveMainFork(pid int, socketPath, canonicalSocket, logPath string, network ForkNetwork) error {
 	rootDir := m.forkDir(MainForkID)
 	f := &Fork{
 		ID:              MainForkID,
@@ -175,6 +176,7 @@ func (m *Manager) saveMainFork(pid int, socketPath, canonicalSocket, logPath str
 		LogPath:         logPath,
 		PID:             pid,
 		StartTime:       m.shellStartTime,
+		ForkNetwork:     network,
 		CreatedAt:       time.Now().Unix(),
 		Status:          ForkStatusRunning,
 	}
@@ -201,6 +203,7 @@ func (m *Manager) DestroyFork(forkID string) error {
 				return err
 			}
 		}
+		f.releaseNetwork()
 		_ = os.Remove(f.SocketPath)
 		return os.RemoveAll(f.RootDir)
 	})

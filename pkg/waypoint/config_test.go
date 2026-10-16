@@ -59,6 +59,7 @@ func loadBooleanConfigForTest(t *testing.T, contents string, env map[string]stri
 		"WAYPOINT_TMPFS_IMAGES",
 		"WAYPOINT_TMPFS_DIR",
 		"WAYPOINT_PHASE_STATS",
+		"WAYPOINT_NETWORK",
 	} {
 		t.Setenv(key, "")
 	}
@@ -199,5 +200,37 @@ func TestLoadConfigIsIdempotent(t *testing.T) {
 	loadConfig()
 	if second := currentBooleanConfigState(); second != first {
 		t.Fatalf("second loadConfig() = %+v, want %+v", second, first)
+	}
+}
+
+func TestLoadConfigNetworkMode(t *testing.T) {
+	cases := []struct {
+		name       string
+		file       string
+		env        string
+		wantMode   string
+		wantSource string // "file" stands for the config file's source label
+	}{
+		{"default", `{}`, "", NetworkShared, "default"},
+		{"file", `{"network": "private"}`, "", NetworkPrivate, "file"},
+		{"environment overrides file", `{"network": "shared"}`, "private", NetworkPrivate, "env:WAYPOINT_NETWORK"},
+		{"invalid environment falls back to file", `{"network": "private"}`, "bogus", NetworkPrivate, "file"},
+		{"invalid file value is ignored", `{"network": "bogus"}`, "", NetworkShared, "default"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			previousMode, previousSource := NetworkMode, NetworkModeConfig
+			t.Cleanup(func() { NetworkMode, NetworkModeConfig = previousMode, previousSource })
+			NetworkMode, NetworkModeConfig = NetworkShared, "default"
+
+			source := loadBooleanConfigForTest(t, tc.file, map[string]string{"WAYPOINT_NETWORK": tc.env})
+			wantSource := tc.wantSource
+			if wantSource == "file" {
+				wantSource = source
+			}
+			if NetworkMode != tc.wantMode || NetworkModeConfig != wantSource {
+				t.Fatalf("network mode = %q from %q, want %q from %q", NetworkMode, NetworkModeConfig, tc.wantMode, wantSource)
+			}
+		})
 	}
 }

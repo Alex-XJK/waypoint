@@ -51,7 +51,23 @@ var (
 	// every fork and snapshot.
 	PhaseStats       = false
 	PhaseStatsConfig = "default"
+
+	// NetworkMode is the network mode of new sessions; a session keeps the
+	// mode it was created with.
+	NetworkMode       = NetworkShared
+	NetworkModeConfig = "default"
 )
+
+// Network modes: forks run in the host network namespace, or each in its own
+// with outbound access through pasta (netns.go).
+const (
+	NetworkShared  = "shared"
+	NetworkPrivate = "private"
+)
+
+func validNetworkMode(mode string) bool {
+	return mode == NetworkShared || mode == NetworkPrivate
+}
 
 type config struct {
 	SessionInfoDir           string `json:"session_info_dir,omitempty"`
@@ -61,6 +77,7 @@ type config struct {
 	TmpfsImages              *bool  `json:"tmpfs_images,omitempty"`
 	TmpfsImagesDir           string `json:"tmpfs_images_dir,omitempty"`
 	PhaseStats               *bool  `json:"phase_stats,omitempty"`
+	Network                  string `json:"network,omitempty"`
 }
 
 // ConfigValue reports an effective configuration value and where it came from.
@@ -78,6 +95,7 @@ type ConfigInfo struct {
 	TmpfsImages              ConfigValue `json:"tmpfs_images"`
 	TmpfsImagesDir           ConfigValue `json:"tmpfs_images_dir"`
 	PhaseStats               ConfigValue `json:"phase_stats"`
+	Network                  ConfigValue `json:"network"`
 }
 
 // LoadConfigInfo loads custom configuration and returns the effective values.
@@ -111,6 +129,10 @@ func LoadConfigInfo() ConfigInfo {
 		PhaseStats: ConfigValue{
 			Value:  PhaseStats,
 			Source: PhaseStatsConfig,
+		},
+		Network: ConfigValue{
+			Value:  NetworkMode,
+			Source: NetworkModeConfig,
 		},
 	}
 }
@@ -199,6 +221,16 @@ func loadConfig() {
 		PhaseStats = phaseStatsEnv
 		PhaseStatsConfig = "env:WAYPOINT_PHASE_STATS"
 	}
+	networkEnvSet := false
+	if v := os.Getenv("WAYPOINT_NETWORK"); v != "" {
+		if validNetworkMode(v) {
+			NetworkMode = v
+			NetworkModeConfig = "env:WAYPOINT_NETWORK"
+			networkEnvSet = true
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: ignoring invalid WAYPOINT_NETWORK=%q (want %q or %q); using config/default instead\n", v, NetworkShared, NetworkPrivate)
+		}
+	}
 
 	// 2) Config file path determination
 
@@ -281,6 +313,14 @@ func loadConfig() {
 				if cfg.PhaseStats != nil && !phaseStatsEnvSet {
 					PhaseStats = *cfg.PhaseStats
 					PhaseStatsConfig = configSource
+				}
+				if cfg.Network != "" && !networkEnvSet {
+					if validNetworkMode(cfg.Network) {
+						NetworkMode = cfg.Network
+						NetworkModeConfig = configSource
+					} else {
+						fmt.Fprintf(os.Stderr, "warning: ignoring invalid network %q in %s (want %q or %q)\n", cfg.Network, cfgPath, NetworkShared, NetworkPrivate)
+					}
 				}
 			}
 		}

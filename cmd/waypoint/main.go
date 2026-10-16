@@ -124,6 +124,11 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "__waypoint_criu_action":
+		if err := waypoint.RunCriuAction(); err != nil {
+			fmt.Fprintf(os.Stderr, "criu action hook: %v\n", err)
+		}
+		return
 	case "__waypoint_restore_fork_child":
 		if err := waypoint.RunForkRestoreChildFromArgs(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
