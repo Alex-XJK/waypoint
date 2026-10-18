@@ -576,13 +576,12 @@ func main() {
 		if len(os.Args) > 5 {
 			if os.Args[5] == "--dir" {
 				if len(os.Args) < 7 {
-					fmt.Println("Error: --dir requires a value (target directory name)")
+					fmt.Println("Error: --dir requires a value (restricted directory name)")
 					os.Exit(1)
 				}
 				targetDir = os.Args[6]
 			}
 		}
-
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
 			fmt.Printf("Error loading session: %v\n", err)
