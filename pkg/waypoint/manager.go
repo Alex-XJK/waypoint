@@ -310,7 +310,7 @@ func (m *Manager) diffsDir() string {
 	return filepath.Join(m.baseDir, "diffs")
 }
 
-func (m *Manager) diffsDir(diffID string) string {
+func (m *Manager) diffDir(diffID string) string {
 	return filepath.Join(m.diffsDir(), diffID)
 }
 

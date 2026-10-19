@@ -587,7 +587,7 @@ func main() {
 			fmt.Printf("Error loading session: %v\n", err)
 			os.Exit(1)
 		}
-		if err := manager.printDiff(ckptIDFirst, ckptIDSecond, targetDir); err != nil {
+		if err := manager.PrintDiff(ckptIDFirst, ckptIDSecond, targetDir); err != nil {
 			fmt.Printf("Error printing diff: %v\n", err)
 			os.Exit(1)
 		}
