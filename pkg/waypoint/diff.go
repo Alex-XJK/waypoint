@@ -34,6 +34,83 @@ type Diff struct {
 	resultsFile	 		string
 }
 
+func makeIsInteresting(added, deleted, modified []string) func(string) bool {
+	interesting := make(map[string]struct{}, len(added) + len(deleted) + len(modified))
+	for _, path := range added {
+		interesting[path] = struct{}{}
+	}
+	for _, path := range deleted {
+		interesting[path] = struct{}{}
+	}
+	for _, path := range modified {
+		interesting[path] = struct{}{}
+	}
+
+	return func(path string) bool {
+		_, present := interesting[path]
+		return present
+	}
+}
+
+func (m *Manager) walkBlame(isInteresting func(string) bool)
+
+func initVisible(added, modified, deleted []string) (map[string]bool) {
+	visible := make(map[string]bool, len(added)+len(deleted)+len(modified))
+	for _, path := range added {
+		visible[path] = false
+	}
+	for _, path := range deleted {
+		visible[path] = false
+	}
+	for _, path := range modified {
+		visible[path] = false
+	}
+	return visible
+}
+
+// Visibility information is necessary to properly track whiteouts in overlayfs
+
+func (m *Manager) blame(d Diff, added, modified, deleted []string) (map[string]string, error) {
+	// first determine if parent-child or leaf-leaf relationship
+	leftLayers := d.leftLayerIDs
+	rightLayers := d.rightLayerIDs
+	latestCommonIdx := -1
+	for i:= 0; i < len(leftLayers) && i < len(rightLayers); i++ {
+		if leftLayers[i] != rightLayers[i] {
+			break
+		}
+		latestCommonIdx = i
+	}
+	if latestCommonIdx == -1 {
+
+	}
+	leftTail := leftLayers[latestCommonIdx+1:]
+	rightTail := rightLayers[latestCommonIdx+1:]
+	visible := initVisible(added, modified, deleted)
+
+	if len(leftTail) == 0 {
+		advanceVisible(visible, d.leftOriginalDir, leftLayers) // left is ancestor of right
+		walkBlame(visible, rightTail, latestCommonIdx)
+	} else if len(rightTail) == 0 {
+		advanceVisible(visible, d.rightOriginalDir, rightLayers) // right is ancestor of left
+		walkBlame(visible, leftTail, latestCommonIdx)
+	} else {
+		// leaves, need to walk both
+		if (latestCommonIdx >= 0) {
+			//TODO/ASK: if the checkpoints are shared, can we assume the original dir is same too?
+			advanceVisible(visible, d.leftOriginalDir, leftLayers[:latestCommonIdx + 1])
+		}
+		leftVisible := cloneVisible(visible)
+		rightVisible := cloneVisible(visible)
+		if (latestCommonIdx < 0) {
+			advanceVisible(leftVisible, d.leftOriginalDir, nil)
+			advanceVisible(rightVisible, d.rightOriginalDir, nil)
+		}
+		walkBlame(leftVisible, leftTail, latestCommonIdx)
+		walkBlame(rightVisible, rightTail, latestCommonIdx)
+	}
+}
+
 func cmpIsDiff(leftFilePath, rightFilePath string) (bool, error) {
 	cmd := exec.Command("cmp", "-s", leftFilePath, rightFilePath)
 	err := cmd.Run()
@@ -383,9 +460,25 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) (error)
 		}
 	}
 
+	blame, err := blame(d, added, modified, deleted)
+
 	sort.Strings(added)
 	sort.Strings(deleted)
 	sort.Strings(modified)
+	/*
+	// Now need to blame: for each path, write all the ckpts that touched it
+	// need to walk from the current checkpoint down to the last shared ancestor
+	// if parent -> child relationship, just one walk
+	// if two leaves, two walks from each leaf to the shared ancestor (parallelize)
+
+	In each walk: For each fpath.join(m.checkpointDir(layerID)/"upper") between the last common ancestor and the newestlayerID:
+		a. for each dentry
+			i. if is not a directory, check if is interesting and add to dictionaries accordingly. 
+			Note that if the file was removed in this layer, would expect to have xattr "trusted.overlay.whiteout" - check? Or, will be a character device with a 0/0 dev number so check for that too?
+			ii. if is a directory, check if the xattr "trusted.overlay.opaque" is "y". If yes, need to add all the interesting visible pathnames that are NOT within this directory as being affected by this layer
+			iii. if is a directory and not whiteout, then recurse on it
+
+	*/
 
 	// For debug for now
 	fmt.Println("Added:")
