@@ -459,6 +459,7 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) (error)
 			return err
 		}
 	}
+	// NOTE: Git style will only show file diffs, ie. rmdir (empty) not tracked
 
 	blame, err := blame(d, added, modified, deleted)
 
