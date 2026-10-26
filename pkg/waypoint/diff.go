@@ -54,6 +54,60 @@ func makeIsInteresting(added, deleted, modified []string) func(string) bool {
 
 func (m *Manager) walkBlame(isInteresting func(string) bool)
 
+func recurseGetOpaque(dir string, opaques []string) error {
+	dentries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read directory %s: %w", fsDir, err)
+	}
+	for _, dentry := range dentries {
+		if dentry.IsDir() {
+			
+			if err := recurseDir(fsPath, relPath, paths); err != nil {
+				return err
+			}
+		} else {
+			*paths = append(*paths, relPath)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) advanceVisible(visible map[string]string, layerDirs []string) error {
+	for _, layerDir := range layerDirs {
+		dentries, err := os.ReadDir(layerDir)
+	}
+	
+	
+	dentries, err := os.ReadDir(leftDir)
+    if err != nil {
+        return fmt.Errorf("read directory %s: %w", leftDir, err)
+    }
+    rightEntries, err := os.ReadDir(rightDir)
+    if err != nil {
+        return fmt.Errorf("read directory %s: %w", rightDir, err)
+    }
+    leftNameMap := make(map[string]os.DirEntry, len(leftEntries))
+    for _, entry := range leftEntries {
+        leftNameMap[entry.Name()] = entry
+    }
+    rightNameMap := make(map[string]os.DirEntry, len(rightEntries))
+    for _, entry := range rightEntries {
+        rightNameMap[entry.Name()] = entry
+    }
+	// Left-only entries -> deleted
+	for name, dentry := range leftNameMap {
+		if _, exists := rightNameMap[name]; exists {
+			continue
+		}
+		fsPath := filepath.Join(leftDir, name)
+		relPath := filepath.Join(relDir, name)
+		if dentry.IsDir() {
+			if err := recurseDir(fsPath, relPath, deleted); err != nil {
+				return err
+			}
+}
+
+// initialize all paths of interest as not visible
 func initVisible(added, modified, deleted []string) (map[string]bool) {
 	visible := make(map[string]bool, len(added)+len(deleted)+len(modified))
 	for _, path := range added {
@@ -67,8 +121,6 @@ func initVisible(added, modified, deleted []string) (map[string]bool) {
 	}
 	return visible
 }
-
-// Visibility information is necessary to properly track whiteouts in overlayfs
 
 func (m *Manager) blame(d Diff, added, modified, deleted []string) (map[string]string, error) {
 	// first determine if parent-child or leaf-leaf relationship
@@ -84,27 +136,36 @@ func (m *Manager) blame(d Diff, added, modified, deleted []string) (map[string]s
 	if latestCommonIdx == -1 {
 
 	}
+	var leftDirs []string
+	for _, ckptID := range leftLayers {
+		leftDirs = append(leftDirs, m.checkpointUpperDir(ckptID))
+	}
+	var rightDirs []string
+	for _, ckptID := range rightLayers {
+		leftDirs = append(leftDirs, m.checkpointUpperDir(ckptID))
+	}
+
 	leftTail := leftLayers[latestCommonIdx+1:]
 	rightTail := rightLayers[latestCommonIdx+1:]
 	visible := initVisible(added, modified, deleted)
 
 	if len(leftTail) == 0 {
-		advanceVisible(visible, d.leftOriginalDir, leftLayers) // left is ancestor of right
+		m.advanceVisible(visible, append([]string{d.leftOriginalDir}, leftDirs...)) // left is ancestor of right
 		walkBlame(visible, rightTail, latestCommonIdx)
 	} else if len(rightTail) == 0 {
-		advanceVisible(visible, d.rightOriginalDir, rightLayers) // right is ancestor of left
+		advanceVisible(visible, append([]string{d.rightOriginalDir}, rightDirs...) // right is ancestor of left
 		walkBlame(visible, leftTail, latestCommonIdx)
 	} else {
 		// leaves, need to walk both
-		if (latestCommonIdx >= 0) {
+		if (latestCommonIdx >= 0) { // advance to last common ckpt layer
 			//TODO/ASK: if the checkpoints are shared, can we assume the original dir is same too?
-			advanceVisible(visible, d.leftOriginalDir, leftLayers[:latestCommonIdx + 1])
+			m.advanceVisible(visible, append([]string{d.leftOriginalDir}, leftDirs[:latestCommonIdx + 1]...))
 		}
 		leftVisible := cloneVisible(visible)
 		rightVisible := cloneVisible(visible)
-		if (latestCommonIdx < 0) {
-			advanceVisible(leftVisible, d.leftOriginalDir, nil)
-			advanceVisible(rightVisible, d.rightOriginalDir, nil)
+		if (latestCommonIdx < 0) { // no common ckpt layer
+			m.advanceVisible(leftVisible, []string{d.leftOriginalDir}, nil)
+			m.advanceVisible(rightVisible, []string{d.rightOriginalDir}, nil)
 		}
 		walkBlame(leftVisible, leftTail, latestCommonIdx)
 		walkBlame(rightVisible, rightTail, latestCommonIdx)
@@ -466,6 +527,7 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) (error)
 	sort.Strings(added)
 	sort.Strings(deleted)
 	sort.Strings(modified)
+	// TODO: ALSO NEED TO LOOK INTO HOW DIRECTORY RENAMING WORKS IN OVERLAYFS
 	/*
 	// Now need to blame: for each path, write all the ckpts that touched it
 	// need to walk from the current checkpoint down to the last shared ancestor
