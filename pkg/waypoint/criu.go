@@ -149,20 +149,21 @@ type childRestoreTiming struct {
 	CriuWallMs float64 `json:"criu_wall_ms"`
 }
 
-// writeCriuActionScript writes the wrapper script; --action-script takes a
-// file, not a command line.
-func writeCriuActionScript(f *Fork) (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	path := filepath.Join(f.RootDir, "criu-action.sh")
-	body := "#!/bin/sh\nexec " + exe + " " + criuActionSubcommand + "\n"
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
-		return "", err
-	}
-	return path, nil
-}
+// Disabled, see RunCriuAction in checkpoint.go.
+// // writeCriuActionScript writes the wrapper script; --action-script takes a
+// // file, not a command line.
+// func writeCriuActionScript(f *Fork) (string, error) {
+// 	exe, err := os.Executable()
+// 	if err != nil {
+// 		return "", err
+// 	}
+// 	path := filepath.Join(f.RootDir, "criu-action.sh")
+// 	body := "#!/bin/sh\nexec " + exe + " " + criuActionSubcommand + "\n"
+// 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+// 		return "", err
+// 	}
+// 	return path, nil
+// }
 
 func restoreForkChild(f *Fork) error {
 	mountStart := time.Now()
@@ -185,13 +186,13 @@ func restoreForkChild(f *Fork) error {
 		"--work-dir", f.RootDir,
 		"-vv", "-o", f.LogPath,
 	}
-	// advanceNsLastPid runs before the tree resumes; once restore returns, the
-	// tree may already have forked.
-	if script, err := writeCriuActionScript(f); err == nil {
-		args = append(args, "--action-script", script)
-	} else {
-		fmt.Fprintf(os.Stderr, "warning: no criu action script for %s: %v\n", f.ID, err)
-	}
+	// Disabled, see RunCriuAction in checkpoint.go. advanceNsLastPid ran before
+	// the tree resumed; once restore returns, the tree may already have forked.
+	// if script, err := writeCriuActionScript(f); err == nil {
+	// 	args = append(args, "--action-script", script)
+	// } else {
+	// 	fmt.Fprintf(os.Stderr, "warning: no criu action script for %s: %v\n", f.ID, err)
+	// }
 	if f.MountPoint != "" {
 		args = append(args, "-r", f.MountPoint)
 		args = append(args, "--external", fmt.Sprintf("mnt[waypoint-work]:%s", f.MountPoint))

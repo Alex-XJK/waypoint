@@ -17,7 +17,7 @@ import (
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
 
-var Version = "v0.7.1"
+var Version = "v0.7.1-dev"
 
 // printExecResult writes the command output to stdout and exits with the
 // command's own exit code.
@@ -124,11 +124,12 @@ func main() {
 	}
 
 	switch os.Args[1] {
-	case "__waypoint_criu_action":
-		if err := waypoint.RunCriuAction(); err != nil {
-			fmt.Fprintf(os.Stderr, "criu action hook: %v\n", err)
-		}
-		return
+	// Disabled, see RunCriuAction in pkg/waypoint/checkpoint.go.
+	// case "__waypoint_criu_action":
+	// 	if err := waypoint.RunCriuAction(); err != nil {
+	// 		fmt.Fprintf(os.Stderr, "criu action hook: %v\n", err)
+	// 	}
+	// 	return
 	case "__waypoint_restore_fork_child":
 		if err := waypoint.RunForkRestoreChildFromArgs(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)

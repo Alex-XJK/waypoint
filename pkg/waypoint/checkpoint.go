@@ -5,13 +5,10 @@ package waypoint
 // sealing the fork's overlay upper into a new layer).
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -299,62 +296,67 @@ func (m *Manager) restoreForkAndWait(f *Fork) (*RestoreBreakdown, error) {
 	return bd, nil
 }
 
-// criuActionSubcommand is the hidden subcommand criu's --action-script runs.
-const criuActionSubcommand = "__waypoint_criu_action"
-
-// RunCriuAction handles criu's pre-resume hook, when the tasks exist but are
-// still stopped. Failures are only warnings: a failing action script aborts
-// the restore.
-func RunCriuAction() error {
-	if os.Getenv("CRTOOLS_SCRIPT_ACTION") != "pre-resume" {
-		return nil
-	}
-	rootPid, err := strconv.Atoi(os.Getenv("CRTOOLS_INIT_PID"))
-	if err != nil {
-		return nil
-	}
-	advanceNsLastPid(rootPid)
-	return nil
-}
-
-// advanceNsLastPid sets ns_last_pid to the tree's highest pid. criu leaves it
-// unchanged, so new children get pids below their parents and a later
-// checkpoint of the tree fails to restore. The sysctl applies to the writer's
-// pid namespace, hence nsenter.
-func advanceNsLastPid(rootPid int) {
-	if rootPid <= 0 {
-		return
-	}
-	top, err := maxNamespacedPid(rootPid)
-	if err != nil || top <= 0 {
-		return
-	}
-	cmd := exec.Command("nsenter", "-t", strconv.Itoa(rootPid), "-p", "--",
-		"sh", "-c", fmt.Sprintf("echo %d > /proc/sys/kernel/ns_last_pid", top))
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr,
-			"warning: could not advance ns_last_pid of pid %d to %d: %v\n%s",
-			rootPid, top, err, out.String())
-	}
-}
-
-// maxNamespacedPid returns the highest pid in the tree's own /proc, or 0 if it
-// has none.
-func maxNamespacedPid(rootPid int) (int, error) {
-	ents, err := os.ReadDir(fmt.Sprintf("/proc/%d/root/proc", rootPid))
-	if err != nil {
-		return 0, err
-	}
-	top := 0
-	for _, e := range ents {
-		if n, err := strconv.Atoi(e.Name()); err == nil && n > top {
-			top = n
-		}
-	}
-	return top, nil
-}
+// Disabled, not deleted: the criu Waypoint runs with (the waypoint branch of
+// our fork, 4.2.1.20261026 or later) restores ns_last_pid itself and no longer
+// crashes on the inverted tree, so the pre-resume hook is not needed. Keep the
+// code for a later version that decides at run time, from `criu --version`,
+// whether a stock 4.2 needs the hook.
+// // criuActionSubcommand is the hidden subcommand criu's --action-script runs.
+// const criuActionSubcommand = "__waypoint_criu_action"
+//
+// // RunCriuAction handles criu's pre-resume hook, when the tasks exist but are
+// // still stopped. Failures are only warnings: a failing action script aborts
+// // the restore.
+// func RunCriuAction() error {
+// 	if os.Getenv("CRTOOLS_SCRIPT_ACTION") != "pre-resume" {
+// 		return nil
+// 	}
+// 	rootPid, err := strconv.Atoi(os.Getenv("CRTOOLS_INIT_PID"))
+// 	if err != nil {
+// 		return nil
+// 	}
+// 	advanceNsLastPid(rootPid)
+// 	return nil
+// }
+//
+// // advanceNsLastPid sets ns_last_pid to the tree's highest pid. criu leaves it
+// // unchanged, so new children get pids below their parents and a later
+// // checkpoint of the tree fails to restore. The sysctl applies to the writer's
+// // pid namespace, hence nsenter.
+// func advanceNsLastPid(rootPid int) {
+// 	if rootPid <= 0 {
+// 		return
+// 	}
+// 	top, err := maxNamespacedPid(rootPid)
+// 	if err != nil || top <= 0 {
+// 		return
+// 	}
+// 	cmd := exec.Command("nsenter", "-t", strconv.Itoa(rootPid), "-p", "--",
+// 		"sh", "-c", fmt.Sprintf("echo %d > /proc/sys/kernel/ns_last_pid", top))
+// 	var out bytes.Buffer
+// 	cmd.Stdout, cmd.Stderr = &out, &out
+// 	if err := cmd.Run(); err != nil {
+// 		fmt.Fprintf(os.Stderr,
+// 			"warning: could not advance ns_last_pid of pid %d to %d: %v\n%s",
+// 			rootPid, top, err, out.String())
+// 	}
+// }
+//
+// // maxNamespacedPid returns the highest pid in the tree's own /proc, or 0 if it
+// // has none.
+// func maxNamespacedPid(rootPid int) (int, error) {
+// 	ents, err := os.ReadDir(fmt.Sprintf("/proc/%d/root/proc", rootPid))
+// 	if err != nil {
+// 		return 0, err
+// 	}
+// 	top := 0
+// 	for _, e := range ents {
+// 		if n, err := strconv.Atoi(e.Name()); err == nil && n > top {
+// 			top = n
+// 		}
+// 	}
+// 	return top, nil
+// }
 
 func (c *CRIUMaterializer) Snapshot(f *Fork, id string) (*Checkpoint, error) {
 	return c.manager.snapshotFork(f, id, false)
