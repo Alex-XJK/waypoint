@@ -16,8 +16,11 @@
 #   MEM_MB=0                  MiB a background process in main holds, so that
 #                             dumps and restores copy that much memory
 #   CSV=<file>                also append one row per operation to <file>
+#   WAYPOINT_BIN=<file>       binaries to time instead of building this checkout;
+#   BASH_INIT_BIN=<file>      set both or neither
 #
 # Usage:  sudo ./scripts/benchmark.sh
+#         sudo env WAYPOINT_BIN=... BASH_INIT_BIN=... ./scripts/benchmark.sh
 set -euo pipefail
 export LC_ALL=C
 
@@ -85,6 +88,8 @@ fi
 
 if [ -n "${WAYPOINT_BIN:-}" ] && [ -n "${BASH_INIT_BIN:-}" ]; then
   W="$WAYPOINT_BIN"; export WAYPOINT_BASH_INIT_SRC="$BASH_INIT_BIN"
+elif [ -n "${WAYPOINT_BIN:-}${BASH_INIT_BIN:-}" ]; then
+  echo "set both WAYPOINT_BIN and BASH_INIT_BIN, or neither (then this checkout is built)"; exit 1
 else
   GO="$(command -v go || true)"
   for cand in /usr/local/go/bin/go "$HOME/go/bin/go" "/home/${SUDO_USER:-}/go/bin/go"; do
@@ -128,7 +133,7 @@ CPU="$(awk -F': ' '/^model name/ { print $2; exit }' /proc/cpuinfo)"
 GOVERNOR="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
 CRIU_VERSION="$(criu --version | awk '/^Version/ { print $2; exit }')"
 WP_VERSION="$("$W" version | awk '{ print $NF }')"
-printf 'waypoint %s on %s: Linux %s, %s x %s (%s), criu %s, %s on %s\n' "$WP_VERSION" "$(hostname -s)" \
+printf 'waypoint %s (%s) on %s: Linux %s, %s x %s (%s), criu %s, %s on %s\n' "$WP_VERSION" "$W" "$(hostname -s)" \
   "$(uname -r)" "$(nproc)" "${CPU:-unknown cpu}" "$GOVERNOR" "$CRIU_VERSION" "$WORK" "$(stat -f -c %T "$WORK")"
 echo "RUNS=$RUNS FORKS=$FORKS MEM_MB=$MEM_MB"
 CSV_PREFIX="$(date -u +%FT%TZ),$(hostname -s),$(uname -r),$(echo "${CPU:-unknown}" | tr ',' ' '),$(nproc),$GOVERNOR,$CRIU_VERSION,$WP_VERSION,$MEM_MB"
