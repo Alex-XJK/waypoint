@@ -43,6 +43,13 @@ var (
 	TmpfsImagesDir       = "/dev/shm/waypoint"
 	TmpfsImagesDirConfig = "default"
 
+	// IncrementalDumps makes each dump write only the pages a fork changed
+	// since its last restore, chaining its images to the restored ones via
+	// CRIU's parent links. Needs a CRIU with restore --next-images-dir; has
+	// no effect while TmpfsImages is on (see incrementalDumps).
+	IncrementalDumps       = false
+	IncrementalDumpsConfig = "default"
+
 	// PhaseStats enables phase-level latency instrumentation: each fork
 	// restore and checkpoint assembles a timing breakdown (from CRIU's
 	// stats-dump / stats-restore images and our own wall clocks), persists
@@ -76,6 +83,7 @@ type config struct {
 	PreserveSessionOnCleanup *bool  `json:"preserve_session_on_cleanup,omitempty"`
 	TmpfsImages              *bool  `json:"tmpfs_images,omitempty"`
 	TmpfsImagesDir           string `json:"tmpfs_images_dir,omitempty"`
+	IncrementalDumps         *bool  `json:"incremental_dumps,omitempty"`
 	PhaseStats               *bool  `json:"phase_stats,omitempty"`
 	Network                  string `json:"network,omitempty"`
 }
@@ -94,6 +102,7 @@ type ConfigInfo struct {
 	PreserveSessionOnCleanup ConfigValue `json:"preserve_session_on_cleanup"`
 	TmpfsImages              ConfigValue `json:"tmpfs_images"`
 	TmpfsImagesDir           ConfigValue `json:"tmpfs_images_dir"`
+	IncrementalDumps         ConfigValue `json:"incremental_dumps"`
 	PhaseStats               ConfigValue `json:"phase_stats"`
 	Network                  ConfigValue `json:"network"`
 }
@@ -126,6 +135,7 @@ func LoadConfigInfo() ConfigInfo {
 			Value:  TmpfsImagesDir,
 			Source: TmpfsImagesDirConfig,
 		},
+		IncrementalDumps: incrementalDumpsInfo(),
 		PhaseStats: ConfigValue{
 			Value:  PhaseStats,
 			Source: PhaseStatsConfig,
@@ -135,6 +145,21 @@ func LoadConfigInfo() ConfigInfo {
 			Source: NetworkModeConfig,
 		},
 	}
+}
+
+// incrementalDumps reports whether dumps and restores use parent image chains.
+// tmpfs images move after the restore, which would leave the chain's links
+// dangling, so the two modes exclude each other.
+func incrementalDumps() bool { return IncrementalDumps && !TmpfsImages }
+
+// incrementalDumpsInfo reports the effective value, noting when tmpfs_images
+// overrides a configured true.
+func incrementalDumpsInfo() ConfigValue {
+	source := IncrementalDumpsConfig
+	if IncrementalDumps && !incrementalDumps() {
+		source += " (off: tmpfs_images)"
+	}
+	return ConfigValue{Value: incrementalDumps(), Source: source}
 }
 
 // maxUnixSocketPath is the longest dialable unix socket path: sun_path holds
@@ -215,6 +240,11 @@ func loadConfig() {
 	if v := os.Getenv("WAYPOINT_TMPFS_DIR"); v != "" {
 		TmpfsImagesDir = v
 		TmpfsImagesDirConfig = "env:WAYPOINT_TMPFS_DIR"
+	}
+	incrementalEnv, incrementalEnvSet := boolEnvOverride("WAYPOINT_INCREMENTAL_DUMPS")
+	if incrementalEnvSet {
+		IncrementalDumps = incrementalEnv
+		IncrementalDumpsConfig = "env:WAYPOINT_INCREMENTAL_DUMPS"
 	}
 	phaseStatsEnv, phaseStatsEnvSet := boolEnvOverride("WAYPOINT_PHASE_STATS")
 	if phaseStatsEnvSet {
@@ -309,6 +339,10 @@ func loadConfig() {
 				if cfg.TmpfsImagesDir != "" && os.Getenv("WAYPOINT_TMPFS_DIR") == "" {
 					TmpfsImagesDir = cfg.TmpfsImagesDir
 					TmpfsImagesDirConfig = configSource
+				}
+				if cfg.IncrementalDumps != nil && !incrementalEnvSet {
+					IncrementalDumps = *cfg.IncrementalDumps
+					IncrementalDumpsConfig = configSource
 				}
 				if cfg.PhaseStats != nil && !phaseStatsEnvSet {
 					PhaseStats = *cfg.PhaseStats

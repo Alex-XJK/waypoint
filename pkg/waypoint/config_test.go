@@ -13,6 +13,8 @@ type booleanConfigState struct {
 	tmpfsSource    string
 	phase          bool
 	phaseSource    string
+	incr           bool
+	incrSource     string
 }
 
 func currentBooleanConfigState() booleanConfigState {
@@ -23,6 +25,8 @@ func currentBooleanConfigState() booleanConfigState {
 		tmpfsSource:    TmpfsImagesConfig,
 		phase:          PhaseStats,
 		phaseSource:    PhaseStatsConfig,
+		incr:           IncrementalDumps,
+		incrSource:     IncrementalDumpsConfig,
 	}
 }
 
@@ -42,6 +46,8 @@ func applyBooleanConfigState(state booleanConfigState) {
 	TmpfsImagesConfig = state.tmpfsSource
 	PhaseStats = state.phase
 	PhaseStatsConfig = state.phaseSource
+	IncrementalDumps = state.incr
+	IncrementalDumpsConfig = state.incrSource
 }
 
 func loadBooleanConfigForTest(t *testing.T, contents string, env map[string]string) string {
@@ -59,6 +65,7 @@ func loadBooleanConfigForTest(t *testing.T, contents string, env map[string]stri
 		"WAYPOINT_TMPFS_IMAGES",
 		"WAYPOINT_TMPFS_DIR",
 		"WAYPOINT_PHASE_STATS",
+		"WAYPOINT_INCREMENTAL_DUMPS",
 		"WAYPOINT_NETWORK",
 	} {
 		t.Setenv(key, "")
@@ -80,17 +87,21 @@ func TestLoadConfigAppliesExplicitFalseBooleans(t *testing.T) {
 		tmpfsSource:    "previous",
 		phase:          true,
 		phaseSource:    "previous",
+		incr:           true,
+		incrSource:     "previous",
 	})
 	source := loadBooleanConfigForTest(t, `{
 		"preserve_session_on_cleanup": false,
 		"tmpfs_images": false,
-		"phase_stats": false
+		"phase_stats": false,
+		"incremental_dumps": false
 	}`, nil)
 
 	want := booleanConfigState{
 		preserveSource: source,
 		tmpfsSource:    source,
 		phaseSource:    source,
+		incrSource:     source,
 	}
 	if got := currentBooleanConfigState(); got != want {
 		t.Fatalf("boolean config state = %+v, want %+v", got, want)
@@ -102,6 +113,7 @@ func TestLoadConfigLeavesOmittedBooleansAndSourcesUntouched(t *testing.T) {
 		preserveSource: "default",
 		tmpfsSource:    "default",
 		phaseSource:    "default",
+		incrSource:     "default",
 	}
 	setBooleanConfigState(t, want)
 	loadBooleanConfigForTest(t, `{}`, nil)
@@ -116,17 +128,20 @@ func TestLoadConfigBooleanEnvironmentOverridesFile(t *testing.T) {
 	loadBooleanConfigForTest(t, `{
 		"preserve_session_on_cleanup": true,
 		"tmpfs_images": true,
-		"phase_stats": true
+		"phase_stats": true,
+		"incremental_dumps": true
 	}`, map[string]string{
 		"WAYPOINT_PRESERVE_SESSION_ON_CLEANUP": "false",
 		"WAYPOINT_TMPFS_IMAGES":                "false",
 		"WAYPOINT_PHASE_STATS":                 "false",
+		"WAYPOINT_INCREMENTAL_DUMPS":           "false",
 	})
 
 	want := booleanConfigState{
 		preserveSource: "env:WAYPOINT_PRESERVE_SESSION_ON_CLEANUP",
 		tmpfsSource:    "env:WAYPOINT_TMPFS_IMAGES",
 		phaseSource:    "env:WAYPOINT_PHASE_STATS",
+		incrSource:     "env:WAYPOINT_INCREMENTAL_DUMPS",
 	}
 	if got := currentBooleanConfigState(); got != want {
 		t.Fatalf("boolean config state = %+v, want %+v", got, want)
@@ -138,15 +153,18 @@ func TestLoadConfigInvalidBooleanEnvironmentFallsBackToFile(t *testing.T) {
 		preserveSource: "default",
 		tmpfsSource:    "default",
 		phaseSource:    "default",
+		incrSource:     "default",
 	})
 	source := loadBooleanConfigForTest(t, `{
 		"preserve_session_on_cleanup": true,
 		"tmpfs_images": true,
-		"phase_stats": true
+		"phase_stats": true,
+		"incremental_dumps": true
 	}`, map[string]string{
 		"WAYPOINT_PRESERVE_SESSION_ON_CLEANUP": "not-a-bool",
 		"WAYPOINT_TMPFS_IMAGES":                "not-a-bool",
 		"WAYPOINT_PHASE_STATS":                 "not-a-bool",
+		"WAYPOINT_INCREMENTAL_DUMPS":           "not-a-bool",
 	})
 
 	want := booleanConfigState{
@@ -156,6 +174,8 @@ func TestLoadConfigInvalidBooleanEnvironmentFallsBackToFile(t *testing.T) {
 		tmpfsSource:    source,
 		phase:          true,
 		phaseSource:    source,
+		incr:           true,
+		incrSource:     source,
 	}
 	if got := currentBooleanConfigState(); got != want {
 		t.Fatalf("boolean config state = %+v, want %+v", got, want)
@@ -169,11 +189,13 @@ func TestLoadConfigAppliesExplicitTrueBooleans(t *testing.T) {
 		preserveSource: "default",
 		tmpfsSource:    "default",
 		phaseSource:    "default",
+		incrSource:     "default",
 	})
 	source := loadBooleanConfigForTest(t, `{
 		"preserve_session_on_cleanup": true,
 		"tmpfs_images": true,
-		"phase_stats": true
+		"phase_stats": true,
+		"incremental_dumps": true
 	}`, nil)
 
 	want := booleanConfigState{
@@ -183,6 +205,8 @@ func TestLoadConfigAppliesExplicitTrueBooleans(t *testing.T) {
 		tmpfsSource:    source,
 		phase:          true,
 		phaseSource:    source,
+		incr:           true,
+		incrSource:     source,
 	}
 	if got := currentBooleanConfigState(); got != want {
 		t.Fatalf("boolean config state = %+v, want %+v", got, want)
@@ -232,5 +256,29 @@ func TestLoadConfigNetworkMode(t *testing.T) {
 				t.Fatalf("network mode = %q from %q, want %q from %q", NetworkMode, NetworkModeConfig, tc.wantMode, wantSource)
 			}
 		})
+	}
+}
+
+func TestIncrementalDumpsOffWithTmpfsImages(t *testing.T) {
+	cases := []struct {
+		incr, tmpfs bool
+		want        bool
+		wantSource  string
+	}{
+		{false, false, false, "file"},
+		{true, false, true, "file"},
+		{true, true, false, "file (off: tmpfs_images)"},
+		{false, true, false, "file"},
+	}
+	for _, tc := range cases {
+		setBooleanConfigState(t, booleanConfigState{incr: tc.incr, incrSource: "file", tmpfs: tc.tmpfs})
+		if got := incrementalDumps(); got != tc.want {
+			t.Errorf("incrementalDumps() with incremental=%v tmpfs=%v = %v, want %v", tc.incr, tc.tmpfs, got, tc.want)
+		}
+		info := incrementalDumpsInfo()
+		if info.Value != tc.want || info.Source != tc.wantSource {
+			t.Errorf("incrementalDumpsInfo() with incremental=%v tmpfs=%v = %v from %q, want %v from %q",
+				tc.incr, tc.tmpfs, info.Value, info.Source, tc.want, tc.wantSource)
+		}
 	}
 }

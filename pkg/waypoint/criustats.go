@@ -31,7 +31,10 @@ type CriuDumpStats struct {
 	MemdumpMs    float64 `json:"memdump_ms"`  // scanning/collecting memory
 	MemwriteMs   float64 `json:"memwrite_ms"` // writing page images
 	PagesScanned uint64  `json:"pages_scanned"`
-	PagesWritten uint64  `json:"pages_written"`
+	// PagesSkippedParent counts pages an incremental dump left to the
+	// parent images instead of writing.
+	PagesSkippedParent uint64 `json:"pages_skipped_parent,omitempty"`
+	PagesWritten       uint64 `json:"pages_written"`
 }
 
 // CriuRestoreStats is criu's own accounting of a restore, from the
@@ -91,6 +94,9 @@ func (b *SnapshotBreakdown) String() string {
 	if d := b.Dump; d != nil {
 		fmt.Fprintf(&sb, " dump_freeze_ms=%.1f dump_frozen_ms=%.1f dump_memdump_ms=%.1f dump_memwrite_ms=%.1f pages_written_mib=%.1f",
 			d.FreezingMs, d.FrozenMs, d.MemdumpMs, d.MemwriteMs, float64(d.PagesWritten)/256)
+		if d.PagesSkippedParent > 0 {
+			fmt.Fprintf(&sb, " pages_skipped_parent_mib=%.1f", float64(d.PagesSkippedParent)/256)
+		}
 	}
 	fmt.Fprintf(&sb, " seal_ms=%.1f restore_ms=%.1f", b.SealMs, b.RestoreMs)
 	if b.Restore != nil {
@@ -114,12 +120,13 @@ func readCriuDumpStats(path string) (*CriuDumpStats, error) {
 		return nil, fmt.Errorf("%s has no dump entry", path)
 	}
 	return &CriuDumpStats{
-		FreezingMs:   float64(dump[1]) / 1000,
-		FrozenMs:     float64(dump[2]) / 1000,
-		MemdumpMs:    float64(dump[3]) / 1000,
-		MemwriteMs:   float64(dump[4]) / 1000,
-		PagesScanned: dump[5],
-		PagesWritten: dump[7],
+		FreezingMs:         float64(dump[1]) / 1000,
+		FrozenMs:           float64(dump[2]) / 1000,
+		MemdumpMs:          float64(dump[3]) / 1000,
+		MemwriteMs:         float64(dump[4]) / 1000,
+		PagesScanned:       dump[5],
+		PagesSkippedParent: dump[6],
+		PagesWritten:       dump[7],
 	}, nil
 }
 

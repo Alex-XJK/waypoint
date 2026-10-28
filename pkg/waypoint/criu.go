@@ -27,7 +27,10 @@ import (
 // createMemoryCheckpoint dumps a process tree with criu. The work overlay is
 // declared as an external mount so CRIU treats it as managed by us.
 // Notice: cannot use '--shell-job' because of the PTY issue during restore.
-func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
+// prevImagesDir is the image set the tree's last restore wrote with
+// --next-images-dir, or empty; with incremental dumps on, the dump writes
+// only the pages changed since then.
+func (m *Manager) createMemoryCheckpoint(pid int, criuPath, prevImagesDir string) error {
 	args := []string{"dump",
 		"-t", strconv.Itoa(pid),
 		"-D", criuPath,
@@ -44,6 +47,20 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 		"--file-locks",
 		"--ghost-limit", "8388608",
 		"-vv", "-o", "dump.log",
+	}
+	if incrementalDumps() {
+		args = append(args, "--track-mem")
+		if prevImagesDir != "" {
+			// CRIU copies this string into the new images' parent link, and
+			// the restored tree follows that link from inside the fork's
+			// root, where host paths don't resolve; relative to the images
+			// dir, it does.
+			rel, err := filepath.Rel(criuPath, prevImagesDir)
+			if err != nil {
+				return fmt.Errorf("failed to create memory checkpoint: parent images %s: %w", prevImagesDir, err)
+			}
+			args = append(args, "--prev-images-dir", rel)
+		}
 	}
 	if _, err := findMountID(pid, m.workOverlay); err == nil {
 		args = append(args, "--external", fmt.Sprintf("mnt[%s]:waypoint-work", m.workOverlay))
@@ -193,6 +210,9 @@ func restoreForkChild(f *Fork) error {
 	// } else {
 	// 	fmt.Fprintf(os.Stderr, "warning: no criu action script for %s: %v\n", f.ID, err)
 	// }
+	if f.NextImagesDir != "" {
+		args = append(args, "--track-mem", "--next-images-dir", f.NextImagesDir)
+	}
 	if f.MountPoint != "" {
 		args = append(args, "-r", f.MountPoint)
 		args = append(args, "--external", fmt.Sprintf("mnt[waypoint-work]:%s", f.MountPoint))

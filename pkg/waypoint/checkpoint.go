@@ -215,6 +215,11 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 				return fmt.Errorf("mkdir %s failed: %w", dir, err)
 			}
 		}
+		if incrementalDumps() && m.chainsFrom(ckpt.ID) {
+			if f.NextImagesDir, err = m.newNextImagesDir(ckpt.ID, f.ID); err != nil {
+				return fmt.Errorf("next images dir for fork %s: %w", f.ID, err)
+			}
+		}
 		return m.saveFork(f)
 	}); err != nil {
 		return nil, err
@@ -258,6 +263,32 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 		return nil, err
 	}
 	return f, nil
+}
+
+// newNextImagesDir creates an empty directory for a restore's
+// --next-images-dir. It lives under the base checkpoint, not the fork's root
+// dir: checkpoints dumped from the fork link to it as their parent, and
+// destroy and park remove the fork's dir. Each restore gets a fresh name,
+// since a recreated fork with the same ID must not reuse a dir an earlier
+// chain still references.
+func (m *Manager) newNextImagesDir(baseCheckpointID, forkID string) (string, error) {
+	parent, err := filepath.Abs(filepath.Join(m.checkpointDir(baseCheckpointID), "next"))
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(parent, forkID+"-")
+}
+
+// chainsFrom reports whether a restore from checkpointID can write next
+// images. CRIU links them to the real path of the restored images, and a
+// checkpoint dumped with tmpfs_images keeps them behind a symlink whose
+// tmpfs target the flush deletes; forks of those dump in full instead.
+func (m *Manager) chainsFrom(checkpointID string) bool {
+	fi, err := os.Lstat(m.checkpointCriuDir(checkpointID))
+	return err == nil && fi.IsDir()
 }
 
 // restoreForkAndWait runs the restore helper for f, waits for the fork's
@@ -429,7 +460,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 	}
 	snapStart := time.Now()
 	dumpStart := time.Now()
-	if err := m.createMemoryCheckpoint(f.PID, ckptCriu); err != nil {
+	if err := m.createMemoryCheckpoint(f.PID, ckptCriu, f.NextImagesDir); err != nil {
 		return fail(fmt.Errorf("memory checkpoint failed: %w", err))
 	}
 	dumpMs := durMs(time.Since(dumpStart))
@@ -501,6 +532,16 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 	f.CriuPath = ckptCriu
 	f.PidFile = filepath.Join(f.RootDir, "restore.pid")
 	_ = os.Remove(f.PidFile)
+	// The checkpoint just dumped links to the old next dir as its parent;
+	// the re-restore starts a new one under the new checkpoint.
+	f.NextImagesDir = ""
+	if incrementalDumps() && m.chainsFrom(checkpointID) {
+		nextDir, err := m.newNextImagesDir(checkpointID, f.ID)
+		if err != nil {
+			return fail(fmt.Errorf("next images dir for fork %s: %w", f.ID, err))
+		}
+		f.NextImagesDir = nextDir
+	}
 	if err := m.saveFork(f); err != nil {
 		return fail(err)
 	}
