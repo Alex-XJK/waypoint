@@ -15,6 +15,8 @@
 #   NETWORK="shared private"  network modes to time; private needs pasta
 #   MEM_MB=0                  MiB a background process in main holds, so that
 #                             dumps and restores copy that much memory
+#   WPBENCH_DIR=/tmp          where the temp dir with rootfs, sessions and
+#                             images is made; a full dump writes MEM_MB there
 #   CSV=<file>                also append one row per operation to <file>
 #   WAYPOINT_BIN=<file>       binaries to time instead of building this checkout;
 #   BASH_INIT_BIN=<file>      set both or neither
@@ -25,7 +27,7 @@ set -euo pipefail
 export LC_ALL=C
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-WORK="$(mktemp -d /tmp/wpbench.XXXXXX)"
+WORK="$(mktemp -d "${WPBENCH_DIR:-/tmp}/wpbench.XXXXXX")"
 ROOTFS="$WORK/rootfs"
 BIN="$WORK/bin"
 RUNS="${RUNS:-10}"
