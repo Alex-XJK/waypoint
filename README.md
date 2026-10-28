@@ -193,6 +193,7 @@ You can create a configuration file to set global options. Example content:
   "bash_init_src": "/custom/compiled/bash_init",
   "preserve_session_on_cleanup": false,
   "tmpfs_images": false,
+  "incremental_dumps": false,
   "phase_stats": false,
   "network": "shared"
 }
@@ -214,6 +215,14 @@ The optional `tmpfs_images` setting (`WAYPOINT_TMPFS_IMAGES`) writes CRIU images
 tmpfs and flushes them to disk asynchronously; images are not durable until that
 flush completes. `phase_stats` (`WAYPOINT_PHASE_STATS`) adds checkpoint/fork timing
 breakdowns. Both options default to `false`.
+
+`incremental_dumps` (`WAYPOINT_INCREMENTAL_DUMPS`, default `false`) makes each
+checkpoint or snapshot dump only the memory a fork changed since it was last
+restored; the new images link to the earlier ones as their parent, so forking from
+a long chain reads more image sets. It needs a CRIU that supports
+`restore --next-images-dir` (Waypoint's CRIU fork). It has no effect while
+`tmpfs_images` is on, and forks of a checkpoint dumped with `tmpfs_images` dump in
+full.
 
 `network` (`WAYPOINT_NETWORK`) is `shared` (default) or `private`. In `shared`
 mode every fork runs in the host network namespace. In `private` mode each fork,
