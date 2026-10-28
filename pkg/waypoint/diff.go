@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sort"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -34,80 +35,47 @@ type Diff struct {
 	resultsFile	 		string
 }
 
-func makeIsInteresting(added, deleted, modified []string) func(string) bool {
-	interesting := make(map[string]struct{}, len(added) + len(deleted) + len(modified))
-	for _, path := range added {
-		interesting[path] = struct{}{}
-	}
-	for _, path := range deleted {
-		interesting[path] = struct{}{}
-	}
-	for _, path := range modified {
-		interesting[path] = struct{}{}
-	}
-
-	return func(path string) bool {
-		_, present := interesting[path]
-		return present
-	}
-}
-
-func (m *Manager) walkBlame(isInteresting func(string) bool)
-
-func recurseGetOpaque(dir string, opaques []string) error {
-	dentries, err := os.ReadDir(dir)
+func isOpaque(dir string) (bool, error) {
+	value := make([]byte, 10)
+	n, err := unix.Getxattr(dir, "trusted.overlay.opaque", value)
 	if err != nil {
-		return fmt.Errorf("read directory %s: %w", fsDir, err)
-	}
-	for _, dentry := range dentries {
-		if dentry.IsDir() {
-			
-			if err := recurseDir(fsPath, relPath, paths); err != nil {
-				return err
-			}
-		} else {
-			*paths = append(*paths, relPath)
+		if errors.Is(err, unix.ENODATA) {
+			return false, nil // Xattr doesn't exist; not opaque.
 		}
+		return false, fmt.Errorf("get opaque xattr for %s: %w", dir, err)
 	}
-	return nil
+
+	return string(value[:n]) == "y", nil
 }
 
-func (m *Manager) advanceVisible(visible map[string]string, layerDirs []string) error {
-	for _, layerDir := range layerDirs {
-		dentries, err := os.ReadDir(layerDir)
-	}
-	
-	
-	dentries, err := os.ReadDir(leftDir)
+func isWhiteout(path string) (bool, error) {
+    info, err := os.Lstat(path)
     if err != nil {
-        return fmt.Errorf("read directory %s: %w", leftDir, err)
+        return false, err
     }
-    rightEntries, err := os.ReadDir(rightDir)
-    if err != nil {
-        return fmt.Errorf("read directory %s: %w", rightDir, err)
+    // Whiteout represented as a character device with major/minor 0/0.
+    if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+        if info.Mode()&os.ModeCharDevice != 0 &&
+            int(unix.Major(uint64(stat.Rdev))) == 0 &&
+            int(unix.Minor(uint64(stat.Rdev))) == 0 {
+            return true, nil
+        }
     }
-    leftNameMap := make(map[string]os.DirEntry, len(leftEntries))
-    for _, entry := range leftEntries {
-        leftNameMap[entry.Name()] = entry
+    // Whiteout represented as a zero-size regular file with xattr.
+    if info.Mode().IsRegular() && info.Size() == 0 {
+        value := make([]byte, 10)
+        n, err := unix.Getxattr(path, "trusted.overlay.whiteout", value)
+        if err != nil {
+            if errors.Is(err, unix.ENODATA) {
+                return false, nil
+            }
+            return false, err
+        }
+        return string(value[:n]) == "y", nil
     }
-    rightNameMap := make(map[string]os.DirEntry, len(rightEntries))
-    for _, entry := range rightEntries {
-        rightNameMap[entry.Name()] = entry
-    }
-	// Left-only entries -> deleted
-	for name, dentry := range leftNameMap {
-		if _, exists := rightNameMap[name]; exists {
-			continue
-		}
-		fsPath := filepath.Join(leftDir, name)
-		relPath := filepath.Join(relDir, name)
-		if dentry.IsDir() {
-			if err := recurseDir(fsPath, relPath, deleted); err != nil {
-				return err
-			}
+    return false, nil
 }
 
-// initialize all paths of interest as not visible
 func initVisible(added, modified, deleted []string) (map[string]bool) {
 	visible := make(map[string]bool, len(added)+len(deleted)+len(modified))
 	for _, path := range added {
@@ -122,54 +90,172 @@ func initVisible(added, modified, deleted []string) (map[string]bool) {
 	return visible
 }
 
-func (m *Manager) blame(d Diff, added, modified, deleted []string) (map[string]string, error) {
-	// first determine if parent-child or leaf-leaf relationship
+func cloneMap(src map[string]bool) map[string]bool {
+    dst := make(map[string]bool, len(src))
+    for key, value := range src {
+        dst[key] = value
+    }
+    return dst
+}
+
+func hideVisibleChildren(relPath string, visible, updated map[string]bool) error {
+	for interestingRelPath, isVisible := range visible {
+		if !isVisible || updated[interestingRelPath] {
+			continue
+		}
+		childRelPath, err := filepath.Rel(relPath, interestingRelPath)
+		if err != nil {
+			return err
+		}
+		if childRelPath == "." || childRelPath == ".." ||
+			strings.HasPrefix(childRelPath, ".."+string(filepath.Separator)) {
+			continue
+		}
+		visible[interestingRelPath] = false
+		updated[interestingRelPath] = true
+	}
+	return nil
+}
+
+func blameDir(fsDir, relDir string, updated, visible map[string]bool) error {
+	dentries, err := os.ReadDir(fsDir)
+	if err != nil {
+		return fmt.Errorf("read directory %s: %w", fsDir, err)
+	}
+	for _, dentry := range dentries {
+		fsPath := filepath.Join(fsDir, dentry.Name())
+		relPath := filepath.Join(relDir, dentry.Name())
+		if !dentry.IsDir() {
+			whiteout, err := isWhiteout(fsPath)
+			if err != nil {
+				return err
+			}
+			if whiteout {
+				if _, exists := visible[relPath]; exists {
+					visible[relPath] = !whiteout
+					updated[relPath] = true
+				} else if err := hideVisibleChildren(relPath, visible, updated); err != nil {
+					return err
+				}	
+			} else if _, exists := visible[relPath]; exists {
+				visible[relPath] = true
+				updated[relPath] = true
+			} 
+		} else {
+			if err := blameDir(fsPath, relPath, updated, visible); err != nil {
+				return err
+			}
+			opaque, err := isOpaque(fsPath)
+			if err != nil {
+				return err
+			}
+			if opaque {
+				if err := hideVisibleChildren(relPath, visible, updated); err != nil {
+					return err
+				}
+			}
+
+		}
+	}
+	return nil
+}
+
+func (m *Manager) advanceBlame(ckptIDs []string, visible map[string]bool, blame map[string][]string) error {
+	for _, ckptID := range ckptIDs {
+		upperDirPath := m.checkpointUpperDir(ckptID)
+		updated := make(map[string]bool)
+		if err := blameDir(upperDirPath, "", updated, visible); err != nil {
+			return err
+		}
+		if blame != nil {
+			for relPath := range updated {
+				blame[relPath] = append(blame[relPath], ckptID)
+			}
+		}
+	}
+	return nil
+}
+
+func advanceOG(ogDir string, visible map[string]bool) error {
+	updated := make(map[string]bool)
+	if err := blameDir(ogDir, "", updated, visible); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) blame(d *Diff, visible map[string]bool) (map[string][]string, map[string][]string, error) {
+	// determine if parent-child or leaf-leaf relationship
 	leftLayers := d.leftLayerIDs
 	rightLayers := d.rightLayerIDs
-	latestCommonIdx := -1
-	for i:= 0; i < len(leftLayers) && i < len(rightLayers); i++ {
+	lastCommonIdx := -1
+	for i := 0; i < len(leftLayers) && i < len(rightLayers); i++ {
 		if leftLayers[i] != rightLayers[i] {
 			break
 		}
-		latestCommonIdx = i
+		lastCommonIdx = i
 	}
-	if latestCommonIdx == -1 {
+	leftUnsharedCkpts := leftLayers[lastCommonIdx+1:]
+	rightUnsharedCkpts := rightLayers[lastCommonIdx+1:]
 
-	}
-	var leftDirs []string
-	for _, ckptID := range leftLayers {
-		leftDirs = append(leftDirs, m.checkpointUpperDir(ckptID))
-	}
-	var rightDirs []string
-	for _, ckptID := range rightLayers {
-		leftDirs = append(leftDirs, m.checkpointUpperDir(ckptID))
-	}
+	leftBlame := make(map[string][]string)
+	rightBlame := make(map[string][]string)
 
-	leftTail := leftLayers[latestCommonIdx+1:]
-	rightTail := rightLayers[latestCommonIdx+1:]
-	visible := initVisible(added, modified, deleted)
-
-	if len(leftTail) == 0 {
-		m.advanceVisible(visible, append([]string{d.leftOriginalDir}, leftDirs...)) // left is ancestor of right
-		walkBlame(visible, rightTail, latestCommonIdx)
-	} else if len(rightTail) == 0 {
-		advanceVisible(visible, append([]string{d.rightOriginalDir}, rightDirs...) // right is ancestor of left
-		walkBlame(visible, leftTail, latestCommonIdx)
+	if len(leftUnsharedCkpts) == 0 && len(rightUnsharedCkpts) == 0 {
+		// identical, shouldn't be anything to diff
+		return leftBlame, rightBlame, nil
+	}
+	if len(leftUnsharedCkpts) == 0 {
+		// Left side is the parent
+		if err := advanceOG(d.leftOriginalDir, visible); err != nil {
+			return nil, nil, err
+		}
+		if err := m.advanceBlame(leftLayers, visible, nil); err != nil {
+			return nil, nil, err
+		}
+		if err := m.advanceBlame(rightUnsharedCkpts, visible, rightBlame); err != nil {
+			return nil, nil, err
+		}
+	} else if len(rightUnsharedCkpts) == 0 {
+		// Right side is the parent
+		if err := advanceOG(d.rightOriginalDir, visible); err != nil {
+			return nil, nil, err
+		}
+		if err := m.advanceBlame(rightLayers, visible, nil); err != nil {
+			return nil, nil, err
+		}
+		if err := m.advanceBlame(leftUnsharedCkpts, visible, leftBlame); err != nil {
+			return nil, nil, err
+		}
 	} else {
-		// leaves, need to walk both
-		if (latestCommonIdx >= 0) { // advance to last common ckpt layer
-			//TODO/ASK: if the checkpoints are shared, can we assume the original dir is same too?
-			m.advanceVisible(visible, append([]string{d.leftOriginalDir}, leftDirs[:latestCommonIdx + 1]...))
+		// leaves, need to blame both
+		if (lastCommonIdx >= 0) { // advance to last common ckpt layer
+			if err := advanceOG(d.leftOriginalDir, visible); err != nil { //TODO/ASK: if the checkpoints are shared, can we assume the original dir is same too?
+				return nil, nil, err
+			}
+			if err := m.advanceBlame(leftLayers[:lastCommonIdx+1], visible, nil); err != nil {
+				return nil, nil, err
+			}
 		}
-		leftVisible := cloneVisible(visible)
-		rightVisible := cloneVisible(visible)
-		if (latestCommonIdx < 0) { // no common ckpt layer
-			m.advanceVisible(leftVisible, []string{d.leftOriginalDir}, nil)
-			m.advanceVisible(rightVisible, []string{d.rightOriginalDir}, nil)
+		leftVisible := cloneMap(visible)
+		rightVisible := cloneMap(visible)
+		if lastCommonIdx < 0 { // no common ckpt layer
+			if err := advanceOG(d.leftOriginalDir, leftVisible); err != nil {
+				return nil, nil, err
+			}
+			if err := advanceOG(d.rightOriginalDir, rightVisible); err != nil {
+				return nil, nil, err
+			}
 		}
-		walkBlame(leftVisible, leftTail, latestCommonIdx)
-		walkBlame(rightVisible, rightTail, latestCommonIdx)
+		// potentially parallelize
+		if err := m.advanceBlame(leftUnsharedCkpts, leftVisible, leftBlame); err != nil {
+			return nil, nil, err
+		}
+		if err := m.advanceBlame(rightUnsharedCkpts, rightVisible, rightBlame); err != nil {
+			return nil, nil, err
+		}
 	}
+	return leftBlame, rightBlame, nil
 }
 
 func cmpIsDiff(leftFilePath, rightFilePath string) (bool, error) {
@@ -520,41 +606,33 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) (error)
 			return err
 		}
 	}
-	// NOTE: Git style will only show file diffs, ie. rmdir (empty) not tracked
 
-	blame, err := blame(d, added, modified, deleted)
+	visible := initVisible(added, modified, deleted)
+	leftBlame, rightBlame, err := m.blame(d, visible)
+	if err != nil {
+		return nil
+	}
 
 	sort.Strings(added)
 	sort.Strings(deleted)
 	sort.Strings(modified)
-	// TODO: ALSO NEED TO LOOK INTO HOW DIRECTORY RENAMING WORKS IN OVERLAYFS
-	/*
-	// Now need to blame: for each path, write all the ckpts that touched it
-	// need to walk from the current checkpoint down to the last shared ancestor
-	// if parent -> child relationship, just one walk
-	// if two leaves, two walks from each leaf to the shared ancestor (parallelize)
 
-	In each walk: For each fpath.join(m.checkpointDir(layerID)/"upper") between the last common ancestor and the newestlayerID:
-		a. for each dentry
-			i. if is not a directory, check if is interesting and add to dictionaries accordingly. 
-			Note that if the file was removed in this layer, would expect to have xattr "trusted.overlay.whiteout" - check? Or, will be a character device with a 0/0 dev number so check for that too?
-			ii. if is a directory, check if the xattr "trusted.overlay.opaque" is "y". If yes, need to add all the interesting visible pathnames that are NOT within this directory as being affected by this layer
-			iii. if is a directory and not whiteout, then recurse on it
+	printPaths := func(title string, paths []string) {
+		fmt.Println(title + ":")
+		for _, path := range paths {
+			fmt.Printf("  %s\n", path)
 
-	*/
+			if ckptIDs, ok := leftBlame[path]; ok && len(ckptIDs) > 0 {
+				fmt.Printf("        Left blame:  %s\n", strings.Join(ckptIDs, ", "))
+			}
+			if ckptIDs, ok := rightBlame[path]; ok && len(ckptIDs) > 0 {
+				fmt.Printf("        Right blame: %s\n", strings.Join(ckptIDs, ", "))
+			}
+		}
+	}
 
-	// For debug for now
-	fmt.Println("Added:")
-	for _, path := range added {
-		fmt.Println("  ", path)
-	}
-	fmt.Println("Deleted:")
-	for _, path := range deleted {
-		fmt.Println("  ", path)
-	}
-	fmt.Println("Modified:")
-	for _, path := range modified {
-		fmt.Println("  ", path)
-	}
+	printPaths("Added", added)
+	printPaths("Deleted", deleted)
+	printPaths("Modified", modified)
 	return nil
 }
