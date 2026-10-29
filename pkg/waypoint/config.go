@@ -59,6 +59,16 @@ var (
 	PhaseStats       = false
 	PhaseStatsConfig = "default"
 
+	// LogLevel is Waypoint's log level. For now it is the -v level of every
+	// criu dump and restore, written to dump.log in the images dir and
+	// restore.log in the fork dir: 0 none, 1 errors, 2 warnings, 3 info,
+	// 4 debug. Levels 3 and 4 log a line per piece of memory read at every
+	// level of a parent chain (and 4 a line per page range an incremental
+	// dump checks), which on a deep chain of scattered writes takes longer
+	// than the restore itself.
+	LogLevel       = 2
+	LogLevelConfig = "default"
+
 	// NetworkMode is the network mode of new sessions; a session keeps the
 	// mode it was created with.
 	NetworkMode       = NetworkShared
@@ -85,6 +95,7 @@ type config struct {
 	TmpfsImagesDir           string `json:"tmpfs_images_dir,omitempty"`
 	IncrementalDumps         *bool  `json:"incremental_dumps,omitempty"`
 	PhaseStats               *bool  `json:"phase_stats,omitempty"`
+	LogLevel                 *int   `json:"waypoint_log_level,omitempty"`
 	Network                  string `json:"network,omitempty"`
 }
 
@@ -104,6 +115,7 @@ type ConfigInfo struct {
 	TmpfsImagesDir           ConfigValue `json:"tmpfs_images_dir"`
 	IncrementalDumps         ConfigValue `json:"incremental_dumps"`
 	PhaseStats               ConfigValue `json:"phase_stats"`
+	LogLevel                 ConfigValue `json:"waypoint_log_level"`
 	Network                  ConfigValue `json:"network"`
 }
 
@@ -139,6 +151,10 @@ func LoadConfigInfo() ConfigInfo {
 		PhaseStats: ConfigValue{
 			Value:  PhaseStats,
 			Source: PhaseStatsConfig,
+		},
+		LogLevel: ConfigValue{
+			Value:  LogLevel,
+			Source: LogLevelConfig,
 		},
 		Network: ConfigValue{
 			Value:  NetworkMode,
@@ -203,6 +219,25 @@ func boolEnvOverride(name string) (bool, bool) {
 	return value, true
 }
 
+// validLogLevel reports whether level is one of criu's -v levels.
+func validLogLevel(level int) bool { return level >= 0 && level <= 4 }
+
+// logLevelEnvOverride returns a parsed WAYPOINT_LOG_LEVEL. Invalid
+// non-empty values are warned about and treated as unset, as in
+// boolEnvOverride.
+func logLevelEnvOverride() (int, bool) {
+	raw := os.Getenv("WAYPOINT_LOG_LEVEL")
+	if raw == "" {
+		return 0, false
+	}
+	level, err := strconv.Atoi(raw)
+	if err != nil || !validLogLevel(level) {
+		fmt.Fprintf(os.Stderr, "warning: ignoring invalid WAYPOINT_LOG_LEVEL=%q (want 0 to 4); using config/default instead\n", raw)
+		return 0, false
+	}
+	return level, true
+}
+
 // loadConfig loads custom configuration.
 func loadConfig() {
 	// Determine config by precedence:
@@ -250,6 +285,11 @@ func loadConfig() {
 	if phaseStatsEnvSet {
 		PhaseStats = phaseStatsEnv
 		PhaseStatsConfig = "env:WAYPOINT_PHASE_STATS"
+	}
+	logLevelEnv, logLevelEnvSet := logLevelEnvOverride()
+	if logLevelEnvSet {
+		LogLevel = logLevelEnv
+		LogLevelConfig = "env:WAYPOINT_LOG_LEVEL"
 	}
 	networkEnvSet := false
 	if v := os.Getenv("WAYPOINT_NETWORK"); v != "" {
@@ -347,6 +387,14 @@ func loadConfig() {
 				if cfg.PhaseStats != nil && !phaseStatsEnvSet {
 					PhaseStats = *cfg.PhaseStats
 					PhaseStatsConfig = configSource
+				}
+				if cfg.LogLevel != nil && !logLevelEnvSet {
+					if validLogLevel(*cfg.LogLevel) {
+						LogLevel = *cfg.LogLevel
+						LogLevelConfig = configSource
+					} else {
+						fmt.Fprintf(os.Stderr, "warning: ignoring invalid waypoint_log_level %d in %s (want 0 to 4)\n", *cfg.LogLevel, cfgPath)
+					}
 				}
 				if cfg.Network != "" && !networkEnvSet {
 					if validNetworkMode(cfg.Network) {

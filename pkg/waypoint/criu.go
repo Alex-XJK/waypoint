@@ -22,6 +22,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// criuLogLevelArg is the -v option for criu's log, from waypoint_log_level.
+func criuLogLevelArg() string { return "-v" + strconv.Itoa(LogLevel) }
+
+// criuLogTail ends a criu error message with the last 4 KiB of its log. Below
+// debug level that is little more than the error lines, so it also says how
+// to get the full log.
+func criuLogTail(path string) string {
+	tail := fmt.Sprintf("\ncriu log %s:\n%s", path, strings.TrimRight(readRecentFile(path, 4096), "\n"))
+	if LogLevel < 4 {
+		tail += fmt.Sprintf("\n(waypoint_log_level is %d; WAYPOINT_LOG_LEVEL=4 logs every step)", LogLevel)
+	}
+	return tail
+}
+
 // --- dump ---
 
 // createMemoryCheckpoint dumps a process tree with criu. The work overlay is
@@ -46,7 +60,7 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath, prevImagesDir string
 		"--link-remap",
 		"--file-locks",
 		"--ghost-limit", "8388608",
-		"-vv", "-o", "dump.log",
+		criuLogLevelArg(), "-o", "dump.log",
 	}
 	if incrementalDumps() {
 		args = append(args, "--track-mem")
@@ -84,7 +98,8 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath, prevImagesDir string
 	}
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create memory checkpoint: %w\ncriu stderr: %s", err, stderr.String())
+		return fmt.Errorf("failed to create memory checkpoint: %w\ncriu stderr: %s%s", err, stderr.String(),
+			criuLogTail(filepath.Join(criuPath, "dump.log")))
 	}
 	return nil
 }
@@ -153,6 +168,10 @@ func RunForkRestoreChildFromArgs(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The fork record carries the restore's inputs; the criu log level is
+	// resolved here the same way the parent resolved it (same binary, same
+	// environment, same config file).
+	loadConfig()
 	return restoreForkChild(f)
 }
 
@@ -201,7 +220,7 @@ func restoreForkChild(f *Fork) error {
 		// criu writes by default must be redirected per fork: logs via an
 		// absolute -o path, stats-restore via --work-dir.
 		"--work-dir", f.RootDir,
-		"-vv", "-o", f.LogPath,
+		criuLogLevelArg(), "-o", f.LogPath,
 	}
 	// Disabled, see RunCriuAction in checkpoint.go. advanceNsLastPid ran before
 	// the tree resumed; once restore returns, the tree may already have forked.
@@ -243,7 +262,7 @@ func restoreForkChild(f *Fork) error {
 
 	criuStart := time.Now()
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("criu restore failed: %w\n%s", err, stderr.String())
+		return fmt.Errorf("criu restore failed: %w\n%s%s", err, stderr.String(), criuLogTail(f.LogPath))
 	}
 	timing.CriuWallMs = durMs(time.Since(criuStart))
 

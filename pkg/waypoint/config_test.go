@@ -3,6 +3,8 @@ package waypoint
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -66,6 +68,7 @@ func loadBooleanConfigForTest(t *testing.T, contents string, env map[string]stri
 		"WAYPOINT_TMPFS_DIR",
 		"WAYPOINT_PHASE_STATS",
 		"WAYPOINT_INCREMENTAL_DUMPS",
+		"WAYPOINT_LOG_LEVEL",
 		"WAYPOINT_NETWORK",
 	} {
 		t.Setenv(key, "")
@@ -256,6 +259,62 @@ func TestLoadConfigNetworkMode(t *testing.T) {
 				t.Fatalf("network mode = %q from %q, want %q from %q", NetworkMode, NetworkModeConfig, tc.wantMode, wantSource)
 			}
 		})
+	}
+}
+
+func TestLoadConfigLogLevel(t *testing.T) {
+	cases := []struct {
+		name       string
+		file       string
+		env        string
+		wantLevel  int
+		wantSource string // "file" stands for the config file's source label
+	}{
+		{"default", `{}`, "", 2, "default"},
+		{"file", `{"waypoint_log_level": 4}`, "", 4, "file"},
+		{"file zero is applied", `{"waypoint_log_level": 0}`, "", 0, "file"},
+		{"environment overrides file", `{"waypoint_log_level": 4}`, "1", 1, "env:WAYPOINT_LOG_LEVEL"},
+		{"invalid environment falls back to file", `{"waypoint_log_level": 3}`, "debug", 3, "file"},
+		{"out of range environment falls back to file", `{"waypoint_log_level": 3}`, "5", 3, "file"},
+		{"invalid file value is ignored", `{"waypoint_log_level": 9}`, "", 2, "default"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			previousLevel, previousSource := LogLevel, LogLevelConfig
+			t.Cleanup(func() { LogLevel, LogLevelConfig = previousLevel, previousSource })
+			LogLevel, LogLevelConfig = 2, "default"
+
+			source := loadBooleanConfigForTest(t, tc.file, map[string]string{"WAYPOINT_LOG_LEVEL": tc.env})
+			wantSource := tc.wantSource
+			if wantSource == "file" {
+				wantSource = source
+			}
+			if LogLevel != tc.wantLevel || LogLevelConfig != wantSource {
+				t.Fatalf("criu log level = %d from %q, want %d from %q", LogLevel, LogLevelConfig, tc.wantLevel, wantSource)
+			}
+			if got, want := criuLogLevelArg(), "-v"+strconv.Itoa(tc.wantLevel); got != want {
+				t.Fatalf("criuLogLevelArg() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestCriuLogTail(t *testing.T) {
+	previous := LogLevel
+	t.Cleanup(func() { LogLevel = previous })
+	path := filepath.Join(t.TempDir(), "restore.log")
+	if err := os.WriteFile(path, []byte("Error (criu/cr-restore.c:1): boom\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	LogLevel = 2
+	tail := criuLogTail(path)
+	if !strings.Contains(tail, path) || !strings.Contains(tail, "boom") || !strings.Contains(tail, "WAYPOINT_LOG_LEVEL=4") {
+		t.Fatalf("criuLogTail at level 2 = %q, want the path, the error and the level hint", tail)
+	}
+	LogLevel = 4
+	if tail := criuLogTail(path); strings.Contains(tail, "WAYPOINT_LOG_LEVEL") {
+		t.Fatalf("criuLogTail at level 4 = %q, want no level hint", tail)
 	}
 }
 
