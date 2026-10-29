@@ -35,228 +35,6 @@ type Diff struct {
 	resultsFile	 		string
 }
 
-func isOpaque(dir string) (bool, error) {
-	value := make([]byte, 10)
-	n, err := unix.Getxattr(dir, "trusted.overlay.opaque", value)
-	if err != nil {
-		if errors.Is(err, unix.ENODATA) {
-			return false, nil // Xattr doesn't exist; not opaque.
-		}
-		return false, fmt.Errorf("get opaque xattr for %s: %w", dir, err)
-	}
-
-	return string(value[:n]) == "y", nil
-}
-
-func isWhiteout(path string) (bool, error) {
-    info, err := os.Lstat(path)
-    if err != nil {
-        return false, err
-    }
-    // Whiteout represented as a character device with major/minor 0/0.
-    if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-        if info.Mode()&os.ModeCharDevice != 0 &&
-            int(unix.Major(uint64(stat.Rdev))) == 0 &&
-            int(unix.Minor(uint64(stat.Rdev))) == 0 {
-            return true, nil
-        }
-    }
-    // Whiteout represented as a zero-size regular file with xattr.
-    if info.Mode().IsRegular() && info.Size() == 0 {
-        value := make([]byte, 10)
-        n, err := unix.Getxattr(path, "trusted.overlay.whiteout", value)
-        if err != nil {
-            if errors.Is(err, unix.ENODATA) {
-                return false, nil
-            }
-            return false, err
-        }
-        return string(value[:n]) == "y", nil
-    }
-    return false, nil
-}
-
-func initVisible(added, modified, deleted []string) (map[string]bool) {
-	visible := make(map[string]bool, len(added)+len(deleted)+len(modified))
-	for _, path := range added {
-		visible[path] = false
-	}
-	for _, path := range deleted {
-		visible[path] = false
-	}
-	for _, path := range modified {
-		visible[path] = false
-	}
-	return visible
-}
-
-func cloneMap(src map[string]bool) map[string]bool {
-    dst := make(map[string]bool, len(src))
-    for key, value := range src {
-        dst[key] = value
-    }
-    return dst
-}
-
-func hideVisibleChildren(relPath string, visible, updated map[string]bool) error {
-	for interestingRelPath, isVisible := range visible {
-		if !isVisible || updated[interestingRelPath] {
-			continue
-		}
-		childRelPath, err := filepath.Rel(relPath, interestingRelPath)
-		if err != nil {
-			return err
-		}
-		if childRelPath == "." || childRelPath == ".." ||
-			strings.HasPrefix(childRelPath, ".."+string(filepath.Separator)) {
-			continue
-		}
-		visible[interestingRelPath] = false
-		updated[interestingRelPath] = true
-	}
-	return nil
-}
-
-func blameDir(fsDir, relDir string, updated, visible map[string]bool) error {
-	dentries, err := os.ReadDir(fsDir)
-	if err != nil {
-		return fmt.Errorf("read directory %s: %w", fsDir, err)
-	}
-	for _, dentry := range dentries {
-		fsPath := filepath.Join(fsDir, dentry.Name())
-		relPath := filepath.Join(relDir, dentry.Name())
-		if !dentry.IsDir() {
-			whiteout, err := isWhiteout(fsPath)
-			if err != nil {
-				return err
-			}
-			if whiteout {
-				if _, exists := visible[relPath]; exists {
-					visible[relPath] = !whiteout
-					updated[relPath] = true
-				} else if err := hideVisibleChildren(relPath, visible, updated); err != nil {
-					return err
-				}	
-			} else if _, exists := visible[relPath]; exists {
-				visible[relPath] = true
-				updated[relPath] = true
-			} 
-		} else {
-			if err := blameDir(fsPath, relPath, updated, visible); err != nil {
-				return err
-			}
-			opaque, err := isOpaque(fsPath)
-			if err != nil {
-				return err
-			}
-			if opaque {
-				if err := hideVisibleChildren(relPath, visible, updated); err != nil {
-					return err
-				}
-			}
-
-		}
-	}
-	return nil
-}
-
-func (m *Manager) advanceBlame(ckptIDs []string, visible map[string]bool, blame map[string][]string) error {
-	for _, ckptID := range ckptIDs {
-		upperDirPath := m.checkpointUpperDir(ckptID)
-		updated := make(map[string]bool)
-		if err := blameDir(upperDirPath, "", updated, visible); err != nil {
-			return err
-		}
-		if blame != nil {
-			for relPath := range updated {
-				blame[relPath] = append(blame[relPath], ckptID)
-			}
-		}
-	}
-	return nil
-}
-
-func advanceOG(ogDir string, visible map[string]bool) error {
-	updated := make(map[string]bool)
-	if err := blameDir(ogDir, "", updated, visible); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (m *Manager) blame(d *Diff, visible map[string]bool) (map[string][]string, map[string][]string, error) {
-	// determine if parent-child or leaf-leaf relationship
-	leftLayers := d.leftLayerIDs
-	rightLayers := d.rightLayerIDs
-	lastCommonIdx := -1
-	for i := 0; i < len(leftLayers) && i < len(rightLayers); i++ {
-		if leftLayers[i] != rightLayers[i] {
-			break
-		}
-		lastCommonIdx = i
-	}
-	leftUnsharedCkpts := leftLayers[lastCommonIdx+1:]
-	rightUnsharedCkpts := rightLayers[lastCommonIdx+1:]
-
-	leftBlame := make(map[string][]string)
-	rightBlame := make(map[string][]string)
-
-	if len(leftUnsharedCkpts) == 0 && len(rightUnsharedCkpts) == 0 {
-		// identical, shouldn't be anything to diff
-		return leftBlame, rightBlame, nil
-	}
-	if len(leftUnsharedCkpts) == 0 {
-		// Left side is the parent
-		if err := advanceOG(d.leftOriginalDir, visible); err != nil {
-			return nil, nil, err
-		}
-		if err := m.advanceBlame(leftLayers, visible, nil); err != nil {
-			return nil, nil, err
-		}
-		if err := m.advanceBlame(rightUnsharedCkpts, visible, rightBlame); err != nil {
-			return nil, nil, err
-		}
-	} else if len(rightUnsharedCkpts) == 0 {
-		// Right side is the parent
-		if err := advanceOG(d.rightOriginalDir, visible); err != nil {
-			return nil, nil, err
-		}
-		if err := m.advanceBlame(rightLayers, visible, nil); err != nil {
-			return nil, nil, err
-		}
-		if err := m.advanceBlame(leftUnsharedCkpts, visible, leftBlame); err != nil {
-			return nil, nil, err
-		}
-	} else {
-		// leaves, need to blame both
-		if (lastCommonIdx >= 0) { // advance to last common ckpt layer
-			if err := advanceOG(d.leftOriginalDir, visible); err != nil { //TODO/ASK: if the checkpoints are shared, can we assume the original dir is same too?
-				return nil, nil, err
-			}
-			if err := m.advanceBlame(leftLayers[:lastCommonIdx+1], visible, nil); err != nil {
-				return nil, nil, err
-			}
-		}
-		leftVisible := cloneMap(visible)
-		rightVisible := cloneMap(visible)
-		if lastCommonIdx < 0 { // no common ckpt layer
-			if err := advanceOG(d.leftOriginalDir, leftVisible); err != nil {
-				return nil, nil, err
-			}
-			if err := advanceOG(d.rightOriginalDir, rightVisible); err != nil {
-				return nil, nil, err
-			}
-		}
-		// potentially parallelize
-		if err := m.advanceBlame(leftUnsharedCkpts, leftVisible, leftBlame); err != nil {
-			return nil, nil, err
-		}
-		if err := m.advanceBlame(rightUnsharedCkpts, rightVisible, rightBlame); err != nil {
-			return nil, nil, err
-		}
-	}
-	return leftBlame, rightBlame, nil
-}
 
 func cmpIsDiff(leftFilePath, rightFilePath string) (bool, error) {
 	cmd := exec.Command("cmp", "-s", leftFilePath, rightFilePath)
@@ -275,8 +53,6 @@ func cmpIsDiff(leftFilePath, rightFilePath string) (bool, error) {
 	return false, fmt.Errorf("execute cmp -s %s %s: %w", leftFilePath, rightFilePath, err)
 }
 
-// TODO discuss what differences to look for
-// for now, will prioritize this check. so if overlayfs shows a file as different but its not in the M list, will ignore
 func areNonDirsDiff(leftFilePath, rightFilePath string) (bool, error) {
 	leftInfo, err := os.Lstat(leftFilePath)
 	if err != nil {
@@ -306,31 +82,49 @@ func areNonDirsDiff(leftFilePath, rightFilePath string) (bool, error) {
 	if leftInfo.Mode().IsRegular() {
 		return cmpIsDiff(leftFilePath, rightFilePath)
 	}
-	// Other types: for now don't mark
+	// Devices
+	if leftInfo.Mode()&os.ModeDevice != 0 {
+		leftSy, ok := leftInfo.Sys().(*syscall.Stat_t)
+		if !ok {
+			return false, fmt.Errorf("unexpected stat type for %s", leftFilePath)
+		}
+		rightSys, ok := rightInfo.Sys().(*syscall.Stat_t)
+		if !ok {
+			return false, fmt.Errorf("unexpected stat type for %s", rightFilePath)
+		}
+
+		leftDev := uint64(leftSys.Rdev)
+		rightDev := uint64(rightSys.Rdev)
+
+		if unix.Major(leftDev) != unix.Major(rightDev) ||
+			unix.Minor(leftDev) != unix.Minor(rightDev) {
+			return true, nil
+		}
+	}
+	// TODO: sockets, pipes, other more detailed inspection?
 	return false, nil
 }
 
-func recurseDir(fsDir, relDir string, paths *[]string) error {
-	dentries, err := os.ReadDir(fsDir)
+func recurseDir(rootViewDir, containerViewDir string, containerPaths *[]string) error {
+	dentries, err := os.ReadDir(rootViewDir)
 	if err != nil {
-		return fmt.Errorf("read directory %s: %w", fsDir, err)
+		return fmt.Errorf("read directory %s: %w", rootViewDir, err)
 	}
 	for _, dentry := range dentries {
-		fsPath := filepath.Join(fsDir, dentry.Name())
-		relPath := filepath.Join(relDir, dentry.Name())
+		rootViewPath := filepath.Join(rootViewDir, dentry.Name())
+		containerViewPath := filepath.Join(containerViewDir, dentry.Name())
 		if dentry.IsDir() {
-			if err := recurseDir(fsPath, relPath, paths); err != nil {
+			if err := recurseDir(rootViewPath, containerViewPath, containerPaths); err != nil {
 				return err
 			}
 		} else {
-			*paths = append(*paths, relPath)
+			*containerPaths = append(*containerPaths, containerViewPath)
 		}
 	}
 	return nil
 }
 
-func walkFS(leftDir, rightDir, relDir string, deleted, added, modified *[]string) error {
-	// potentially parallelize
+func walkFS(leftDir, rightDir, containerViewDir string, deleted, added, modified *[]string) error {
     leftEntries, err := os.ReadDir(leftDir)
     if err != nil {
         return fmt.Errorf("read directory %s: %w", leftDir, err)
@@ -347,19 +141,55 @@ func walkFS(leftDir, rightDir, relDir string, deleted, added, modified *[]string
     for _, entry := range rightEntries {
         rightNameMap[entry.Name()] = entry
     }
-	// Left-only entries -> deleted
-	for name, dentry := range leftNameMap {
-		if _, exists := rightNameMap[name]; exists {
+
+	for name, leftDentry := range leftNameMap {
+		containerViewSubpath := filepath.Join(containerViewDir, name)
+		rightDentry, exists := rightNameMap[name]
+		if !exists {
+			// Left-only entries -> deleted
+			rootViewSubpath := filepath.Join(leftDir, name)
+			
+			if leftDentry.IsDir() {
+				if err := recurseDir(rootViewSubpath, containerViewSubpath, deleted); err != nil {
+					return err
+				}
+			} else {
+				*deleted = append(*deleted, containerViewSubpath)
+			}
 			continue
 		}
-		fsPath := filepath.Join(leftDir, name)
-		relPath := filepath.Join(relDir, name)
-		if dentry.IsDir() {
-			if err := recurseDir(fsPath, relPath, deleted); err != nil {
+		// Entries in both -> check for modifications
+		leftRootViewSubpath := filepath.Join(leftDir, name)
+		rightRootViewSubpath := filepath.Join(rightDir, name)
+		if leftDentry.IsDir() && rightDentry.IsDir() {
+			if err := walkFS(leftRootViewSubpath, rightRootViewSubpath, containerViewSubpath, deleted, added, modified); err != nil {
 				return err
 			}
-		} else {
-			*deleted = append(*deleted, relPath)
+			continue
+		}
+		// if just left is directory, directory contents removed, file added
+		if leftDentry.IsDir() && !rightDentry.IsDir() {
+			if err := recurseDir(leftRootViewSubpath, containerViewSubpath, deleted); err != nil {
+				return err
+			}
+			*added = append(*added, containerViewSubpath)
+			continue
+		}
+		// if just right is directory, directory contents added, file removed
+		if !leftDentry.IsDir() && rightDentry.IsDir() {
+			if err := recurseDir(rightRootViewSubpath, containerViewSubpath, added); err != nil {
+				return err
+			}
+			*deleted = append(*deleted, containerViewSubpath)
+			continue
+		}
+		// Neither are directories, check for modification
+		changed, err := areNonDirsDiff(leftRootViewSubpath, rightRootViewSubpath)
+		if err != nil {
+			return err
+		}
+		if changed {
+			*modified = append(*modified, containerViewSubpath)
 		}
 	}
 	// Right-only entries -> added
@@ -367,67 +197,27 @@ func walkFS(leftDir, rightDir, relDir string, deleted, added, modified *[]string
 		if _, exists := leftNameMap[name]; exists {
 			continue
 		}
-		fsPath := filepath.Join(rightDir, name)
-		relPath := filepath.Join(relDir, name)
+		rootViewSubpath := filepath.Join(rightDir, name)
+		containerViewSubpath := filepath.Join(containerViewDir, name)
 		if dentry.IsDir() {
-			if err := recurseDir(fsPath, relPath, added); err != nil {
+			if err := recurseDir(rootViewSubpath, containerViewSubpath, added); err != nil {
 				return err
 			}
 		} else {
-			*added = append(*added, relPath)
-		}
-	}
-	// Entries in both -> check for modifications
-	for name, leftDentry := range leftNameMap {
-		rightDentry, exists := rightNameMap[name]
-		if !exists {
-			continue
-		}
-		leftFilePath := filepath.Join(leftDir, name)
-		rightFilePath := filepath.Join(rightDir, name)
-		relPath := filepath.Join(relDir, name)
-		if leftDentry.IsDir() && rightDentry.IsDir() {
-			if err := walkFS(leftFilePath, rightFilePath, relPath, deleted, added, modified); err != nil {
-				return err
-			}
-			continue
-		}
-		// if just one side is a directory, treat as file removed, directory contents added
-		if leftDentry.IsDir() && !rightDentry.IsDir() {
-			if err := recurseDir(leftFilePath, relPath, deleted); err != nil {
-				return err
-			}
-			*added = append(*added, relPath)
-			continue
-		}
-		if !leftDentry.IsDir() && rightDentry.IsDir() {
-			if err := recurseDir(rightFilePath, relPath, added); err != nil {
-				return err
-			}
-			*deleted = append(*deleted, relPath)
-			continue
-		}
-		// Neither are directories, check for modification
-		changed, err := areNonDirsDiff(leftFilePath, rightFilePath)
-		if err != nil {
-			return err
-		}
-		if changed {
-			*modified = append(*modified, relPath)
+			*added = append(*added, containerViewSubpath)
 		}
 	}
     return nil
 }
 
 func existsDir(path string) (bool, error) {
-    info, err := os.Lstat(path) // require non symlink
+    info, err := os.Lstat(path) // requires non symlink for the target dir running diff on. change?
     if err != nil {
         if os.IsNotExist(err) {
             return false, nil
         }
         return false, fmt.Errorf("stat %s: %w", path, err)
     }
-
     if !info.IsDir() {
         return false, fmt.Errorf("%s is not a directory", path)
     }
@@ -435,7 +225,7 @@ func existsDir(path string) (bool, error) {
 }
 
 func normalizeTargetDir(targetDir string) (string, error) {
-    // Treat / as relative to the checkpoint root.
+    // Treat / as relative to the container root.
 	if targetDir == "" || targetDir == "/" || targetDir == "." {
         return "", nil
     }
@@ -605,12 +395,6 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) (error)
 		if err := walkFS(leftTargetDir, rightTargetDir, relativeTargetDir, &deleted, &added, &modified); err != nil {
 			return err
 		}
-	}
-
-	visible := initVisible(added, modified, deleted)
-	leftBlame, rightBlame, err := m.blame(d, visible)
-	if err != nil {
-		return nil
 	}
 
 	sort.Strings(added)
