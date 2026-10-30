@@ -109,6 +109,7 @@ func main() {
 		fmt.Println("  fork <session> <checkpoint-id> [--id ID] [--n K] - Materialize live fork(s)")
 		fmt.Println("  exec <session> <fork-id> -- '<command>'      - Run one bash command line in a fork")
 		fmt.Println("  cp <session> <source> <destination>          - Copy host path <-> fork-id:/path")
+		fmt.Println("  diff <session> <checkpoint-id> <checkpoint-id> [--dir D] - Show diff between two checkpoints (--dir: restrict to directory D)")
 		fmt.Println("  snapshot <session> <fork-id> <checkpoint-id> [--park] - Snapshot a live fork (--park: don't resume it)")
 		fmt.Println("  create <session> <checkpoint-id>             - Legacy alias for checkpoint")
 		fmt.Println("  fork-exec <session> <fork-id> <command>      - Legacy alias for exec")
@@ -560,6 +561,34 @@ func main() {
 	case "cp":
 		if err := runCopy(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "Error copying: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "diff":
+		if len(os.Args) < 5 {
+			fmt.Println("Usage: diff <session> <checkpoint-id> <checkpoint-id> [--dir D]")
+			os.Exit(1)
+		}
+		sessionID := os.Args[2]
+		ckptIDFirst := os.Args[3]
+		ckptIDSecond := os.Args[4]
+		targetDir := ""
+		if len(os.Args) > 5 {
+			if os.Args[5] == "--dir" {
+				if len(os.Args) < 7 {
+					fmt.Println("Error: --dir requires a value (restricted directory name)")
+					os.Exit(1)
+				}
+				targetDir = os.Args[6]
+			}
+		}
+		manager, err := waypoint.LoadManager(sessionID)
+		if err != nil {
+			fmt.Printf("Error loading session: %v\n", err)
+			os.Exit(1)
+		}
+		if err := manager.PrintDiff(ckptIDFirst, ckptIDSecond, targetDir); err != nil {
+			fmt.Printf("Error on diff: %v\n", err)
 			os.Exit(1)
 		}
 
