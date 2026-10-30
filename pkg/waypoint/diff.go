@@ -23,7 +23,7 @@ type FileType string
 const (
 	FileTypeSymlink		FileType = "symlink"
 	FileTypeRegular 	FileType = "regular"
-	FileTypeDevice		FileType = "device"
+	FileTypeDevice		FileType = "device" // modified = major/minor number change
 	FileTypeFIFO		FileType = "fifo" // currently only add/delete tracked
 	FileTypeSocket		FileType = "socket" // currently only add/delete tracked
 	FileTypeOther		FileType = "other"
@@ -216,6 +216,7 @@ func recurseWithChangeType(rootViewPath, containerViewPath string, detected *[]D
 
 func walkFS(leftDir, rightDir, containerViewDir string, detected *[]DiffFileRecord) error {
     // note: won't follow symlink dirs
+	// TODO make this faster
 	leftEntries, err := os.ReadDir(leftDir)
     if err != nil {
         return fmt.Errorf("read directory %s: %w", leftDir, err)
@@ -340,13 +341,13 @@ func normalizeTargetDir(targetDir string) (string, error) {
 
 	// Treat / as relative to the container root.
 	if clean == "." {
-        return "", nil
+        return "/", nil
     }
     if clean == ".." ||
         strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
         return "", fmt.Errorf("target directory must not escape the filesystem root")
     }
-    return clean, nil
+    return "/" + clean, nil
 }
 
 func computeTargetHash(targetDir string) (string, error) {
@@ -382,38 +383,44 @@ func computeResultPath(ckptsDiffDir string, targetDir string) (string, error) {
 }
 
 func computeCkptsDiffID(leftCkptID, rightCkptID string) string {
-	return fmt.Sprintf("%s-%s", leftCkptID, rightCkptID) // TODO make more robust, maybe hash as well
+	sum := sha256.Sum256([]byte(leftCkptID + "/" + rightCkptID)) // ensures unique pair because ckptIDs can't include /
+    hash := hex.EncodeToString(sum[:8])
+	return fmt.Sprintf("%.5s-%.5s-%s", leftCkptID, rightCkptID, hash) // add a bit of ckpt names for readability
 }
 
-func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir string) (*DiffFS, bool, error) {
+func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir string) (*DiffFS, []byte, error) {
 	if err := validateCheckpointID(ckptIDFirst); err != nil {
-		return nil, false, fmt.Errorf("invalid checkpoint ID %s: %w", ckptIDFirst, err)
+		return nil, nil, fmt.Errorf("invalid checkpoint ID %s: %w", ckptIDFirst, err)
 	}
 	if err := validateCheckpointID(ckptIDSecond); err != nil {
-		return nil, false, fmt.Errorf("invalid checkpoint ID %s: %w", ckptIDSecond, err)
+		return nil, nil, fmt.Errorf("invalid checkpoint ID %s: %w", ckptIDSecond, err)
 	}
 
 	ckptsDiffID := computeCkptsDiffID(ckptIDFirst, ckptIDSecond) 
 	ckptsDiffDir := m.diffDir(ckptsDiffID)
     targetCacheResult, err := computeResultPath(ckptsDiffDir, normalizedTargetDir)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, err
 	}
 	targetTempDir, err := computeTargetTempDir(ckptsDiffDir, normalizedTargetDir)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, err
 	}
 
+	var cachedData []byte
 	var d *DiffFS
-	cacheExists := false
 	if err := m.withSessionLock(func() error {
 		_, errCkpt := os.Stat(ckptsDiffDir)
 		_, errTemp := os.Stat(targetTempDir)
 		_, errRes := os.Stat(targetCacheResult)
 		if errRes == nil  {
 			// case 1: already have cached result
-			// TODO add further validate the cache file before returning
-			cacheExists = true
+			// TODO further validation of cache before try to read?
+			var err error
+			cachedData, err = os.ReadFile(targetCacheResult)
+			if err != nil {
+				return fmt.Errorf("read cached diff result: %w", err)
+			}
 			return nil
 		} else if !os.IsNotExist(errRes) {
 			return errRes
@@ -451,10 +458,10 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 		}
 		return nil
 	}); err != nil {
-		return nil, false, err
+		return nil, nil, err
 	}
-	if cacheExists {
-		return nil, true, nil
+	if cachedData != nil {
+    	return nil, cachedData, nil
 	}
 
 	// Mount
@@ -466,7 +473,7 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 		strings.Join(leftOverlayLowers, ":"), d.leftUpperDir, d.leftWorkDir)
 	if err := unix.Mount("overlay", d.leftMountPoint, "overlay", 0, optionsLeft); err != nil {
 		_ = os.RemoveAll(d.overlayDir)
-		return nil, false, fmt.Errorf("mount overlay at %s failed: %w", d.leftMountPoint, err)
+		return nil, nil, fmt.Errorf("mount overlay at %s failed: %w", d.leftMountPoint, err)
 	}
 
 	optionsRight := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s",
@@ -474,25 +481,27 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 	if err := unix.Mount("overlay", d.rightMountPoint, "overlay", 0, optionsRight); err != nil {
 		_ = unix.Unmount(d.leftMountPoint, unix.MNT_DETACH)
 		_ = os.RemoveAll(d.overlayDir)
-		return nil, false, fmt.Errorf("mount overlay at %s failed: %w", d.rightMountPoint, err)
+		return nil, nil, fmt.Errorf("mount overlay at %s failed: %w", d.rightMountPoint, err)
 	}
 
-	return d, false, nil
+	return d, nil, nil
 }
 
 // Entry point for diff
-func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) (error) {
+func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 	normalizedTargetDir, err := normalizeTargetDir(targetDir)
 	if err != nil {
 		return err
 	}
 	
-	d, cached, err := m.setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir)
+	d, cachedData, err := m.setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir)
 	if err != nil {
 		return err
 	}
-	if cached {
-		// DONE, ask on slack about return 
+	if cachedData != nil {
+		if _, err := os.Stdout.Write(append(cachedData, '\n')); err != nil {
+			return fmt.Errorf("write cached diff result to stdout: %w", err)
+		}
 		return nil
 	}
 
@@ -553,6 +562,9 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) (error)
 			return atomicWriteFile(resultPath, data, 0o644)
 	}); err != nil {
 		return err
+	}
+	if _, err := os.Stdout.Write(append(data, '\n')); err != nil {
+    	return fmt.Errorf("write diff result to stdout: %w", err)
 	}
 
 	return nil

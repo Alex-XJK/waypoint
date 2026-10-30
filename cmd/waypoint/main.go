@@ -588,7 +588,7 @@ func main() {
 			os.Exit(1)
 		}
 		if err := manager.PrintDiff(ckptIDFirst, ckptIDSecond, targetDir); err != nil {
-			fmt.Printf("Error printing diff: %v\n", err)
+			fmt.Printf("Error on diff: %v\n", err)
 			os.Exit(1)
 		}
 
