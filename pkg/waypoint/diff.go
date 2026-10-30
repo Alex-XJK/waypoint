@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"crypto/sha256"
     "encoding/hex"
+	"encoding/json"
 
 	"golang.org/x/sys/unix"
 )
@@ -44,7 +45,7 @@ type DiffFileRecord struct {
 
 type DiffResult		struct {
 	TargetDir	string 				`json:"target_dir"`
-	Records		[]DiffFileRecord	`json:"records,omitempty"`
+	Records		[]DiffFileRecord	`json:"records"`
 }
 
 type DiffFS struct {
@@ -159,7 +160,7 @@ func processNonDirMod(leftFilePath, rightFilePath, containerViewPath string, det
 		}
 		mod = (leftTarget != rightTarget)
 	} else if leftFileType == FileTypeDevice {
-		leftSy, ok := leftInfo.Sys().(*syscall.Stat_t)
+		leftSys, ok := leftInfo.Sys().(*syscall.Stat_t)
 		if !ok {
 			return fmt.Errorf("unexpected stat type for %s", leftFilePath)
 		}
@@ -215,7 +216,6 @@ func recurseWithChangeType(rootViewPath, containerViewPath string, detected *[]D
 
 func walkFS(leftDir, rightDir, containerViewDir string, detected *[]DiffFileRecord) error {
     // note: won't follow symlink dirs
-	
 	leftEntries, err := os.ReadDir(leftDir)
     if err != nil {
         return fmt.Errorf("read directory %s: %w", leftDir, err)
@@ -232,6 +232,7 @@ func walkFS(leftDir, rightDir, containerViewDir string, detected *[]DiffFileReco
     for _, entry := range rightEntries {
         rightNameMap[entry.Name()] = entry
     }
+
 	for name, leftDentry := range leftNameMap {
 		containerViewSubpath := filepath.Join(containerViewDir, name)
 		rightDentry, exists := rightNameMap[name]
@@ -258,7 +259,7 @@ func walkFS(leftDir, rightDir, containerViewDir string, detected *[]DiffFileReco
 			if err := recurseWithChangeType(leftRootViewSubpath, containerViewSubpath, detected, ChangeTypeDeleted); err != nil {
 				return err
 			}
-			if err := recurseWithChangeType(rightRootViewSubPath, containerViewSubpath, detected, ChangeTypeAdded); err != nil {
+			if err := recurseWithChangeType(rightRootViewSubpath, containerViewSubpath, detected, ChangeTypeAdded); err != nil {
 				return err
 			}
 			continue
@@ -269,10 +270,11 @@ func walkFS(leftDir, rightDir, containerViewDir string, detected *[]DiffFileReco
 		}
 	}
 	// Right-only entries -> added
-	for name, dentry := range rightNameMap {
+	for name, _ := range rightNameMap {
 		if _, exists := leftNameMap[name]; exists {
 			continue
 		}
+		containerViewSubpath := filepath.Join(containerViewDir, name)
 		rootViewSubpath := filepath.Join(rightDir, name)
 		if err := recurseWithChangeType(rootViewSubpath, containerViewSubpath, detected, ChangeTypeAdded); err != nil {
 			return err
@@ -332,6 +334,7 @@ func newDiffFS(m *Manager, overlayDir, leftCkptID, rightCkptID string) (*DiffFS,
 }
 
 func normalizeTargetDir(targetDir string) (string, error) {
+	// TODO further anti symlink validation?
     targetDir = strings.TrimLeft(targetDir, "/")
 	clean := filepath.Clean(targetDir)
 
@@ -347,7 +350,7 @@ func normalizeTargetDir(targetDir string) (string, error) {
 }
 
 func computeTargetHash(targetDir string) (string, error) {
-	err, normalized := normalizeTargetDir(targetDir)
+	normalized, err := normalizeTargetDir(targetDir)
 	if err != nil {
 		return "", err
 	}
@@ -355,13 +358,13 @@ func computeTargetHash(targetDir string) (string, error) {
 		return "root", nil
 	}
 	hash := sha256.Sum256([]byte(normalized))
-	return hex.EncodeToString(hash[:]), nil
+	return hex.EncodeToString(hash[:8]), nil
 }
 
 func computeTargetTempDir(ckptsDiffDir string, targetDir string) (string, error) {
-	err, targetCacheKey := computeTargetHash(targetDir)
+	targetCacheKey, err := computeTargetHash(targetDir)
 	if err != nil {
-		return err, nil
+		return "", err
 	}
 	temp_id := "temp-" + targetCacheKey
 	targetTempDir := filepath.Join(ckptsDiffDir, temp_id)
@@ -369,9 +372,9 @@ func computeTargetTempDir(ckptsDiffDir string, targetDir string) (string, error)
 }
 
 func computeResultPath(ckptsDiffDir string, targetDir string) (string, error) {
-	err, targetCacheKey := computeTargetHash(targetDir)
+	targetCacheKey, err := computeTargetHash(targetDir)
 	if err != nil {
-		return err, nil
+		return "", err
 	}
 	res_id := "result-" + targetCacheKey 
 	targetCacheResult := filepath.Join(ckptsDiffDir, res_id+".json")
@@ -392,11 +395,11 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 
 	ckptsDiffID := computeCkptsDiffID(ckptIDFirst, ckptIDSecond) 
 	ckptsDiffDir := m.diffDir(ckptsDiffID)
-    err, targetCacheResult := computeResultPath(ckptsDiffDir, normalizedTargetDir)
+    targetCacheResult, err := computeResultPath(ckptsDiffDir, normalizedTargetDir)
 	if err != nil {
 		return nil, false, err
 	}
-	err, targetTempDir := computeTargetTempDir(ckptsDiffDir, normalizedTargetDir)
+	targetTempDir, err := computeTargetTempDir(ckptsDiffDir, normalizedTargetDir)
 	if err != nil {
 		return nil, false, err
 	}
@@ -409,6 +412,7 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 		_, errRes := os.Stat(targetCacheResult)
 		if errRes == nil  {
 			// case 1: already have cached result
+			// TODO add further validate the cache file before returning
 			cacheExists = true
 			return nil
 		} else if !os.IsNotExist(errRes) {
@@ -441,6 +445,7 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 		}
 		for _, dir := range []string{d.leftMountPoint, d.rightMountPoint, d.leftUpperDir, d.rightUpperDir, d.leftWorkDir, d.rightWorkDir} {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
+				_ = os.RemoveAll(targetTempDir)
 				return fmt.Errorf("mkdir %s failed: %w", dir, err)
 			}
 		}
@@ -531,14 +536,14 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) (error)
 
 	ckptsDiffID := computeCkptsDiffID(ckptIDFirst, ckptIDSecond) 
 	ckptsDiffDir := m.diffDir(ckptsDiffID)
-    err, resultPath := computeResultPath(ckptsDiffDir, normalizedTargetDir)
+    resultPath, err := computeResultPath(ckptsDiffDir, normalizedTargetDir)
 	if err != nil {
 		return err
 	}
 	
 	result := DiffResult{
 		TargetDir: normalizedTargetDir,
-		Files: detected,
+		Records: detected,
 	}
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
