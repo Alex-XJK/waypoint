@@ -209,7 +209,14 @@ func (m *Manager) DestroyFork(forkID string) error {
 		}
 		f.releaseNetwork()
 		_ = os.Remove(f.SocketPath)
-		return os.RemoveAll(f.RootDir)
+		if err := os.RemoveAll(f.RootDir); err != nil {
+			return err
+		}
+		// Set only while no dump has used it, so no checkpoint links to it.
+		if f.NextImagesDir != "" {
+			return os.RemoveAll(f.NextImagesDir)
+		}
+		return nil
 	})
 }
 

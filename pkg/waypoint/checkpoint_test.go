@@ -129,3 +129,92 @@ func TestNextImagesDirs(t *testing.T) {
 		t.Errorf("newNextImagesDir returned %s twice", first)
 	}
 }
+
+func TestRetireNextImagesDir(t *testing.T) {
+	m := newManager(t.TempDir())
+	// c1/criu <- c1/next/f1-* (as CRIU's restore writes it) <- <ckpt>/criu,
+	// the last link only when chained.
+	setup := func(t *testing.T, ckpt string, chained bool, nextPages []byte) (f *Fork, criu, rel string) {
+		t.Helper()
+		if err := os.MkdirAll(m.checkpointCriuDir("c1"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		next, err := m.newNextImagesDir("c1", "f1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../../criu", filepath.Join(next, "parent")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(next, "pages-1.img"), nextPages, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		criu = m.checkpointCriuDir(ckpt)
+		if err := os.MkdirAll(criu, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if rel, err = filepath.Rel(criu, next); err != nil {
+			t.Fatal(err)
+		}
+		if chained {
+			if err := os.Symlink(rel, filepath.Join(criu, "parent")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return &Fork{ID: "f1", NextImagesDir: next}, criu, rel
+	}
+	exists := func(path string) bool { _, err := os.Lstat(path); return err == nil }
+
+	// Chained: the link skips the next dir, which goes away.
+	f, criu, _ := setup(t, "s1", true, nil)
+	next := f.NextImagesDir
+	retireNextImagesDir(f, criu)
+	if got, _ := os.Readlink(filepath.Join(criu, "parent")); got != "../../c1/criu" {
+		t.Errorf("parent link %q, want ../../c1/criu", got)
+	}
+	if exists(filepath.Join(criu, "parent.tmp")) {
+		t.Errorf("parent.tmp left behind")
+	}
+	if exists(next) || f.NextImagesDir != "" {
+		t.Errorf("next dir %s: exists %v, field %q; want removed and cleared", next, exists(next), f.NextImagesDir)
+	}
+
+	// A full dump (knob turned off since the restore): nothing to relink.
+	f, criu, _ = setup(t, "s2", false, nil)
+	next = f.NextImagesDir
+	retireNextImagesDir(f, criu)
+	if exists(filepath.Join(criu, "parent")) || exists(next) || f.NextImagesDir != "" {
+		t.Errorf("full dump: parent %v, next dir %v, field %q; want none", exists(filepath.Join(criu, "parent")), exists(next), f.NextImagesDir)
+	}
+
+	// A parent that holds pages is not a next dir: the link and the dir stay,
+	// and the fork still drops it.
+	f, criu, rel := setup(t, "s3", true, []byte("page"))
+	next = f.NextImagesDir
+	retireNextImagesDir(f, criu)
+	if got, _ := os.Readlink(filepath.Join(criu, "parent")); got != rel {
+		t.Errorf("parent link %q, want it unchanged (%q)", got, rel)
+	}
+	if !exists(next) || f.NextImagesDir != "" {
+		t.Errorf("parent with pages: next dir exists %v, field %q; want kept and cleared", exists(next), f.NextImagesDir)
+	}
+}
+
+func TestDestroyForkRemovesNextImagesDir(t *testing.T) {
+	m := newManager(t.TempDir())
+	m.sessionID = "test-session"
+	next, err := m.newNextImagesDir("c1", "f1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &Fork{ID: "f1", SessionID: m.sessionID, RootDir: m.forkDir("f1"), Status: ForkStatusRunning, NextImagesDir: next}
+	if err := m.saveFork(f); err != nil {
+		t.Fatalf("saveFork: %v", err)
+	}
+	if err := m.DestroyFork("f1"); err != nil {
+		t.Fatalf("DestroyFork: %v", err)
+	}
+	if _, err := os.Stat(next); !os.IsNotExist(err) {
+		t.Errorf("next dir %s after destroy: %v, want removed", next, err)
+	}
+}

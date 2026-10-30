@@ -104,6 +104,88 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath, prevImagesDir string
 	return nil
 }
 
+// retireNextImagesDir runs after f was dumped into criuPath. The dump took
+// f.NextImagesDir as its parent if it chained at all; the new images are
+// linked past it and the dir is removed, since nothing references it then.
+// The fork drops the dir either way: its next dump is against the dir of its
+// next restore. If the link can't be moved, the dir stays where the new
+// images still need it.
+func retireNextImagesDir(f *Fork, criuPath string) {
+	next := f.NextImagesDir
+	if next == "" {
+		return
+	}
+	f.NextImagesDir = ""
+	if _, err := os.Lstat(filepath.Join(criuPath, "parent")); err == nil {
+		if err := linkPastNextImages(criuPath, next); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s keeps its next dir in the parent chain: %v\n", criuPath, err)
+			return
+		}
+	}
+	if err := os.RemoveAll(next); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: next images dir %s left behind: %v\n", next, err)
+	}
+}
+
+// linkPastNextImages repoints the parent link of the images in criuPath from
+// nextDir, the next dir they were dumped against, to the images that next
+// dir was restored from. The next dir has no pages and its pagemaps list the
+// restored images' entries, all in parent, so every lookup through it lands
+// one level further anyway; the dump needed it only for its inventory, whose
+// uptime marks the restore for the pid-reuse check. Restores of this
+// checkpoint and of every one dumped after it then read one image set less
+// per snapshot. On error the link stays as CRIU wrote it, which restores just
+// as well.
+func linkPastNextImages(criuPath, nextDir string) error {
+	link := filepath.Join(criuPath, "parent")
+	next, err := os.Readlink(link) // ../../<ckpt>/next/<fork>-XXXX
+	if err != nil {
+		return err
+	}
+	if got, err := filepath.Abs(filepath.Join(criuPath, next)); err != nil {
+		return err
+	} else if want, err := filepath.Abs(nextDir); err != nil {
+		return err
+	} else if got != want {
+		return fmt.Errorf("parent %s is not the next dir %s", got, want)
+	}
+	pages, err := filepath.Glob(filepath.Join(nextDir, "pages-*.img"))
+	if err != nil {
+		return err
+	}
+	for _, p := range pages {
+		if fi, err := os.Stat(p); err != nil {
+			return err
+		} else if fi.Size() != 0 {
+			return fmt.Errorf("parent %s holds pages", nextDir)
+		}
+	}
+	up, err := os.Readlink(filepath.Join(nextDir, "parent")) // ../../criu
+	if err != nil {
+		return err
+	}
+	if filepath.IsAbs(up) {
+		return fmt.Errorf("parent of %s is absolute: %s", nextDir, up)
+	}
+	// Lexical: the next dir and its parent are real directories.
+	target := filepath.Clean(filepath.Join(next, up)) // ../../<ckpt>/criu
+	if fi, err := os.Stat(filepath.Join(criuPath, target)); err != nil {
+		return err
+	} else if !fi.IsDir() {
+		return fmt.Errorf("parent %s is not a directory", target)
+	}
+	tmp := link + ".tmp"
+	_ = os.Remove(tmp)
+	if err := os.Symlink(target, tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, link); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 func findMountID(pid int, mountPoint string) (string, error) {
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "mountinfo"))
 	if err != nil {

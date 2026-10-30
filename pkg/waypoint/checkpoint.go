@@ -463,6 +463,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 	if err := m.createMemoryCheckpoint(f.PID, ckptCriu, f.NextImagesDir); err != nil {
 		return fail(fmt.Errorf("memory checkpoint failed: %w", err))
 	}
+	retireNextImagesDir(f, ckptCriu)
 	dumpMs := durMs(time.Since(dumpStart))
 	if TmpfsImages {
 		// Persist the tmpfs images in the background; forks meanwhile read
@@ -532,9 +533,8 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 	f.CriuPath = ckptCriu
 	f.PidFile = filepath.Join(f.RootDir, "restore.pid")
 	_ = os.Remove(f.PidFile)
-	// The checkpoint just dumped links to the old next dir as its parent;
-	// the re-restore starts a new one under the new checkpoint.
-	f.NextImagesDir = ""
+	// The dump retired the old next dir; the re-restore starts a new one
+	// under the new checkpoint.
 	if incrementalDumps() && m.chainsFrom(checkpointID) {
 		nextDir, err := m.newNextImagesDir(checkpointID, f.ID)
 		if err != nil {
