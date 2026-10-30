@@ -564,7 +564,7 @@ func main() {
 			os.Exit(1)
 		}
 
-	case "diff": // TODO add --depth flag of how many layers back to blame?
+	case "diff":
 		if len(os.Args) < 5 {
 			fmt.Println("Usage: diff <session> <checkpoint-id> <checkpoint-id> [--dir D]")
 			os.Exit(1)
