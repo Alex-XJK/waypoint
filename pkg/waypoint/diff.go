@@ -45,7 +45,15 @@ type DiffFileRecord struct {
 	FileType   FileType   `json:"file_type"`
 }
 
+// DiffResult is the JSON printed by `diff`. Other kinds of state go next to
+// Filesystem.
 type DiffResult struct {
+	From       string         `json:"from"`
+	To         string         `json:"to"`
+	Filesystem FilesystemDiff `json:"filesystem"`
+}
+
+type FilesystemDiff struct {
 	TargetDir string           `json:"target_dir"`
 	Records   []DiffFileRecord `json:"records"`
 }
@@ -553,8 +561,12 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 	}
 
 	result := DiffResult{
-		TargetDir: normalizedTargetDir,
-		Records:   detected,
+		From: ckptIDFirst,
+		To:   ckptIDSecond,
+		Filesystem: FilesystemDiff{
+			TargetDir: normalizedTargetDir,
+			Records:   detected,
+		},
 	}
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
