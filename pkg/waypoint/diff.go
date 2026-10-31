@@ -3,67 +3,69 @@ package waypoint
 // TODO add description
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sort"
+	"strings"
 	"syscall"
-	"crypto/sha256"
-    "encoding/hex"
-	"encoding/json"
 
 	"golang.org/x/sys/unix"
 )
 
 type FileType string
+
 // types currently tracked
 const (
-	FileTypeSymlink		FileType = "symlink"
-	FileTypeRegular 	FileType = "regular"
-	FileTypeDevice		FileType = "device" // modified = major/minor number change
-	FileTypeFIFO		FileType = "fifo" // currently only add/delete tracked
-	FileTypeSocket		FileType = "socket" // currently only add/delete tracked
-	FileTypeOther		FileType = "other"
-	FileTypeModified	FileType = "modified" // TODO: use for files whose mode changed, OK?
+	FileTypeSymlink  FileType = "symlink"
+	FileTypeRegular  FileType = "regular"
+	FileTypeDevice   FileType = "device" // modified = major/minor number change
+	FileTypeFIFO     FileType = "fifo"   // currently only add/delete tracked
+	FileTypeSocket   FileType = "socket" // currently only add/delete tracked
+	FileTypeOther    FileType = "other"
+	FileTypeModified FileType = "modified" // TODO: use for files whose mode changed, OK?
 )
 
 type ChangeType string
+
 const (
-	ChangeTypeAdded		ChangeType = "added"
-	ChangeTypeDeleted	ChangeType = "deleted"
-	ChangeTypeModified  ChangeType = "modified"
+	ChangeTypeAdded    ChangeType = "added"
+	ChangeTypeDeleted  ChangeType = "deleted"
+	ChangeTypeModified ChangeType = "modified"
 )
 
 type DiffFileRecord struct {
-	Path            string           `json:"path"`
-	ChangeType		ChangeType       `json:"change_type"`
-	FileType        FileType         `json:"file_type"`
+	Path       string     `json:"path"`
+	ChangeType ChangeType `json:"change_type"`
+	FileType   FileType   `json:"file_type"`
 }
 
-type DiffResult		struct {
-	TargetDir	string 				`json:"target_dir"`
-	Records		[]DiffFileRecord	`json:"records"`
+type DiffResult struct {
+	TargetDir string           `json:"target_dir"`
+	Records   []DiffFileRecord `json:"records"`
 }
 
 type DiffFS struct {
-	overlayDir             string
+	overlayDir string
 
-	leftOriginalDir		string
-	rightOriginalDir	string
+	leftOriginalDir  string
+	rightOriginalDir string
 
-	leftLayerIDs    	[]string 
-	rightLayerIDs   	[]string 
+	leftLayerIDs  []string
+	rightLayerIDs []string
 
-	leftUpperDir    	string   
-	rightUpperDir   	string   
-	leftWorkDir     	string   
-	rightWorkDir    	string
+	leftUpperDir  string
+	rightUpperDir string
+	leftWorkDir   string
+	rightWorkDir  string
 
-	leftMountPoint  	string
-	rightMountPoint		string
+	leftMountPoint  string
+	rightMountPoint string
 }
 
 func cmpIsDiff(leftFilePath, rightFilePath string) (bool, error) {
@@ -101,7 +103,7 @@ func getFileType(path string) (FileType, error) {
 	if mode&os.ModeNamedPipe != 0 {
 		return FileTypeFIFO, nil
 	}
-    if mode&os.ModeSocket != 0 {
+	if mode&os.ModeSocket != 0 {
 		return FileTypeSocket, nil
 	}
 	return FileTypeOther, nil
@@ -126,7 +128,7 @@ func processNonDirMod(leftFilePath, rightFilePath, containerViewPath string, det
 	}
 	// Mode change
 	if leftInfo.Mode() != rightInfo.Mode() {
-		if (leftFileType == rightFileType) {
+		if leftFileType == rightFileType {
 			*detected = append(*detected, DiffFileRecord{
 				Path:       containerViewPath,
 				ChangeType: ChangeTypeModified,
@@ -141,7 +143,7 @@ func processNonDirMod(leftFilePath, rightFilePath, containerViewPath string, det
 		}
 		return nil
 	}
-	// Other changes currently tracked: cmp on regular, symlink target, dev major/minor. TODO support other changes/types 
+	// Other changes currently tracked: cmp on regular, symlink target, dev major/minor. TODO support other changes/types
 	mod := false
 	if leftFileType == FileTypeRegular {
 		res, err := cmpIsDiff(leftFilePath, rightFilePath)
@@ -215,24 +217,24 @@ func recurseWithChangeType(rootViewPath, containerViewPath string, detected *[]D
 }
 
 func walkFS(leftDir, rightDir, containerViewDir string, detected *[]DiffFileRecord) error {
-    // note: won't follow symlink dirs
+	// note: won't follow symlink dirs
 	// TODO make this faster
 	leftEntries, err := os.ReadDir(leftDir)
-    if err != nil {
-        return fmt.Errorf("read directory %s: %w", leftDir, err)
-    }
-    rightEntries, err := os.ReadDir(rightDir)
-    if err != nil {
-        return fmt.Errorf("read directory %s: %w", rightDir, err)
-    }
-    leftNameMap := make(map[string]os.DirEntry, len(leftEntries))
-    for _, entry := range leftEntries {
-        leftNameMap[entry.Name()] = entry
-    }
-    rightNameMap := make(map[string]os.DirEntry, len(rightEntries))
-    for _, entry := range rightEntries {
-        rightNameMap[entry.Name()] = entry
-    }
+	if err != nil {
+		return fmt.Errorf("read directory %s: %w", leftDir, err)
+	}
+	rightEntries, err := os.ReadDir(rightDir)
+	if err != nil {
+		return fmt.Errorf("read directory %s: %w", rightDir, err)
+	}
+	leftNameMap := make(map[string]os.DirEntry, len(leftEntries))
+	for _, entry := range leftEntries {
+		leftNameMap[entry.Name()] = entry
+	}
+	rightNameMap := make(map[string]os.DirEntry, len(rightEntries))
+	for _, entry := range rightEntries {
+		rightNameMap[entry.Name()] = entry
+	}
 
 	for name, leftDentry := range leftNameMap {
 		containerViewSubpath := filepath.Join(containerViewDir, name)
@@ -245,7 +247,7 @@ func walkFS(leftDir, rightDir, containerViewDir string, detected *[]DiffFileReco
 			}
 			continue
 		}
-		// Left and right entry 
+		// Left and right entry
 		leftRootViewSubpath := filepath.Join(leftDir, name)
 		rightRootViewSubpath := filepath.Join(rightDir, name)
 		// both directories, so recurse
@@ -256,7 +258,7 @@ func walkFS(leftDir, rightDir, containerViewDir string, detected *[]DiffFileReco
 			continue
 		}
 		// Just one side is directory -> left is deleted, right is added
-		if (leftDentry.IsDir() && !rightDentry.IsDir()) || (!leftDentry.IsDir() && rightDentry.IsDir()){
+		if (leftDentry.IsDir() && !rightDentry.IsDir()) || (!leftDentry.IsDir() && rightDentry.IsDir()) {
 			if err := recurseWithChangeType(leftRootViewSubpath, containerViewSubpath, detected, ChangeTypeDeleted); err != nil {
 				return err
 			}
@@ -271,7 +273,7 @@ func walkFS(leftDir, rightDir, containerViewDir string, detected *[]DiffFileReco
 		}
 	}
 	// Right-only entries -> added
-	for name, _ := range rightNameMap {
+	for name := range rightNameMap {
 		if _, exists := leftNameMap[name]; exists {
 			continue
 		}
@@ -282,21 +284,21 @@ func walkFS(leftDir, rightDir, containerViewDir string, detected *[]DiffFileReco
 		}
 		continue
 	}
-    return nil
+	return nil
 }
 
 func existsDir(path string) (bool, error) {
-    info, err := os.Lstat(path) // requires non symlink for the target dir running diff on. OK?
-    if err != nil {
-        if os.IsNotExist(err) {
-            return false, nil
-        }
-        return false, fmt.Errorf("stat %s: %w", path, err)
-    }
-    if !info.IsDir() {
-        return false, fmt.Errorf("%s is not a directory", path)
-    }
-    return true, nil
+	info, err := os.Lstat(path) // requires non symlink for the target dir running diff on. OK?
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("%s is not a directory", path)
+	}
+	return true, nil
 }
 
 func newDiffFS(m *Manager, overlayDir, leftCkptID, rightCkptID string) (*DiffFS, error) {
@@ -320,34 +322,34 @@ func newDiffFS(m *Manager, overlayDir, leftCkptID, rightCkptID string) (*DiffFS,
 		rightOriginalDir = m.originalDir
 	}
 	return &DiffFS{
-		overlayDir:         overlayDir,
-		leftLayerIDs:       leftLowerIDs,
-		rightLayerIDs:      rightLowerIDs,
-		leftOriginalDir:	leftOriginalDir,
-		rightOriginalDir:	rightOriginalDir,
-		leftUpperDir:       filepath.Join(overlayDir, "left_upper"),
-		rightUpperDir:      filepath.Join(overlayDir, "right_upper"),
-		leftWorkDir:        filepath.Join(overlayDir, "left_work"),
-		rightWorkDir:       filepath.Join(overlayDir, "right_work"),
-		leftMountPoint:     filepath.Join(overlayDir, "left_mount"),
-		rightMountPoint:    filepath.Join(overlayDir, "right_mount"),
+		overlayDir:       overlayDir,
+		leftLayerIDs:     leftLowerIDs,
+		rightLayerIDs:    rightLowerIDs,
+		leftOriginalDir:  leftOriginalDir,
+		rightOriginalDir: rightOriginalDir,
+		leftUpperDir:     filepath.Join(overlayDir, "left_upper"),
+		rightUpperDir:    filepath.Join(overlayDir, "right_upper"),
+		leftWorkDir:      filepath.Join(overlayDir, "left_work"),
+		rightWorkDir:     filepath.Join(overlayDir, "right_work"),
+		leftMountPoint:   filepath.Join(overlayDir, "left_mount"),
+		rightMountPoint:  filepath.Join(overlayDir, "right_mount"),
 	}, nil
 }
 
 func normalizeTargetDir(targetDir string) (string, error) {
 	// TODO further anti symlink validation?
-    targetDir = strings.TrimLeft(targetDir, "/")
+	targetDir = strings.TrimLeft(targetDir, "/")
 	clean := filepath.Clean(targetDir)
 
 	// Treat / as relative to the container root.
 	if clean == "." {
-        return "/", nil
-    }
-    if clean == ".." ||
-        strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-        return "", fmt.Errorf("target directory must not escape the filesystem root")
-    }
-    return "/" + clean, nil
+		return "/", nil
+	}
+	if clean == ".." ||
+		strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("target directory must not escape the filesystem root")
+	}
+	return "/" + clean, nil
 }
 
 func computeTargetHash(targetDir string) (string, error) {
@@ -377,14 +379,14 @@ func computeResultPath(ckptsDiffDir string, targetDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	res_id := "result-" + targetCacheKey 
+	res_id := "result-" + targetCacheKey
 	targetCacheResult := filepath.Join(ckptsDiffDir, res_id+".json")
 	return targetCacheResult, nil
 }
 
 func computeCkptsDiffID(leftCkptID, rightCkptID string) string {
 	sum := sha256.Sum256([]byte(leftCkptID + "/" + rightCkptID)) // ensures unique pair because ckptIDs can't include /
-    hash := hex.EncodeToString(sum[:8])
+	hash := hex.EncodeToString(sum[:8])
 	return fmt.Sprintf("%.5s-%.5s-%s", leftCkptID, rightCkptID, hash) // add a bit of ckpt names for readability
 }
 
@@ -396,9 +398,9 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 		return nil, nil, fmt.Errorf("invalid checkpoint ID %s: %w", ckptIDSecond, err)
 	}
 
-	ckptsDiffID := computeCkptsDiffID(ckptIDFirst, ckptIDSecond) 
+	ckptsDiffID := computeCkptsDiffID(ckptIDFirst, ckptIDSecond)
 	ckptsDiffDir := m.diffDir(ckptsDiffID)
-    targetCacheResult, err := computeResultPath(ckptsDiffDir, normalizedTargetDir)
+	targetCacheResult, err := computeResultPath(ckptsDiffDir, normalizedTargetDir)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -413,7 +415,7 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 		_, errCkpt := os.Stat(ckptsDiffDir)
 		_, errTemp := os.Stat(targetTempDir)
 		_, errRes := os.Stat(targetCacheResult)
-		if errRes == nil  {
+		if errRes == nil {
 			// case 1: already have cached result
 			// TODO further validation of cache before try to read?
 			var err error
@@ -461,7 +463,7 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 		return nil, nil, err
 	}
 	if cachedData != nil {
-    	return nil, cachedData, nil
+		return nil, cachedData, nil
 	}
 
 	// Mount
@@ -493,7 +495,7 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 	if err != nil {
 		return err
 	}
-	
+
 	d, cachedData, err := m.setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir)
 	if err != nil {
 		return err
@@ -506,14 +508,14 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 	}
 
 	defer func() {
-    _ = unix.Unmount(d.rightMountPoint, unix.MNT_DETACH)
-    _ = unix.Unmount(d.leftMountPoint, unix.MNT_DETACH)
-    _ = os.RemoveAll(d.overlayDir)
+		_ = unix.Unmount(d.rightMountPoint, unix.MNT_DETACH)
+		_ = unix.Unmount(d.leftMountPoint, unix.MNT_DETACH)
+		_ = os.RemoveAll(d.overlayDir)
 	}()
 
 	leftTargetDir := filepath.Join(d.leftMountPoint, normalizedTargetDir)
 	rightTargetDir := filepath.Join(d.rightMountPoint, normalizedTargetDir)
-	
+
 	leftExists, err := existsDir(leftTargetDir)
 	if err != nil {
 		return err
@@ -543,28 +545,28 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 		return detected[i].Path < detected[j].Path
 	})
 
-	ckptsDiffID := computeCkptsDiffID(ckptIDFirst, ckptIDSecond) 
+	ckptsDiffID := computeCkptsDiffID(ckptIDFirst, ckptIDSecond)
 	ckptsDiffDir := m.diffDir(ckptsDiffID)
-    resultPath, err := computeResultPath(ckptsDiffDir, normalizedTargetDir)
+	resultPath, err := computeResultPath(ckptsDiffDir, normalizedTargetDir)
 	if err != nil {
 		return err
 	}
-	
+
 	result := DiffResult{
 		TargetDir: normalizedTargetDir,
-		Records: detected,
+		Records:   detected,
 	}
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal diff result: %w", err)
 	}
 	if err := m.withSessionLock(func() error {
-			return atomicWriteFile(resultPath, data, 0o644)
+		return atomicWriteFile(resultPath, data, 0o644)
 	}); err != nil {
 		return err
 	}
 	if _, err := os.Stdout.Write(append(data, '\n')); err != nil {
-    	return fmt.Errorf("write diff result to stdout: %w", err)
+		return fmt.Errorf("write diff result to stdout: %w", err)
 	}
 
 	return nil
