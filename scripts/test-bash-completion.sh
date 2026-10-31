@@ -161,7 +161,7 @@ has_path() {
 }
 
 complete_words waypoint ''
-for command in init build checkpoint create fork exec fork-exec cp snapshot destroy list suspend cleanup info version; do
+for command in init build checkpoint create fork exec fork-exec cp diff snapshot destroy list suspend cleanup info version; do
     contains "$command"
 done
 for command in restore delete run __waypoint_restore_fork_child __waypoint_flush_images; do
@@ -179,7 +179,7 @@ for command in version --version -v unknown-command; do
 done
 
 # Session lookup is shared by all session commands, including legacy aliases.
-for command in checkpoint create fork exec fork-exec cp snapshot destroy list suspend cleanup info; do
+for command in checkpoint create fork exec fork-exec cp diff snapshot destroy list suspend cleanup info; do
     complete_words waypoint "$command" demo
     exactly demo-session
 done
@@ -209,6 +209,12 @@ for command in fork info; do
     complete_words waypoint "$command" demo-session ''
     exactly c-alpha c.beta
 done
+complete_words waypoint diff demo-session c-alpha ''
+exactly c-alpha c.beta
+complete_words waypoint diff demo-session c-alpha c.beta --
+exactly --dir
+complete_words waypoint diff demo-session c-alpha c.beta --dir ''
+empty
 for command in exec fork-exec snapshot; do
     complete_words waypoint "$command" demo-session worker
     exactly worker-1
