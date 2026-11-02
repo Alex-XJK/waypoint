@@ -267,10 +267,13 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 
 // newNextImagesDir creates an empty directory for a restore's
 // --next-images-dir. It lives under the base checkpoint, not the fork's root
-// dir: checkpoints dumped from the fork link to it as their parent, and
-// destroy and park remove the fork's dir. Each restore gets a fresh name,
-// since a recreated fork with the same ID must not reuse a dir an earlier
-// chain still references.
+// dir that destroy and park remove: the fork's next dump reads it as its
+// --prev-images-dir, and a CRIU that links the new images' parent to that
+// path keeps referencing it. Waypoint's CRIU links the parent past it to the
+// base checkpoint's images instead, which leaves it unreferenced after the
+// dump; nothing removes it. Each restore gets a fresh name, since a recreated
+// fork with the same ID must not reuse a dir an earlier chain may still
+// reference.
 func (m *Manager) newNextImagesDir(baseCheckpointID, forkID string) (string, error) {
 	parent, err := filepath.Abs(filepath.Join(m.checkpointDir(baseCheckpointID), "next"))
 	if err != nil {
@@ -532,8 +535,10 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 	f.CriuPath = ckptCriu
 	f.PidFile = filepath.Join(f.RootDir, "restore.pid")
 	_ = os.Remove(f.PidFile)
-	// The checkpoint just dumped links to the old next dir as its parent;
-	// the re-restore starts a new one under the new checkpoint.
+	// The checkpoint just dumped was taken against the old next dir; with
+	// Waypoint's CRIU its parent link points past that dir to the base
+	// checkpoint's images, and the dir stays on disk unreferenced. The
+	// re-restore starts a new one under the new checkpoint.
 	f.NextImagesDir = ""
 	if incrementalDumps() && m.chainsFrom(checkpointID) {
 		nextDir, err := m.newNextImagesDir(checkpointID, f.ID)

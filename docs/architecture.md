@@ -171,9 +171,10 @@ Two binaries, one library:
                               a symlink (tmpfs first, criu.disk/ once flushed)
     next/<fork>-<rand>/     incremental_dumps only: the page-less image set a
                               restore from this checkpoint wrote; the fork's
-                              next dump is taken against it, then links its
-                              parent past it to this checkpoint's criu/ and
-                              removes it (destroy removes an unused one)
+                              next dump is taken against it, and Waypoint's
+                              CRIU links that dump's parent past it to this
+                              checkpoint's criu/. Nothing removes it yet, not
+                              even destroy
   forks/<fork>/
     fork.json               live fork record
     upper/                  this fork's private CoW layer; contains the socket

@@ -45,7 +45,8 @@ var (
 
 	// IncrementalDumps makes each dump write only the pages a fork changed
 	// since its last restore, chaining its images to the restored ones via
-	// CRIU's parent links. Needs a CRIU with restore --next-images-dir; has
+	// CRIU's parent links. Needs Waypoint's CRIU (restore --next-images-dir,
+	// and dumps that link the parent past the images a restore wrote); has
 	// no effect while TmpfsImages is on (see incrementalDumps).
 	IncrementalDumps       = false
 	IncrementalDumpsConfig = "default"

@@ -220,10 +220,13 @@ breakdowns. Both options default to `false`.
 `incremental_dumps` (`WAYPOINT_INCREMENTAL_DUMPS`, default `false`) makes each
 checkpoint or snapshot dump only the memory a fork changed since it was last
 restored; the new images link to the earlier ones as their parent, so forking from
-a long chain reads more image sets. It needs a CRIU that supports
-`restore --next-images-dir` ([Alex's CRIU fork](https://github.com/Alex-XJK/criu/tree/waypoint)). 
-It has no effect while `tmpfs_images` is on, and forks of a checkpoint dumped 
-with `tmpfs_images` dump in full.
+a long chain reads one image set per dump in the chain. It needs the `waypoint`
+branch of [Alex's CRIU fork](https://github.com/Alex-XJK/criu/tree/waypoint):
+`restore --next-images-dir`, and a dump that links its parent past the small
+image set that restore wrote. Each restore leaves that set under the checkpoint
+it restored from (`checkpoints/<ckpt>/next/`); nothing removes it yet. The option
+has no effect while `tmpfs_images` is on, and forks of a checkpoint dumped with
+`tmpfs_images` dump in full.
 
 `waypoint_log_level` (`WAYPOINT_LOG_LEVEL`, default `2`) is Waypoint's log
 level. For now it is the `-v` level of every CRIU dump and restore: `0` none,

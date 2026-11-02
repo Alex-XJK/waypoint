@@ -43,7 +43,8 @@ func criuLogTail(path string) string {
 // Notice: cannot use '--shell-job' because of the PTY issue during restore.
 // prevImagesDir is the image set the tree's last restore wrote with
 // --next-images-dir, or empty; with incremental dumps on, the dump writes
-// only the pages changed since then.
+// only the pages changed since then, and Waypoint's CRIU links the new
+// images' parent past that set to the images the restore read.
 func (m *Manager) createMemoryCheckpoint(pid int, criuPath, prevImagesDir string) error {
 	args := []string{"dump",
 		"-t", strconv.Itoa(pid),
@@ -65,10 +66,12 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath, prevImagesDir string
 	if incrementalDumps() {
 		args = append(args, "--track-mem")
 		if prevImagesDir != "" {
-			// CRIU copies this string into the new images' parent link, and
-			// the restored tree follows that link from inside the fork's
-			// root, where host paths don't resolve; relative to the images
-			// dir, it does.
+			// CRIU opens this path relative to the images dir and, for an
+			// ordinary parent set, copies the string into the new images'
+			// parent link, which the restored tree follows from inside the
+			// fork's root, where host paths don't resolve; relative to the
+			// images dir, it does. For a next images set Waypoint's CRIU
+			// writes its own relative link past it.
 			rel, err := filepath.Rel(criuPath, prevImagesDir)
 			if err != nil {
 				return fmt.Errorf("failed to create memory checkpoint: parent images %s: %w", prevImagesDir, err)
