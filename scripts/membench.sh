@@ -11,9 +11,12 @@
 # the image directory's size and the number of image sets a restore reads.
 #
 # Requires root, criu, a static busybox, /usr/bin/python3 (copied into the
-# rootfs with its standard library for the holder) and Go unless WAYPOINT_BIN
-# and BASH_INIT_BIN are given. incremental_dumps=1 needs a CRIU with
+# rootfs with its standard library for the holder; it also reads the
+# effective config from `waypoint info`) and Go unless WAYPOINT_BIN and
+# BASH_INIT_BIN are given. incremental_dumps=1 needs a CRIU with
 # `restore --next-images-dir`; with the stock one the first fork fails.
+# lib/bench-env.sh pins tmpfs_images off and the log level to 2 unless the
+# environment sets them; the host's config file does not apply to them.
 # CPU frequency scaling shows in the numbers, so the header names the governor.
 #
 #   MEM_MB=512                 MiB the holder keeps resident
@@ -25,19 +28,30 @@
 #   FORKS=3                    timed forks from the chain tip at every level
 #   NETWORK=shared             network mode; private needs pasta
 #   CSV=<file>                 also append one row per level to <file>
+#   LABEL=<text>               free text for the CSV's label column, e.g. the
+#                              change under test; commas become spaces
 #   WPBENCH_DIR=/tmp           where the temp dir with rootfs, sessions and
 #                              images is made; a full dump writes MEM_MB there
 #   WAYPOINT_BIN=<file>        binaries to time instead of building this checkout;
 #   BASH_INIT_BIN=<file>       set both or neither
 #
+# Every CSV row starts with the environment columns of lib/bench-env.sh
+# (utc, label, host, kernel, cpu, nproc, governor, images_fs, criu,
+# criu_gitid, waypoint, waypoint_commit, log_level). The incremental column
+# is the effective value, which is 0 with tmpfs images whatever the knob
+# says. A CSV written by an older version of the script has a different
+# header and is refused.
+#
 # Usage:  sudo ./scripts/membench.sh
 #         sudo env MEM_MB=1024 PCT=2 PATTERNS=random ./scripts/membench.sh
+#         sudo env LABEL=my-change CSV=runs.csv ./scripts/membench.sh
 set -euo pipefail
 export LC_ALL=C
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d "${WPBENCH_DIR:-/tmp}/wpmem.XXXXXX")"
 ROOTFS="$WORK/rootfs"
+# shellcheck disable=SC2034  # read by lib/bench-env.sh
 BIN="$WORK/bin"
 MEM_MB="${MEM_MB:-512}"
 PCT="${PCT:-5}"
@@ -47,13 +61,14 @@ DEPTH="${DEPTH:-5}"
 FORKS="${FORKS:-3}"
 NETWORK="${NETWORK:-shared}"
 CSV="${CSV:-}"
+LABEL="${LABEL:-}"
 SESSION=""
-
-export WAYPOINT_SESSIONS_DIR="$WORK/s" WAYPOINT_SESSION_INFO_DIR="$WORK/i"
-export WAYPOINT_PRESERVE_SESSION_ON_CLEANUP=false WAYPOINT_PHASE_STATS=true
+# shellcheck source=lib/bench-env.sh
+. "$REPO/scripts/lib/bench-env.sh"
+HEADER="$ENV_HEADER,mem_mb,pct,network,pattern,incremental,chain,level,sets,wall_ms,dump_ms,restore_ms,written_mib,skipped_mib,du_mib,fork_ms"
+# The rows read the phases line of every dump.
+export WAYPOINT_PHASE_STATS=true
 export WAYPOINT_NETWORK="$NETWORK"
-# Incremental dumps are off while images live on tmpfs; keep that explicit.
-export WAYPOINT_TMPFS_IMAGES="${WAYPOINT_TMPFS_IMAGES:-false}"
 
 cleanup() {
   if [ -n "$SESSION" ]; then "$W" cleanup "$SESSION" --force >/dev/null 2>&1 || true; fi
@@ -117,38 +132,16 @@ row() {
   printf '%-5s %5s %4s %8.1f %8.1f %10s %11.1f %11.1f %7d %8s\n' \
     "$chain" "$level" "$n" "$wall" "$dump" "$restore" "$written" "$skipped" "$du" "$fork"
   [ -z "$CSV" ] || printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-    "$CSV_PREFIX" "$P" "$INC" "$chain" "$level" "$n" "$wall" "$dump" "$restore" "$written" "$skipped" "$du" "$fork" >>"$CSV"
+    "$CSV_PREFIX" "$P" "$INC_EFF" "$chain" "$level" "$n" "$wall" "$dump" "$restore" "$written" "$skipped" "$du" "$fork" >>"$CSV"
 }
 
 # ---------------------------------------------------------------------------
 # Environment, build, rootfs
 # ---------------------------------------------------------------------------
-[ "$(id -u)" -eq 0 ] || { echo "must run as root"; exit 1; }
-for c in criu busybox; do
-  command -v "$c" >/dev/null || { echo "missing required command: $c"; exit 1; }
-done
-if ldd "$(command -v busybox)" >/dev/null 2>&1; then
-  echo "busybox must be statically linked (package busybox-static)"; exit 1
-fi
+bench_require
 [ -x /usr/bin/python3 ] || { echo "missing /usr/bin/python3 (the holder runs on it)"; exit 1; }
-
-if [ -n "${WAYPOINT_BIN:-}" ] && [ -n "${BASH_INIT_BIN:-}" ]; then
-  W="$WAYPOINT_BIN"; export WAYPOINT_BASH_INIT_SRC="$BASH_INIT_BIN"
-elif [ -n "${WAYPOINT_BIN:-}${BASH_INIT_BIN:-}" ]; then
-  echo "set both WAYPOINT_BIN and BASH_INIT_BIN, or neither (then this checkout is built)"; exit 1
-else
-  GO="$(command -v go || true)"
-  for cand in /usr/local/go/bin/go "$HOME/go/bin/go" "/home/${SUDO_USER:-}/go/bin/go"; do
-    [ -n "$GO" ] && break
-    [ -x "$cand" ] && GO="$cand"
-  done
-  [ -n "$GO" ] || { echo "go toolchain not found; set WAYPOINT_BIN and BASH_INIT_BIN"; exit 1; }
-  mkdir -p "$BIN"
-  ( cd "$REPO"
-    env GOCACHE="${GOCACHE:-/tmp/waypoint-go-cache}" "$GO" build -o "$BIN/waypoint" ./cmd/waypoint
-    env GOCACHE="${GOCACHE:-/tmp/waypoint-go-cache}" CGO_ENABLED=0 "$GO" build -o "$BIN/bash_init" ./cmd/bash-init )
-  W="$BIN/waypoint"; export WAYPOINT_BASH_INIT_SRC="$BIN/bash_init"
-fi
+bench_csv_header "$HEADER"
+bench_binaries
 
 # copy_libs <binary...>: the shared libraries each binary needs, at their paths.
 copy_libs() {
@@ -218,21 +211,10 @@ while True:
     os.remove("/tmp/mem.cmd")
 PY
 
-CPU="$(awk -F': ' '/^model name/ { print $2; exit }' /proc/cpuinfo)"
-[ -n "$CPU" ] || CPU="$(lscpu 2>/dev/null | awk -F': +' '/^Model name/ { print $2; exit }')"
-GOVERNOR="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
-CRIU_VERSION="$(criu --version | awk '/^Version/ { print $2; exit }')"
-WP_VERSION="$("$W" version | awk '{ print $NF }')"
-CSV_PREFIX="$(date -u +%FT%TZ),$(hostname -s),$(uname -r),$(echo "${CPU:-unknown}" | tr ',' ' '),$(nproc),$GOVERNOR,$CRIU_VERSION,$WP_VERSION,$MEM_MB,$PCT,$NETWORK"
-if [ -n "$CSV" ] && [ ! -s "$CSV" ]; then
-  echo "utc,host,kernel,cpu,nproc,governor,criu,waypoint,mem_mb,pct,network,pattern,incremental,chain,level,sets,wall_ms,dump_ms,restore_ms,written_mib,skipped_mib,du_mib,fork_ms" >"$CSV"
-fi
-
 echo
-printf 'waypoint %s (%s) on %s: %s, %s x %s (%s), criu %s, %s on %s\n' \
-  "$WP_VERSION" "$W" "$(hostname -s)" "$(uname -r)" "$(nproc)" "${CPU:-unknown}" "$GOVERNOR" \
-  "$CRIU_VERSION" "$WORK" "$(stat -f -c %T "$WORK")"
-echo "MEM_MB=$MEM_MB PCT=$PCT PATTERNS=\"$PATTERNS\" INCREMENTAL=\"$INCREMENTAL\" DEPTH=$DEPTH FORKS=$FORKS network=$NETWORK"
+bench_env
+echo "MEM_MB=$MEM_MB PCT=$PCT PATTERNS=\"$PATTERNS\" INCREMENTAL=\"$INCREMENTAL\" DEPTH=$DEPTH FORKS=$FORKS network=$NETWORK${LABEL:+ LABEL=$LABEL}"
+CSV_PREFIX="$ENV_PREFIX,$MEM_MB,$PCT,$NETWORK"
 
 # ---------------------------------------------------------------------------
 # One session per pattern x incremental_dumps
@@ -240,6 +222,7 @@ echo "MEM_MB=$MEM_MB PCT=$PCT PATTERNS=\"$PATTERNS\" INCREMENTAL=\"$INCREMENTAL\
 for P in $PATTERNS; do
   for INC in $INCREMENTAL; do
     export WAYPOINT_INCREMENTAL_DUMPS="$INC"
+    INC_EFF="$(wpinfo incremental_dumps)"
     run "$W" init "$ROOTFS" --shell --quiet
     SESSION="${LAST%%,*}"
     C="$WAYPOINT_SESSIONS_DIR/$SESSION/checkpoints"
@@ -247,7 +230,7 @@ for P in $PATTERNS; do
     run "$W" exec "$SESSION" main -- 'for ((i = 0; i < 1200; i++)); do [ -e /tmp/mem.pid ] && break; sleep 0.5; done; [ -e /tmp/mem.pid ]'
 
     echo
-    echo "pattern=$P pct=$PCT incremental_dumps=$INC"
+    echo "pattern=$P pct=$PCT incremental_dumps=$INC_EFF$([ "$INC_EFF" = "$INC" ] || echo " (WAYPOINT_INCREMENTAL_DUMPS=$INC)")"
     printf '%-5s %5s %4s %8s %8s %10s %11s %11s %7s %8s\n' \
       chain level sets wall_ms dump_ms restore_ms written_MiB skipped_MiB du_MiB fork_ms
     ck=() sn=() wr=()
