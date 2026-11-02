@@ -195,6 +195,7 @@ You can create a configuration file to set global options. Example content:
   "tmpfs_images": false,
   "incremental_dumps": false,
   "phase_stats": false,
+  "waypoint_log_level": 2,
   "network": "shared"
 }
 ```
@@ -220,9 +221,15 @@ breakdowns. Both options default to `false`.
 checkpoint or snapshot dump only the memory a fork changed since it was last
 restored; the new images link to the earlier ones as their parent, so forking from
 a long chain reads more image sets. It needs a CRIU that supports
-`restore --next-images-dir` (Waypoint's CRIU fork). It has no effect while
-`tmpfs_images` is on, and forks of a checkpoint dumped with `tmpfs_images` dump in
-full.
+`restore --next-images-dir` ([Alex's CRIU fork](https://github.com/Alex-XJK/criu/tree/waypoint)). 
+It has no effect while `tmpfs_images` is on, and forks of a checkpoint dumped 
+with `tmpfs_images` dump in full.
+
+`waypoint_log_level` (`WAYPOINT_LOG_LEVEL`, default `2`) is Waypoint's log
+level. For now it is the `-v` level of every CRIU dump and restore: `0` none,
+`1` errors, `2` warnings, `3` info, `4` debug. Levels `3` and `4` log a line per
+piece of memory read at every level of an `incremental_dumps` chain; raise the
+level to debug a failure, not by default.
 
 `network` (`WAYPOINT_NETWORK`) is `shared` (default) or `private`. In `shared`
 mode every fork runs in the host network namespace. In `private` mode each fork,

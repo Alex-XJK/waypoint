@@ -88,7 +88,9 @@ Two binaries, one library:
   `info` command. Knobs: sessions dir, bash_init path,
   `preserve_session_on_cleanup`, `tmpfs_images` + `tmpfs_images_dir` (see
   `imagestore.go`), `incremental_dumps` (parent-chained CRIU images; off
-  while `tmpfs_images` is on), and `phase_stats` (see `criustats.go`).
+  while `tmpfs_images` is on), `phase_stats` (see `criustats.go`), and
+  `waypoint_log_level` (criu's `-v` for every dump and restore, default 2; the
+  restore helper child resolves it again with `loadConfig`).
 - `checkpoint.go` — immutable checkpoints: `Metadata` (checkpoint record:
   `ParentID`, `LayerIDs`, `PID`, `Status`) and its JSON persistence, plus the
   `Materializer` interface + `CRIUMaterializer`:
@@ -169,7 +171,9 @@ Two binaries, one library:
                               a symlink (tmpfs first, criu.disk/ once flushed)
     next/<fork>-<rand>/     incremental_dumps only: the page-less image set a
                               restore from this checkpoint wrote; the fork's
-                              next dump names it as its parent
+                              next dump is taken against it, then links its
+                              parent past it to this checkpoint's criu/ and
+                              removes it (destroy removes an unused one)
   forks/<fork>/
     fork.json               live fork record
     upper/                  this fork's private CoW layer; contains the socket
