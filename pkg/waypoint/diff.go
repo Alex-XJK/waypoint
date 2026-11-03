@@ -313,6 +313,12 @@ func newDiffFS(m *Manager, overlayDir, leftCkptID, rightCkptID string) (*DiffFS,
 	if err != nil {
 		return nil, fmt.Errorf("failed to read metadata for checkpoint %s: %w", rightCkptID, err)
 	}
+	if leftMetadata.Status != CheckpointStatusReady {
+		return nil, fmt.Errorf("checkpoint %s is not ready (status: %s)", leftCkptID, leftMetadata.Status)
+	}
+	if rightMetadata.Status != CheckpointStatusReady {
+		return nil, fmt.Errorf("checkpoint %s is not ready (status: %s)", rightCkptID, rightMetadata.Status)
+	}
 	leftLowerIDs := append([]string(nil), leftMetadata.LayerIDs...)
 	rightLowerIDs := append([]string(nil), rightMetadata.LayerIDs...)
 
@@ -390,13 +396,6 @@ func computeCkptsDiffID(leftCkptID, rightCkptID string) string {
 }
 
 func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir string) (*DiffFS, []byte, error) {
-	if err := validateCheckpointID(ckptIDFirst); err != nil {
-		return nil, nil, fmt.Errorf("invalid checkpoint ID %s: %w", ckptIDFirst, err)
-	}
-	if err := validateCheckpointID(ckptIDSecond); err != nil {
-		return nil, nil, fmt.Errorf("invalid checkpoint ID %s: %w", ckptIDSecond, err)
-	}
-
 	ckptsDiffID := computeCkptsDiffID(ckptIDFirst, ckptIDSecond)
 	ckptsDiffDir := m.diffDir(ckptsDiffID)
 	targetCacheResult, err := computeResultPath(ckptsDiffDir, normalizedTargetDir)
@@ -491,6 +490,16 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 	normalizedTargetDir, err := normalizeTargetDir(targetDir)
 	if err != nil {
 		return err
+	}
+	if err := validateCheckpointID(ckptIDFirst); err != nil {
+		return fmt.Errorf("invalid checkpoint ID %s: %w", ckptIDFirst, err)
+	}
+	if err := validateCheckpointID(ckptIDSecond); err != nil {
+		return fmt.Errorf("invalid checkpoint ID %s: %w", ckptIDSecond, err)
+	}
+	if ckptIDFirst == ckptIDSecond {
+		// TODO: error or output empty diff?
+		return fmt.Errorf("cannot diff the same checkpoint %s", ckptIDFirst)
 	}
 
 	d, cachedData, err := m.setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir)
