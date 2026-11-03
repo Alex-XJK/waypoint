@@ -3,13 +3,13 @@ package waypoint
 // TODO add description
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -71,21 +71,63 @@ type DiffFS struct {
 	rightMountPoint string
 }
 
-func cmpIsDiff(leftFilePath, rightFilePath string) (bool, error) {
-	cmd := exec.Command("cmp", "-s", leftFilePath, rightFilePath)
-	err := cmd.Run()
-	if err == nil {
-		return false, nil // files are identical
+func areRegFilesDiff(leftRoot, rightRoot *os.Root, path string) (bool, error) {
+	leftFile, err := leftRoot.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("open left file %s: %w", path, err)
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		if exitErr.ExitCode() == 1 {
-			return true, nil // files differ
-		} else {
-			return false, fmt.Errorf("cmp -s %s %s: %w", leftFilePath, rightFilePath, err)
+	defer leftFile.Close()
+
+	rightFile, err := rightRoot.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("open right file %s: %w", path, err)
+	}
+	defer rightFile.Close()
+
+	// Compare sizes first.
+	leftInfo, err := leftFile.Stat()
+	if err != nil {
+		return false, fmt.Errorf("stat left file %s: %w", path, err)
+	}
+	rightInfo, err := rightFile.Stat()
+	if err != nil {
+		return false, fmt.Errorf("stat right file %s: %w", path, err)
+	}
+	if leftInfo.Size() != rightInfo.Size() {
+		return true, nil
+	}
+
+	// Compare contents in chunks.
+	const chunkSize = 32 * 1024
+	leftBuf := make([]byte, chunkSize)
+	rightBuf := make([]byte, chunkSize)
+
+	for {
+		leftN, leftErr := io.ReadFull(leftFile, leftBuf)
+		rightN, rightErr := io.ReadFull(rightFile, rightBuf)
+
+		if !bytes.Equal(leftBuf[:leftN], rightBuf[:rightN]) {
+			return true, nil
 		}
+
+		if leftErr == nil && rightErr == nil {
+			continue
+		}
+		if (leftErr == io.EOF || leftErr == io.ErrUnexpectedEOF) &&
+			(rightErr == io.EOF || rightErr == io.ErrUnexpectedEOF) {
+			return false, nil
+		}
+
+		if leftErr == io.EOF || leftErr == io.ErrUnexpectedEOF ||
+			rightErr == io.EOF || rightErr == io.ErrUnexpectedEOF {
+			return true, nil
+		}
+
+		if leftErr != nil {
+			return false, fmt.Errorf("read left file %s: %w", path, leftErr)
+		}
+		return false, fmt.Errorf("read right file %s: %w", path, rightErr)
 	}
-	return false, fmt.Errorf("execute cmp -s %s %s: %w", leftFilePath, rightFilePath, err)
 }
 
 func getFileType(root *os.Root, path string) (FileType, error) {
@@ -149,14 +191,11 @@ func processNonDirMod(leftRoot, rightRoot *os.Root, rootViewPath, containerViewP
 	// Other changes currently tracked: cmp on regular, symlink target, dev major/minor. TODO support other changes/types
 	mod := false
 	if leftFileType == FileTypeRegular {
-		// TODO CHANGE
-		/*
-			res, err := cmpIsDiff(leftFilePath, rightFilePath)
-			if err != nil {
-				return err
-			}
-			mod = res
-		*/
+		res, err := areRegFilesDiff(leftRoot, rightRoot, rootViewPath)
+		if err != nil {
+			return err
+		}
+		mod = res
 	} else if leftFileType == FileTypeSymlink {
 		leftTarget, err := leftRoot.Readlink(rootViewPath)
 		if err != nil {
