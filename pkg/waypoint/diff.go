@@ -67,11 +67,6 @@ type DiffFS struct {
 	leftLayerIDs  []string
 	rightLayerIDs []string
 
-	leftUpperDir  string
-	rightUpperDir string
-	leftWorkDir   string
-	rightWorkDir  string
-
 	leftMountPoint  string
 	rightMountPoint string
 }
@@ -335,10 +330,6 @@ func newDiffFS(m *Manager, overlayDir, leftCkptID, rightCkptID string) (*DiffFS,
 		rightLayerIDs:    rightLowerIDs,
 		leftOriginalDir:  leftOriginalDir,
 		rightOriginalDir: rightOriginalDir,
-		leftUpperDir:     filepath.Join(overlayDir, "left_upper"),
-		rightUpperDir:    filepath.Join(overlayDir, "right_upper"),
-		leftWorkDir:      filepath.Join(overlayDir, "left_work"),
-		rightWorkDir:     filepath.Join(overlayDir, "right_work"),
 		leftMountPoint:   filepath.Join(overlayDir, "left_mount"),
 		rightMountPoint:  filepath.Join(overlayDir, "right_mount"),
 	}, nil
@@ -460,7 +451,7 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 		if err := os.Mkdir(targetTempDir, 0o700); err != nil {
 			return fmt.Errorf("mkdir %s failed: %w", targetTempDir, err)
 		}
-		for _, dir := range []string{d.leftMountPoint, d.rightMountPoint, d.leftUpperDir, d.rightUpperDir, d.leftWorkDir, d.rightWorkDir} {
+		for _, dir := range []string{d.leftMountPoint, d.rightMountPoint} {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				_ = os.RemoveAll(targetTempDir)
 				return fmt.Errorf("mkdir %s failed: %w", dir, err)
@@ -479,16 +470,14 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 	leftOverlayLowers := overlayLowerDirs(m.checkpointsDir(), d.leftLayerIDs, d.leftOriginalDir)
 	rightOverlayLowers := overlayLowerDirs(m.checkpointsDir(), d.rightLayerIDs, d.rightOriginalDir)
 
-	optionsLeft := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s",
-		strings.Join(leftOverlayLowers, ":"), d.leftUpperDir, d.leftWorkDir)
-	if err := unix.Mount("overlay", d.leftMountPoint, "overlay", 0, optionsLeft); err != nil {
+	optionsLeft := fmt.Sprintf("lowerdir=%s", strings.Join(leftOverlayLowers, ":"))
+	if err := unix.Mount("overlay", d.leftMountPoint, "overlay", unix.MS_RDONLY, optionsLeft); err != nil {
 		_ = os.RemoveAll(d.overlayDir)
 		return nil, nil, fmt.Errorf("mount overlay at %s failed: %w", d.leftMountPoint, err)
 	}
 
-	optionsRight := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s",
-		strings.Join(rightOverlayLowers, ":"), d.rightUpperDir, d.rightWorkDir)
-	if err := unix.Mount("overlay", d.rightMountPoint, "overlay", 0, optionsRight); err != nil {
+	optionsRight := fmt.Sprintf("lowerdir=%s", strings.Join(rightOverlayLowers, ":"))
+	if err := unix.Mount("overlay", d.rightMountPoint, "overlay", unix.MS_RDONLY, optionsRight); err != nil {
 		_ = unix.Unmount(d.leftMountPoint, unix.MNT_DETACH)
 		_ = os.RemoveAll(d.overlayDir)
 		return nil, nil, fmt.Errorf("mount overlay at %s failed: %w", d.rightMountPoint, err)
