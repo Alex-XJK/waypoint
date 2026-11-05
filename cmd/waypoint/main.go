@@ -78,6 +78,56 @@ func runExec(sessionID, forkID, command string) {
 	printExecResult(result)
 }
 
+// attachUsage describes the --attach value accepted by init, build, and fork.
+const attachUsage = "--attach <fabric-netns>=<ipv4/prefix>: connect the fork to a fabric's bridge " + waypoint.FabricBridge + " (private network mode)"
+
+// parseAttach parses an --attach value. Addresses never contain '=', so the
+// last one separates them from the namespace path.
+func parseAttach(value string) (waypoint.NetworkAttachment, error) {
+	i := strings.LastIndex(value, "=")
+	if i <= 0 || i == len(value)-1 {
+		return waypoint.NetworkAttachment{}, fmt.Errorf("--attach wants <fabric-netns>=<ipv4/prefix>, got %q", value)
+	}
+	return waypoint.NetworkAttachment{FabricNS: value[:i], Address: value[i+1:]}, nil
+}
+
+// attachFlag reads the value of the --attach flag at args[i].
+func attachFlag(args []string, i int) waypoint.NetworkAttachment {
+	if i+1 >= len(args) {
+		fmt.Println("Error: --attach requires a value")
+		os.Exit(1)
+	}
+	a, err := parseAttach(args[i+1])
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	return a
+}
+
+// checkAttach validates an --attach value before a session is created, so a
+// bad value leaves nothing behind.
+func checkAttach(a *waypoint.NetworkAttachment) {
+	if a == nil {
+		return
+	}
+	if err := waypoint.CheckNetworkAttachment(*a); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// attachMain applies an --attach value to a new session's main fork.
+func attachMain(manager *waypoint.Manager, a *waypoint.NetworkAttachment) {
+	if a == nil {
+		return
+	}
+	if err := manager.AttachMain(*a); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 type forkResult struct {
 	fork *waypoint.Fork
 	err  error
@@ -103,10 +153,10 @@ func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: waypoint <command> [args...]")
 		fmt.Println("Commands:")
-		fmt.Println("  init <work-directory> [--quiet] [--shell]    - Initialize environment")
-		fmt.Println("  build <dockerfile-directory> [--quiet]       - Build environment from Dockerfile")
+		fmt.Println("  init <work-directory> [--quiet] [--shell] [--attach NS=ADDR] - Initialize environment")
+		fmt.Println("  build <dockerfile-directory> [--quiet] [--attach NS=ADDR] - Build environment from Dockerfile")
 		fmt.Println("  checkpoint <session> <checkpoint-id>         - Snapshot main fork")
-		fmt.Println("  fork <session> <checkpoint-id> [--id ID] [--n K] - Materialize live fork(s)")
+		fmt.Println("  fork <session> <checkpoint-id> [--id ID] [--n K] [--attach NS=ADDR] - Materialize live fork(s)")
 		fmt.Println("  exec <session> <fork-id> -- '<command>'      - Run one bash command line in a fork")
 		fmt.Println("  cp <session> <source> <destination>          - Copy host path <-> fork-id:/path")
 		fmt.Println("  snapshot <session> <fork-id> <checkpoint-id> [--park] - Snapshot a live fork (--park: don't resume it)")
@@ -143,8 +193,9 @@ func main() {
 
 	case "init":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: init <work-directory> [--quiet] [--shell]")
+			fmt.Println("Usage: init <work-directory> [--quiet] [--shell] [--attach NS=ADDR]")
 			fmt.Println("  --shell: Start a shell in the initialized environment after setup")
+			fmt.Println("  " + attachUsage + "; needs --shell")
 			os.Exit(1)
 		}
 		workDir := os.Args[2]
@@ -152,6 +203,7 @@ func main() {
 		// Parse flags
 		quiet := false
 		shell := false
+		var attach *waypoint.NetworkAttachment
 
 		for i := 3; i < len(os.Args); i++ {
 			arg := os.Args[i]
@@ -160,11 +212,20 @@ func main() {
 				quiet = true
 			case "--shell":
 				shell = true
+			case "--attach":
+				a := attachFlag(os.Args, i)
+				attach = &a
+				i++
 			default:
 				fmt.Printf("Error: unknown flag: %s\n", arg)
 				os.Exit(1)
 			}
 		}
+		if attach != nil && !shell {
+			fmt.Println("Error: --attach requires --shell")
+			os.Exit(1)
+		}
+		checkAttach(attach)
 
 		// Create a new manager with a random session
 		manager, sessionID, err := waypoint.NewManagerWithSession()
@@ -172,6 +233,7 @@ func main() {
 			fmt.Printf("Error creating session: %v\n", err)
 			os.Exit(1)
 		}
+		attachMain(manager, attach)
 
 		stagedDir, err := manager.StageEnvironment(workDir)
 		if err != nil {
@@ -208,24 +270,31 @@ func main() {
 
 	case "build":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: build <dockerfile-directory> [--quiet]")
+			fmt.Println("Usage: build <dockerfile-directory> [--quiet] [--attach NS=ADDR]")
+			fmt.Println("  " + attachUsage)
 			os.Exit(1)
 		}
 		dockerfileDir := os.Args[2]
 
 		// Parse flags
 		quiet := false
+		var attach *waypoint.NetworkAttachment
 
 		for i := 3; i < len(os.Args); i++ {
 			arg := os.Args[i]
 			switch arg {
 			case "--quiet":
 				quiet = true
+			case "--attach":
+				a := attachFlag(os.Args, i)
+				attach = &a
+				i++
 			default:
 				fmt.Printf("Error: unknown flag: %s\n", arg)
 				os.Exit(1)
 			}
 		}
+		checkAttach(attach)
 
 		// Create a new manager with a random session
 		manager, sessionID, err := waypoint.NewManagerWithSession()
@@ -233,6 +302,7 @@ func main() {
 			fmt.Printf("Error creating session: %v\n", err)
 			os.Exit(1)
 		}
+		attachMain(manager, attach)
 
 		overlayPath, bashPid, err := manager.BuildEnvironment(dockerfileDir, quiet)
 		if err != nil {
@@ -276,13 +346,15 @@ func main() {
 
 	case "fork":
 		if len(os.Args) < 4 {
-			fmt.Println("Usage: fork <session> <checkpoint-id> [--id ID] [--n K]")
+			fmt.Println("Usage: fork <session> <checkpoint-id> [--id ID] [--n K] [--attach NS=ADDR]")
+			fmt.Println("  " + attachUsage + "; one fork only")
 			os.Exit(1)
 		}
 		sessionID := os.Args[2]
 		checkpointID := os.Args[3]
 		count := 1
 		forkID := ""
+		var attach *waypoint.NetworkAttachment
 		for i := 4; i < len(os.Args); i++ {
 			switch os.Args[i] {
 			case "--id":
@@ -304,6 +376,10 @@ func main() {
 				}
 				count = parsed
 				i++
+			case "--attach":
+				a := attachFlag(os.Args, i)
+				attach = &a
+				i++
 			default:
 				fmt.Printf("Error: unknown flag: %s\n", os.Args[i])
 				os.Exit(1)
@@ -313,6 +389,11 @@ func main() {
 			fmt.Println("Error: --id can only be used when creating one fork")
 			os.Exit(1)
 		}
+		if attach != nil && count != 1 {
+			// Copies of a fork on one fabric would share its address.
+			fmt.Println("Error: --attach can only be used when creating one fork")
+			os.Exit(1)
+		}
 
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
@@ -320,7 +401,7 @@ func main() {
 			os.Exit(1)
 		}
 		results := forkCheckpointsConcurrently(count, func(_ int) (*waypoint.Fork, error) {
-			spec := waypoint.ForkSpec{}
+			spec := waypoint.ForkSpec{Attach: attach}
 			if forkID != "" {
 				spec.ID = forkID
 			}
@@ -489,7 +570,11 @@ func main() {
 		if len(listing.Forks) > 0 {
 			fmt.Println("Live forks:")
 			for _, f := range listing.Forks {
-				fmt.Printf("  %s checkpoint=%s status=%s pid=%d socket=%s\n", f.ID, f.BaseCheckpointID, f.Status, f.PID, f.SocketPath)
+				line := fmt.Sprintf("  %s checkpoint=%s status=%s pid=%d socket=%s", f.ID, f.BaseCheckpointID, f.Status, f.PID, f.SocketPath)
+				if f.Attachment != nil {
+					line += fmt.Sprintf(" fabric=%s addr=%s", f.Attachment.FabricNS, f.Attachment.Address)
+				}
+				fmt.Println(line)
 			}
 		}
 

@@ -51,9 +51,12 @@ type Checkpoint struct {
 	Metadata *Metadata
 }
 
-// ForkSpec describes a fork to be materialized.
+// ForkSpec describes a fork to be materialized. Attach, in private network
+// mode, connects the fork to a fabric before it is restored, so that
+// connections the checkpoint holds on that fabric's addresses can restore.
 type ForkSpec struct {
-	ID string
+	ID     string
+	Attach *NetworkAttachment
 }
 
 // Materializer converts checkpoints to live forks and back. CRIU is the only
@@ -198,6 +201,11 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 	if _, err := os.Stat(ckpt.CriuPath); err != nil {
 		return nil, fmt.Errorf("checkpoint %s CRIU images not found: %w", ckpt.ID, err)
 	}
+	if spec.Attach != nil {
+		if err := m.checkSessionAttachment(*spec.Attach); err != nil {
+			return nil, err
+		}
+	}
 
 	// Allocate the fork record under the session lock; restore under the
 	// fork lock so long CRIU work never blocks the whole session.
@@ -233,6 +241,14 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 				f.Status = ForkStatusFailed
 				_ = m.saveFork(f)
 				return fmt.Errorf("failed to set up network for fork %s: %w", f.ID, err)
+			}
+			if spec.Attach != nil {
+				if err := m.attachNetwork(&network, f.ID, *spec.Attach); err != nil {
+					network.releaseNetwork()
+					f.Status = ForkStatusFailed
+					_ = m.saveFork(f)
+					return err
+				}
 			}
 			f.ForkNetwork = network
 			netMs = durMs(time.Since(netStart))

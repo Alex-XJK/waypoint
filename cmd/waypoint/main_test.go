@@ -99,3 +99,15 @@ func TestForkCheckpointsConcurrentlyHandlesSmallCounts(t *testing.T) {
 		})
 	}
 }
+
+func TestParseAttach(t *testing.T) {
+	a, err := parseAttach("/run/netns/fab=0=10.89.0.2/24")
+	if err != nil || a.FabricNS != "/run/netns/fab=0" || a.Address != "10.89.0.2/24" {
+		t.Fatalf("parseAttach = %+v, %v", a, err)
+	}
+	for _, bad := range []string{"", "/run/netns/fab", "=10.89.0.2/24", "/run/netns/fab="} {
+		if _, err := parseAttach(bad); err == nil {
+			t.Fatalf("parseAttach(%q) accepted", bad)
+		}
+	}
+}

@@ -132,6 +132,12 @@ Optional for the `private` network mode:
 
 - `pasta`, from the `passt` package
 
+Where SELinux confines pasta (its binary is labeled `pasta_exec_t`, as on Fedora),
+it cannot open the network namespaces Waypoint pins under `/run/waypoint`, and
+logs no denial. `setup check` detects this. An unconfined copy works, for example
+`cp /usr/bin/pasta /usr/local/sbin/pasta` (sudo's default `secure_path` searches
+`/usr/local/sbin` first); the copy is not updated with the package.
+
 Run `sudo ./setup check`, `sudo make check`, or `sudo make doctor` to inspect the current host.
 The check requires root so it can run CRIU the same way Waypoint does. Plain `criu check` is a hard gate; `criu check --all` is reported as an advisory warning because optional missing kernel features may not affect every workload. The check is diagnostic only; it does not add a Waypoint CLI sub-command.
 

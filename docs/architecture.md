@@ -115,6 +115,9 @@ Two binaries, one library:
   with `--inherit-fd`. Host compatibility (criu present, recent enough, kernel
   features, the ARM64 PAC / CRIU-4.0 rule) is validated out of band by
   `./setup check`, not at runtime.
+- `fabric.go` — fabric attachment (see [Fabric attachment](#fabric-attachment)):
+  `NetworkAttachment`, `CheckNetworkAttachment`, `AttachMain`, the veth
+  attach/detach, and a minimal rtnetlink client over `x/sys/unix`.
 - `netns.go` — `private` network mode: `newForkNetwork` (create a fork's
   network namespace, pinned under `/run/waypoint`, and start its pasta),
   `releaseNetwork` / `sweepSessionNetwork` (teardown), `startInNetNS` (start
@@ -390,6 +393,38 @@ iptables method, so that a dump and the restore that unlocks it agree.
 
 A session keeps the mode it was created with (`network` in its registry
 record); sessions from earlier releases are `shared`.
+
+### Fabric attachment
+
+pasta terminates every guest TCP connection in userspace and opens its own host
+socket, so a connection between two forks that runs through pasta cannot be
+restored into a new fork: the new fork's pasta knows nothing of it. Forks that
+need to talk to each other across sessions, with those connections
+checkpointed, are instead attached to a *fabric*: a network namespace the
+caller creates, holding a bridge `br0` (`FabricBridge`). `--attach
+<fabric-netns>=<ipv4/prefix>` (`ForkSpec.Attach`, or `Manager.AttachMain`
+before `StartShell`) adds a veth pair once the fork's namespace exists and
+before its shell starts or criu restores into it: `wp0`, with the given
+address, in the fork, and `wp<hash of session/fork>` on the fabric's bridge.
+
+```
+fabric netns (caller-owned)          fork netns (one per fork)
+  br0 ── wp1a2b3c4d ═════veth═════ wp0 10.89.0.2/24   + pasta (egress)
+      ── wp5e6f7a8b ═════veth═════ wp0 10.89.0.3/24   + pasta (egress)
+```
+
+Traffic between attached forks crosses only the kernel, so `--tcp-established`
+dumps both ends of a connection. A copy of the system is a set of forks, one
+per session, attached to their own fabric with the same addresses as the
+original, so the restored connections find their addresses and peers there.
+The attachment is fork runtime like the namespace: a snapshot restores the fork
+into the namespace it had, with its veth intact; park, destroy, suspend, and
+cleanup delete the veth explicitly (rather than leaving it to the kernel's
+asynchronous namespace teardown) so the address stops answering at once. The
+fabric itself, its addressing, and any barrier around a group snapshot belong
+to the caller; Waypoint only validates that the fabric is a network namespace
+with `br0` and that the subnet does not overlap a host network (pasta copies
+those into the fork). `scripts/test-fabric.sh` plays the fabric owner.
 
 ## Three flows end to end
 

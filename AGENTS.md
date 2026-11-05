@@ -47,6 +47,7 @@ sources disagree, especially namespace and platform assumptions.
 | `pkg/waypoint/manager.go`, `config.go` | Session registry, paths, configuration, cross-process locks, and atomic record writes. |
 | `pkg/waypoint/checkpoint.go`, `fork.go` | Checkpoint DAG, live fork lifecycle, materialization, snapshotting, and exec client. |
 | `pkg/waypoint/build.go`, `overlay.go`, `criu.go` | Rootfs staging/Buildah builds, shell startup, OverlayFS, and CRIU orchestration. |
+| `pkg/waypoint/netns.go`, `fabric.go` | Private network mode (per-fork netns + pasta) and fabric attachment. |
 | `pkg/waypoint/copy.go`, `inspect.go`, `cleanup.go` | Fork-aware file transfer, runtime inspection, and process/mount teardown. |
 | `pkg/waypoint/imagestore.go`, `criustats.go` | Optional tmpfs image storage/flush and phase timing. |
 | `cmd/bash-init/` | Namespace init and persistent shell supervisor; exec protocol server. |
@@ -92,10 +93,10 @@ The command dispatch in `cmd/waypoint/main.go` and copy parser in
 `cmd/waypoint/copy.go` define the supported syntax. Common forms are:
 
 ```text
-waypoint init <rootfs-directory> [--quiet] [--shell]
-waypoint build <dockerfile-directory> [--quiet]
+waypoint init <rootfs-directory> [--quiet] [--shell] [--attach NETNS=ADDR]
+waypoint build <dockerfile-directory> [--quiet] [--attach NETNS=ADDR]
 waypoint checkpoint <session> <checkpoint-id>
-waypoint fork <session> <checkpoint-id> [--id ID] [--n K]
+waypoint fork <session> <checkpoint-id> [--id ID] [--n K] [--attach NETNS=ADDR]
 waypoint exec <session> <fork-id> -- <command>
 waypoint cp <session> <host-path> <fork-id>:/<path>
 waypoint cp <session> <fork-id>:/<path> <host-path>
@@ -197,6 +198,9 @@ Choose validation for the affected behavior:
 - For changes to private network mode, also run `sudo ./scripts/test-private-network.sh`
   (per-fork ports, egress through pasta, and namespace lifecycle across snapshot,
   park, destroy, suspend, and cleanup).
+- For changes to fabric attachment, also run `sudo ./scripts/test-fabric.sh`
+  (TCP connections between attached forks of two sessions across snapshot,
+  fork, park, suspend, and cleanup; refusals; fabric ports removed on release).
 - For changes to restore or the CRIU action script, also run
   `sudo ./scripts/test-ns-last-pid.sh` (new pids after checkpoint, fork, and a
   second-generation fork stay above the restored tree's).

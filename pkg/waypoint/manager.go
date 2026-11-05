@@ -38,6 +38,8 @@ type Manager struct {
 	// NetworkShared. networkLock is its criu --network-lock method.
 	network     string
 	networkLock string
+	// mainAttach, set by AttachMain, connects main to a fabric at StartShell.
+	mainAttach *NetworkAttachment
 }
 
 // SessionInfo holds information about a checkpoint session.

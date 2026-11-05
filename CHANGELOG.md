@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+- Added `--attach <fabric-netns>=<ipv4/prefix>` to `init --shell`, `build`, and `fork` (`private` network mode): the fork is connected by a veth pair to the bridge `br0` of a caller-owned network namespace, so forks of different sessions can hold TCP connections that survive snapshot and fork. Destroy, park, suspend, and cleanup detach it.
+- `setup check` now verifies that pasta can serve a Waypoint network namespace, and explains the SELinux workaround where pasta is confined.
+- Added `scripts/test-fabric.sh`, a runtime test of connected forks across snapshot, fork, park, suspend, and cleanup.
+
 ## v0.7.1 — Per-Fork Network Namespaces
 **Private networking for concurrent forks, with restore and copy fixes**
 - Added the `private` network mode (`WAYPOINT_NETWORK=private` or `network` in the config file): each fork, including `main`, gets its own network namespace and port space, with outbound traffic through a per-fork pasta process. `shared` remains the default.

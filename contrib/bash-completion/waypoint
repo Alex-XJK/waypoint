@@ -290,8 +290,11 @@ _waypoint()
             if (( cword == 2 )); then
                 _waypoint_complete_paths "$cur" directories
             elif (( cword > 2 )); then
+                # An --attach value (<fabric-netns>=<address>) is free-form.
+                [[ "${words[cword-1]}" != --attach ]] || return 0
                 _waypoint_complete_words "$cur" --quiet
                 [[ "$command" != init ]] || _waypoint_complete_words "$cur" --shell
+                _waypoint_complete_words "$cur" --attach
             fi
             return
             ;;
@@ -308,27 +311,28 @@ _waypoint()
             if (( cword == 3 )); then
                 _waypoint_complete_checkpoints "$cur" "${words[2]}"
             elif [[ "$command" == fork ]] && (( cword >= 4 )); then
-                local i named=0 count=1
+                local i named=0 attached=0 count=1
                 for (( i=4; i<cword; i++ )); do
                     case "${words[i]}" in
-                        --id|--n)
-                            # A new name or count is free-form, even if its
-                            # current prefix resembles a flag or existing ID.
+                        --id|--n|--attach)
+                            # A new name, count, or attachment is free-form,
+                            # even if its prefix resembles a flag or existing ID.
                             (( i+1 < cword )) || return 0
-                            if [[ "${words[i]}" == --id ]]; then
-                                named=1
-                            else
-                                count="${words[i+1]}"
-                            fi
+                            case "${words[i]}" in
+                                --id) named=1 ;;
+                                --n) count="${words[i+1]}" ;;
+                                --attach) attached=1 ;;
+                            esac
                             (( i+=1 ))
                             ;;
                         *) return 0 ;;
                     esac
                 done
-                if (( ! named )) && [[ "$count" == 1 ]]; then
-                    _waypoint_complete_words "$cur" --id
+                if [[ "$count" == 1 ]]; then
+                    (( named )) || _waypoint_complete_words "$cur" --id
+                    (( attached )) || _waypoint_complete_words "$cur" --attach
                 fi
-                _waypoint_complete_words "$cur" --n
+                (( attached )) || _waypoint_complete_words "$cur" --n
             fi
             ;;
         exec|fork-exec|destroy)

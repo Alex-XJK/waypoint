@@ -220,7 +220,10 @@ mode every fork runs in the host network namespace. In `private` mode each fork,
 including `main`, gets its own network namespace, so forks of one checkpoint can
 all listen on the same port; outbound traffic goes through a
 [pasta](https://passt.top) process per fork (package `passt`). A session keeps
-the mode it was created with.
+the mode it was created with. Private-mode forks can also be connected to each
+other across sessions; see [Connect Forks of Different Sessions](#41-connect-forks-of-different-sessions).
+Where SELinux confines pasta (Fedora, for example), it cannot open Waypoint's
+network namespaces; `sudo ./setup check` detects this and prints a workaround.
 
 ### 1. Initialize Environment
 
@@ -389,6 +392,35 @@ To return to an earlier checkpoint, create another fork from it and direct later
 sudo waypoint fork a1b2c3d4e5f6g7h8 checkpoint-name --id retry
 sudo waypoint exec a1b2c3d4e5f6g7h8 retry -- 'echo "Back at the saved state"'
 ```
+
+#### 4.1. Connect Forks of Different Sessions
+
+In `private` network mode, `--attach <fabric-netns>=<ipv4/prefix>` on `init --shell`,
+`build`, or `fork` also connects the new fork, through a veth pair, to the bridge
+`br0` in a *fabric*: a network namespace you create and own. Forks attached to one
+fabric reach each other directly at their fabric addresses, so a TCP connection
+between them is part of each fork's checkpointed state. Give every copy of a fork
+the same address on its own fabric, and the connections restore in every copy:
+
+```bash
+# One fabric per copy of the system; addresses repeat across fabrics.
+sudo ip netns add fab-main && sudo ip -n fab-main link add br0 type bridge && sudo ip -n fab-main link set br0 up
+sudo env WAYPOINT_NETWORK=private waypoint init ./web-rootfs --shell --attach /run/netns/fab-main=10.89.0.2/24
+sudo env WAYPOINT_NETWORK=private waypoint init ./db-rootfs --shell --attach /run/netns/fab-main=10.89.0.3/24
+# ... start db, connect web to 10.89.0.3, snapshot both mains to checkpoint G ...
+sudo ip netns add fab-r1 && sudo ip -n fab-r1 link add br0 type bridge && sudo ip -n fab-r1 link set br0 up
+sudo waypoint fork <web-session> G --id r1 --attach /run/netns/fab-r1=10.89.0.2/24
+sudo waypoint fork <db-session> G --id r1 --attach /run/netns/fab-r1=10.89.0.3/24
+```
+
+The fabric's owner assigns addresses and keeps them unique on each fabric; one
+fork per `--attach`, so `--n` cannot be combined with it. The fabric subnet must
+not overlap the host's networks, which pasta copies into every fork. To snapshot
+connected forks consistently, stop traffic on the fabric's bridge (for example
+with an nft `bridge` drop rule) while their snapshots run; TCP retransmits what was
+dropped, though traffic can stall for a few seconds afterwards. Destroy, park,
+suspend, and cleanup remove a fork from its fabric; the fabric itself is never
+touched. `scripts/test-fabric.sh` walks the whole flow.
 
 ### 5. List Available Sessions, Checkpoints, and Forks
 

@@ -247,6 +247,15 @@ excludes --id
 contains --n
 complete_words waypoint fork demo-session c-alpha --n 1 --
 contains --id
+contains --attach
+complete_words waypoint fork demo-session c-alpha --n 2 --
+excludes --attach
+complete_words waypoint fork demo-session c-alpha --attach ''
+empty
+complete_words waypoint fork demo-session c-alpha --attach /run/netns/f=10.89.0.2/24 --
+contains --id
+excludes --attach
+excludes --n
 complete_words waypoint list demo-session --
 exactly --json
 complete_words waypoint cleanup demo-session --
@@ -259,6 +268,9 @@ for command in init build; do
     empty
     complete_words waypoint "$command" 'host dir' --
     contains --quiet
+    contains --attach
+    complete_words waypoint "$command" 'host dir' --attach ''
+    empty
 done
 complete_words waypoint init 'host dir' --
 contains --shell

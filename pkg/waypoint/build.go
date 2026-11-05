@@ -469,6 +469,12 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 		if err != nil {
 			return ShellNotEnabled, "", fmt.Errorf("failed to set up the session network: %w", err)
 		}
+		if m.mainAttach != nil {
+			if err := m.attachNetwork(&network, MainForkID, *m.mainAttach); err != nil {
+				network.releaseNetwork()
+				return ShellNotEnabled, "", err
+			}
+		}
 		start = func() error { return startInNetNS(network.NetNS, cmd) }
 	}
 	if err := start(); err != nil {

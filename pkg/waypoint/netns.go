@@ -43,6 +43,10 @@ type ForkNetwork struct {
 	PastaStartTime uint64 `json:"pasta_start_time,omitempty"`
 	// NetworkLock is copied here because the restore helper reads only the fork record.
 	NetworkLock string `json:"network_lock,omitempty"`
+	// Attachment, if set, connects the namespace to a fabric through the
+	// veth whose fabric-side end is FabricPeer (see fabric.go).
+	Attachment *NetworkAttachment `json:"attachment,omitempty"`
+	FabricPeer string             `json:"fabric_peer,omitempty"`
 }
 
 func (m *Manager) privateNetwork() bool {
@@ -87,8 +91,24 @@ func (m *Manager) newForkNetwork(forkID string) (ForkNetwork, error) {
 	return ForkNetwork{NetNS: pin, PastaPID: pid, PastaStartTime: startTime, NetworkLock: m.networkLock}, nil
 }
 
+// attachNetwork connects the fork's new namespace to a's fabric; releaseNetwork
+// detaches it. The attachment is recorded first so that releasing after a
+// partial failure also removes a veth that was already created.
+func (m *Manager) attachNetwork(n *ForkNetwork, forkID string, a NetworkAttachment) error {
+	n.Attachment, n.FabricPeer = &a, fabricPeerName(m.sessionID, forkID)
+	if err := attachFabric(n.NetNS, a, n.FabricPeer); err != nil {
+		return fmt.Errorf("attach fork %s to fabric %s: %w", forkID, a.FabricNS, err)
+	}
+	return nil
+}
+
 // releaseNetwork stops pasta (it holds the pin open), then removes the pin.
 func (n *ForkNetwork) releaseNetwork() {
+	if n.Attachment != nil && n.FabricPeer != "" {
+		if err := detachFabric(n.Attachment.FabricNS, n.FabricPeer); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to detach from fabric: %v\n", err)
+		}
+	}
 	if n.PastaPID > 0 {
 		if err := killTree(n.PastaPID, n.PastaStartTime); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to stop pasta: %v\n", err)
