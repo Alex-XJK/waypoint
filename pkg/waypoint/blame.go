@@ -15,20 +15,16 @@ import (
 )
 
 type BlameResult struct {
-	TargetPath string            `json:"target_path"`
-	LeafCkptID string			 `json:"leaf_checkpoint_id"`
+	TargetPath string `json:"target_path"`
+	TargetCkptID string `json:"target_checkpoint_id"`
 	// TODO should we output all ckptIDs in the ancestry, with empty blame if necessary?
-	Records    []BlameCkptRecord `json:"blamed_checkpoints"`
+	Records []BlameCkptRecord `json:"blamed_checkpoints"`
 }
 
 type BlameCkptRecord struct {
-	CheckpointID string `json:"checkpoint_id"`
+	CheckpointID string     `json:"checkpoint_id"`
+	ChangeType   ChangeType `json:"change_type"`
 	// TODO: add field containing the actual changes from previous
-}
-
-type visibilityState struct {
-	visible bool
-	updated bool
 }
 
 func isOpaque(dir string) (bool, error) {
@@ -71,65 +67,106 @@ func isWhiteout(path string) (bool, error) {
 	return false, nil
 }
 
-func hideVisibleChild(dirPath string, targetPath string, state *visibilityState) error {
-	if state.updated || !state.visible {
-		return nil
-	}
+func isDescendant(dirPath string, targetPath string) (bool, error) {
 	childPath, err := filepath.Rel(dirPath, targetPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if childPath == "." || childPath == ".." || strings.HasPrefix(childPath, ".."+string(filepath.Separator)) {
-		return nil
+		return false, nil
 	}
-	state.visible = false
-	state.updated = true
-	return nil
+	return true, nil
 }
 
-func checkDir(rootViewDir, containerViewDir, targetPath string, state *visibilityState) error {
+func checkDir(rootViewDir, containerViewDir, targetPath string, visible *bool, blamed *[]BlameCkptRecord, ckptID string) (bool, error) {
 	dentries, err := os.ReadDir(rootViewDir)
 	if err != nil {
-		return fmt.Errorf("read directory %s: %w", rootViewDir, err)
+		return false, fmt.Errorf("read directory %s: %w", rootViewDir, err)
 	}
 	for _, dentry := range dentries {
-		if state.updated {
-			return nil
-		}
 		rootViewPath := filepath.Join(rootViewDir, dentry.Name())
 		containerViewPath := filepath.Join(containerViewDir, dentry.Name())
-		if !dentry.IsDir() {
+		if !dentry.IsDir() { //TODO won't follow symlinks, change?
 			whiteout, err := isWhiteout(rootViewPath)
 			if err != nil {
-				return err
+				return false, err
 			}
 			if whiteout {
-				if containerViewPath == targetPath && state.visible { // whiteout of target file
-					state.visible = false
-					state.updated = true
-				} else if err := hideVisibleChild(containerViewPath, targetPath, state); err != nil { // whiteout could represent directory, if so check if target is child
-					return err
+				if *visible {
+					if containerViewPath == targetPath { // whiteout of target file
+						*visible = false
+						if blamed != nil {
+							*blamed = append(*blamed, BlameCkptRecord{
+								CheckpointID: ckptID,
+								ChangeType:   ChangeTypeDeleted,
+							})
+						}
+						return true, nil
+					} else { // whiteout could represent directory, if so check if target is child
+						hide, err := isDescendant(containerViewPath, targetPath)
+						if err != nil {
+							return false, err
+						}
+						if hide {
+							*visible = false
+							if blamed != nil {
+								*blamed = append(*blamed, BlameCkptRecord{
+									CheckpointID: ckptID,
+									ChangeType:   ChangeTypeDeleted,
+								})
+							}
+							return true, nil
+						}
+					}
 				}
 			} else if containerViewPath == targetPath {
-				state.visible = true
-				state.updated = true
+				if blamed != nil {
+					if !*visible {
+						*blamed = append(*blamed, BlameCkptRecord{
+							CheckpointID: ckptID,
+							ChangeType:   ChangeTypeAdded,
+						})
+					} else {
+						*blamed = append(*blamed, BlameCkptRecord{
+							CheckpointID: ckptID,
+							ChangeType:   ChangeTypeModified,
+						})
+					}
+				}
+				*visible = true
+				return true, nil
 			}
 		} else {
-			if err := checkDir(rootViewPath, containerViewPath, targetPath, state); err != nil {
-				return err
+			updated, err := checkDir(rootViewPath, containerViewPath, targetPath, visible, blamed, ckptID)
+			if err != nil {
+				return false, err
+			}
+			if updated {
+				return true, nil
 			}
 			opaque, err := isOpaque(rootViewPath)
 			if err != nil {
-				return err
+				return false, err
 			}
-			if opaque && !state.updated {
-				if err := hideVisibleChild(containerViewPath, targetPath, state); err != nil {
-					return err
+			if opaque && *visible {
+				hide, err := isDescendant(containerViewPath, targetPath)
+				if err != nil {
+					return false, err
+				}
+				if hide {
+					*visible = false
+					if blamed != nil {
+						*blamed = append(*blamed, BlameCkptRecord{
+							CheckpointID: ckptID,
+							ChangeType:   ChangeTypeDeleted,
+						})
+					}
+					return true, nil
 				}
 			}
 		}
 	}
-	return nil
+	return false, nil
 }
 
 // very similar to diff.go normalizeTargetDir, refactor?
@@ -169,30 +206,23 @@ func (m *Manager) PrintBlame(ckptID, path string) error {
 	ckptIDs := append([]string(nil), metadata.LayerIDs...)
 	originalDir := metadata.OriginalDir
 	// first check through original dir to set up visibility of target path
-	state := visibilityState{
-		visible: false,
-		updated: false,
-	}
-	if err := checkDir(originalDir, "/", normalizedTargetPath, &state); err != nil {
+	visible := false
+	_, err = checkDir(originalDir, "/", normalizedTargetPath, &visible, nil, "")
+	if err != nil {
 		return err
 	}
 	// then advance through checkpoint layers, blaming
 	for _, ckptID := range ckptIDs {
 		upperDirPath := m.checkpointUpperDir(ckptID)
-		state.updated = false
-		if err := checkDir(upperDirPath, "/", normalizedTargetPath, &state); err != nil {
+		_, err := checkDir(upperDirPath, "/", normalizedTargetPath, &visible, &blamedCkpts, ckptID)
+		if err != nil {
 			return err
-		}
-		if state.updated {
-			blamedCkpts = append(blamedCkpts, BlameCkptRecord{
-				CheckpointID: ckptID,
-			})
 		}
 	}
 
 	result := BlameResult{
 		TargetPath: normalizedTargetPath,
-		LeafCkptID: ckptID,
+		TargetCkptID: ckptID,
 		Records:    blamedCkpts,
 	}
 
