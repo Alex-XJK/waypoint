@@ -34,6 +34,14 @@ func printExecResult(result *waypoint.ExecResult) {
 	}
 }
 
+// chainTokens is the image chain part of a checkpoint's phases line.
+func chainTokens(c *waypoint.ChainInfo) string {
+	if c == nil {
+		return ""
+	}
+	return " " + c.String()
+}
+
 // execUsage is the usage line for `exec`.
 const execUsage = "Usage: exec <session> <fork-id> -- '<bash command line>'"
 
@@ -272,7 +280,7 @@ func main() {
 		}
 		fmt.Printf("Checkpoint '%s' created successfully\n", checkpointID)
 		if ckpt.Metadata != nil && ckpt.Metadata.Snapshot != nil {
-			fmt.Printf("phases %s\n", ckpt.Metadata.Snapshot)
+			fmt.Printf("phases %s%s\n", ckpt.Metadata.Snapshot, chainTokens(ckpt.Metadata.Chain))
 		}
 
 	case "fork":
@@ -414,7 +422,7 @@ func main() {
 			fmt.Printf("Fork '%s' snapshotted as checkpoint '%s'\n", forkID, checkpointID)
 		}
 		if ckpt.Metadata != nil && ckpt.Metadata.Snapshot != nil {
-			fmt.Printf("phases %s\n", ckpt.Metadata.Snapshot)
+			fmt.Printf("phases %s%s\n", ckpt.Metadata.Snapshot, chainTokens(ckpt.Metadata.Chain))
 		}
 
 	case "exec":

@@ -3,6 +3,7 @@ package waypoint
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,6 +52,17 @@ var (
 	IncrementalDumps       = false
 	IncrementalDumpsConfig = "default"
 
+	// FullDumpRatio and MaxChainSets decide, with incremental_dumps on,
+	// when a dump is full instead of incremental (chain.go): once the
+	// overhead a chain has added since its last full dump reaches
+	// FullDumpRatio times the estimated extra time of a full dump, or once
+	// the chain would exceed MaxChainSets image sets. A ratio of 0 makes
+	// every dump full; a larger ratio keeps chains longer.
+	FullDumpRatio       = 1.0
+	FullDumpRatioConfig = "default"
+	MaxChainSets        = 128
+	MaxChainSetsConfig  = "default"
+
 	// PhaseStats enables phase-level latency instrumentation: each fork
 	// restore and checkpoint assembles a timing breakdown (from CRIU's
 	// stats-dump / stats-restore images and our own wall clocks), persists
@@ -88,16 +100,18 @@ func validNetworkMode(mode string) bool {
 }
 
 type config struct {
-	SessionInfoDir           string `json:"session_info_dir,omitempty"`
-	SessionsDir              string `json:"sessions_dir,omitempty"`
-	BashInitSrc              string `json:"bash_init_src,omitempty"`
-	PreserveSessionOnCleanup *bool  `json:"preserve_session_on_cleanup,omitempty"`
-	TmpfsImages              *bool  `json:"tmpfs_images,omitempty"`
-	TmpfsImagesDir           string `json:"tmpfs_images_dir,omitempty"`
-	IncrementalDumps         *bool  `json:"incremental_dumps,omitempty"`
-	PhaseStats               *bool  `json:"phase_stats,omitempty"`
-	LogLevel                 *int   `json:"waypoint_log_level,omitempty"`
-	Network                  string `json:"network,omitempty"`
+	SessionInfoDir           string   `json:"session_info_dir,omitempty"`
+	SessionsDir              string   `json:"sessions_dir,omitempty"`
+	BashInitSrc              string   `json:"bash_init_src,omitempty"`
+	PreserveSessionOnCleanup *bool    `json:"preserve_session_on_cleanup,omitempty"`
+	TmpfsImages              *bool    `json:"tmpfs_images,omitempty"`
+	TmpfsImagesDir           string   `json:"tmpfs_images_dir,omitempty"`
+	IncrementalDumps         *bool    `json:"incremental_dumps,omitempty"`
+	FullDumpRatio            *float64 `json:"full_dump_ratio,omitempty"`
+	MaxChainSets             *int     `json:"max_chain_sets,omitempty"`
+	PhaseStats               *bool    `json:"phase_stats,omitempty"`
+	LogLevel                 *int     `json:"waypoint_log_level,omitempty"`
+	Network                  string   `json:"network,omitempty"`
 }
 
 // ConfigValue reports an effective configuration value and where it came from.
@@ -115,6 +129,8 @@ type ConfigInfo struct {
 	TmpfsImages              ConfigValue `json:"tmpfs_images"`
 	TmpfsImagesDir           ConfigValue `json:"tmpfs_images_dir"`
 	IncrementalDumps         ConfigValue `json:"incremental_dumps"`
+	FullDumpRatio            ConfigValue `json:"full_dump_ratio"`
+	MaxChainSets             ConfigValue `json:"max_chain_sets"`
 	PhaseStats               ConfigValue `json:"phase_stats"`
 	LogLevel                 ConfigValue `json:"waypoint_log_level"`
 	Network                  ConfigValue `json:"network"`
@@ -149,6 +165,14 @@ func LoadConfigInfo() ConfigInfo {
 			Source: TmpfsImagesDirConfig,
 		},
 		IncrementalDumps: incrementalDumpsInfo(),
+		FullDumpRatio: ConfigValue{
+			Value:  FullDumpRatio,
+			Source: FullDumpRatioConfig,
+		},
+		MaxChainSets: ConfigValue{
+			Value:  MaxChainSets,
+			Source: MaxChainSetsConfig,
+		},
 		PhaseStats: ConfigValue{
 			Value:  PhaseStats,
 			Source: PhaseStatsConfig,
@@ -223,20 +247,46 @@ func boolEnvOverride(name string) (bool, bool) {
 // validLogLevel reports whether level is one of criu's -v levels.
 func validLogLevel(level int) bool { return level >= 0 && level <= 4 }
 
-// logLevelEnvOverride returns a parsed WAYPOINT_LOG_LEVEL. Invalid
-// non-empty values are warned about and treated as unset, as in
-// boolEnvOverride.
+// validFullDumpRatio reports whether r is a usable full_dump_ratio: finite
+// and not negative.
+func validFullDumpRatio(r float64) bool { return r >= 0 && !math.IsInf(r, 1) }
+
+// validMaxChainSets reports whether n is a usable max_chain_sets.
+func validMaxChainSets(n int) bool { return n >= 1 }
+
+// logLevelEnvOverride returns a parsed WAYPOINT_LOG_LEVEL.
 func logLevelEnvOverride() (int, bool) {
-	raw := os.Getenv("WAYPOINT_LOG_LEVEL")
+	return intEnvOverride("WAYPOINT_LOG_LEVEL", validLogLevel, "0 to 4")
+}
+
+// intEnvOverride returns a parsed integer environment override. Invalid
+// non-empty values are warned about and treated as unset, as in
+// boolEnvOverride; want describes the valid values.
+func intEnvOverride(name string, valid func(int) bool, want string) (int, bool) {
+	raw := os.Getenv(name)
 	if raw == "" {
 		return 0, false
 	}
-	level, err := strconv.Atoi(raw)
-	if err != nil || !validLogLevel(level) {
-		fmt.Fprintf(os.Stderr, "warning: ignoring invalid WAYPOINT_LOG_LEVEL=%q (want 0 to 4); using config/default instead\n", raw)
+	value, err := strconv.Atoi(raw)
+	if err != nil || !valid(value) {
+		fmt.Fprintf(os.Stderr, "warning: ignoring invalid %s=%q (want %s); using config/default instead\n", name, raw, want)
 		return 0, false
 	}
-	return level, true
+	return value, true
+}
+
+// floatEnvOverride is intEnvOverride for a float.
+func floatEnvOverride(name string, valid func(float64) bool, want string) (float64, bool) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return 0, false
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || !valid(value) {
+		fmt.Fprintf(os.Stderr, "warning: ignoring invalid %s=%q (want %s); using config/default instead\n", name, raw, want)
+		return 0, false
+	}
+	return value, true
 }
 
 // loadConfig loads custom configuration.
@@ -281,6 +331,16 @@ func loadConfig() {
 	if incrementalEnvSet {
 		IncrementalDumps = incrementalEnv
 		IncrementalDumpsConfig = "env:WAYPOINT_INCREMENTAL_DUMPS"
+	}
+	ratioEnv, ratioEnvSet := floatEnvOverride("WAYPOINT_FULL_DUMP_RATIO", validFullDumpRatio, "a finite number >= 0")
+	if ratioEnvSet {
+		FullDumpRatio = ratioEnv
+		FullDumpRatioConfig = "env:WAYPOINT_FULL_DUMP_RATIO"
+	}
+	maxSetsEnv, maxSetsEnvSet := intEnvOverride("WAYPOINT_MAX_CHAIN_SETS", validMaxChainSets, "an integer >= 1")
+	if maxSetsEnvSet {
+		MaxChainSets = maxSetsEnv
+		MaxChainSetsConfig = "env:WAYPOINT_MAX_CHAIN_SETS"
 	}
 	phaseStatsEnv, phaseStatsEnvSet := boolEnvOverride("WAYPOINT_PHASE_STATS")
 	if phaseStatsEnvSet {
@@ -384,6 +444,22 @@ func loadConfig() {
 				if cfg.IncrementalDumps != nil && !incrementalEnvSet {
 					IncrementalDumps = *cfg.IncrementalDumps
 					IncrementalDumpsConfig = configSource
+				}
+				if cfg.FullDumpRatio != nil && !ratioEnvSet {
+					if validFullDumpRatio(*cfg.FullDumpRatio) {
+						FullDumpRatio = *cfg.FullDumpRatio
+						FullDumpRatioConfig = configSource
+					} else {
+						fmt.Fprintf(os.Stderr, "warning: ignoring invalid full_dump_ratio %g in %s (want a finite number >= 0)\n", *cfg.FullDumpRatio, cfgPath)
+					}
+				}
+				if cfg.MaxChainSets != nil && !maxSetsEnvSet {
+					if validMaxChainSets(*cfg.MaxChainSets) {
+						MaxChainSets = *cfg.MaxChainSets
+						MaxChainSetsConfig = configSource
+					} else {
+						fmt.Fprintf(os.Stderr, "warning: ignoring invalid max_chain_sets %d in %s (want an integer >= 1)\n", *cfg.MaxChainSets, cfgPath)
+					}
 				}
 				if cfg.PhaseStats != nil && !phaseStatsEnvSet {
 					PhaseStats = *cfg.PhaseStats

@@ -68,6 +68,8 @@ func loadBooleanConfigForTest(t *testing.T, contents string, env map[string]stri
 		"WAYPOINT_TMPFS_DIR",
 		"WAYPOINT_PHASE_STATS",
 		"WAYPOINT_INCREMENTAL_DUMPS",
+		"WAYPOINT_FULL_DUMP_RATIO",
+		"WAYPOINT_MAX_CHAIN_SETS",
 		"WAYPOINT_LOG_LEVEL",
 		"WAYPOINT_NETWORK",
 	} {
@@ -294,6 +296,62 @@ func TestLoadConfigLogLevel(t *testing.T) {
 			}
 			if got, want := criuLogLevelArg(), "-v"+strconv.Itoa(tc.wantLevel); got != want {
 				t.Fatalf("criuLogLevelArg() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestLoadConfigChainKnobs(t *testing.T) {
+	both := `{"full_dump_ratio": 2.5, "max_chain_sets": 16}`
+	cases := []struct {
+		name        string
+		file        string
+		env         map[string]string
+		wantRatio   float64
+		ratioSource string // "file" stands for the config file's source label
+		wantSets    int
+		setsSource  string
+	}{
+		{"defaults", `{}`, nil, 1, "default", 128, "default"},
+		{"file", both, nil, 2.5, "file", 16, "file"},
+		{"file zero ratio is applied", `{"full_dump_ratio": 0}`, nil, 0, "file", 128, "default"},
+		{"environment overrides file", both,
+			map[string]string{"WAYPOINT_FULL_DUMP_RATIO": "0.5", "WAYPOINT_MAX_CHAIN_SETS": "8"},
+			0.5, "env:WAYPOINT_FULL_DUMP_RATIO", 8, "env:WAYPOINT_MAX_CHAIN_SETS"},
+		{"invalid environment falls back to file", both,
+			map[string]string{"WAYPOINT_FULL_DUMP_RATIO": "-1", "WAYPOINT_MAX_CHAIN_SETS": "0"},
+			2.5, "file", 16, "file"},
+		{"non-finite environment is invalid", `{}`,
+			map[string]string{"WAYPOINT_FULL_DUMP_RATIO": "inf", "WAYPOINT_MAX_CHAIN_SETS": "many"},
+			1, "default", 128, "default"},
+		{"NaN environment is invalid", `{}`, map[string]string{"WAYPOINT_FULL_DUMP_RATIO": "NaN"}, 1, "default", 128, "default"},
+		{"invalid file values are ignored", `{"full_dump_ratio": -1, "max_chain_sets": 0}`, nil, 1, "default", 128, "default"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := []any{FullDumpRatio, FullDumpRatioConfig, MaxChainSets, MaxChainSetsConfig}
+			t.Cleanup(func() {
+				FullDumpRatio, FullDumpRatioConfig = prev[0].(float64), prev[1].(string)
+				MaxChainSets, MaxChainSetsConfig = prev[2].(int), prev[3].(string)
+			})
+			FullDumpRatio, FullDumpRatioConfig, MaxChainSets, MaxChainSetsConfig = 1, "default", 128, "default"
+
+			source := loadBooleanConfigForTest(t, tc.file, tc.env)
+			label := func(s string) string {
+				if s == "file" {
+					return source
+				}
+				return s
+			}
+			if FullDumpRatio != tc.wantRatio || FullDumpRatioConfig != label(tc.ratioSource) {
+				t.Errorf("full_dump_ratio = %g from %q, want %g from %q", FullDumpRatio, FullDumpRatioConfig, tc.wantRatio, label(tc.ratioSource))
+			}
+			if MaxChainSets != tc.wantSets || MaxChainSetsConfig != label(tc.setsSource) {
+				t.Errorf("max_chain_sets = %d from %q, want %d from %q", MaxChainSets, MaxChainSetsConfig, tc.wantSets, label(tc.setsSource))
+			}
+			info := LoadConfigInfo()
+			if info.FullDumpRatio.Value != FullDumpRatio || info.MaxChainSets.Value != MaxChainSets {
+				t.Errorf("LoadConfigInfo() = %v / %v, want %g / %d", info.FullDumpRatio.Value, info.MaxChainSets.Value, FullDumpRatio, MaxChainSets)
 			}
 		})
 	}

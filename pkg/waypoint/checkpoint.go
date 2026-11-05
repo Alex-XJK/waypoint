@@ -30,6 +30,8 @@ type Metadata struct {
 	// Snapshot is the phase breakdown of the snapshot that created this
 	// checkpoint (instrumentation, not part of the logical state).
 	Snapshot *SnapshotBreakdown `json:"snapshot_breakdown,omitempty"`
+	// Chain is the checkpoint's memory image chain (incremental_dumps only).
+	Chain *ChainInfo `json:"chain,omitempty"`
 }
 
 type CheckpointStatus string
@@ -310,10 +312,17 @@ func (m *Manager) restoreForkAndWait(f *Fork) (*RestoreBreakdown, error) {
 		if t, err := readChildRestoreTiming(f); err == nil {
 			bd.MountMs, bd.CriuWallMs = t.MountMs, t.CriuWallMs
 		}
+	}
+	if PhaseStats || incrementalDumps() {
 		if rs, err := readCriuRestoreStats(filepath.Join(f.RootDir, "stats-restore")); err == nil {
-			bd.CriuForkMs = rs.ForkingMs
-			bd.CriuRestoreMs = rs.RestoreMs
-			bd.PagesRestored = rs.PagesRestored
+			if PhaseStats {
+				bd.CriuForkMs = rs.ForkingMs
+				bd.CriuRestoreMs = rs.RestoreMs
+				bd.PagesRestored = rs.PagesRestored
+			}
+			if incrementalDumps() {
+				m.recordRestore(f.BaseCheckpointID, f.ID, rs)
+			}
 		}
 	}
 
@@ -462,11 +471,15 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 		return fail(err)
 	}
 	snapStart := time.Now()
+	prevImagesDir, chain, decision := m.dumpParent(f)
 	dumpStart := time.Now()
-	if err := m.createMemoryCheckpoint(f.PID, ckptCriu, f.NextImagesDir); err != nil {
+	if err := m.createMemoryCheckpoint(f.PID, ckptCriu, prevImagesDir); err != nil {
 		return fail(fmt.Errorf("memory checkpoint failed: %w", err))
 	}
 	dumpMs := durMs(time.Since(dumpStart))
+	if incrementalDumps() {
+		metadata.Chain = m.newChainInfo(f, checkpointID, chain, prevImagesDir != "", dumpMs, decision)
+	}
 	if TmpfsImages {
 		// Persist the tmpfs images in the background; forks meanwhile read
 		// them straight from tmpfs through the criu symlink.
@@ -508,6 +521,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 		}
 		metadata.Status = CheckpointStatusReady
 		if err := m.withSessionLock(func() error {
+			m.recordFullDump(metadata.Chain)
 			return m.saveMetadata(checkpointID, metadata)
 		}); err != nil {
 			return nil, err
@@ -580,6 +594,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 	metadata.PID = f.PID
 	metadata.Status = CheckpointStatusReady
 	if err := m.withSessionLock(func() error {
+		m.recordFullDump(metadata.Chain)
 		return m.saveMetadata(checkpointID, metadata)
 	}); err != nil {
 		return nil, err
