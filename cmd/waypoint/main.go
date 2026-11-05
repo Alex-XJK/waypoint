@@ -601,6 +601,24 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "blame":
+		if len(os.Args) < 5 {
+			fmt.Println("Usage: blame <session> <checkpoint-id> <path>")
+			os.Exit(1)
+		}
+		sessionID := os.Args[2]
+		ckptID := os.Args[3]
+		path := os.Args[4]
+		manager, err := waypoint.LoadManager(sessionID)
+		if err != nil {
+			fmt.Printf("Error loading session: %v\n", err)
+			os.Exit(1)
+		}
+		if err := manager.PrintBlame(ckptID, path); err != nil {
+			fmt.Printf("Error on blame: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "version", "--version", "-v":
 		fmt.Printf("waypoint version %s\n", Version)
 
