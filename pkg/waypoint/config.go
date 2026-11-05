@@ -53,11 +53,11 @@ var (
 	IncrementalDumpsConfig = "default"
 
 	// FullDumpRatio and MaxChainSets decide, with incremental_dumps on,
-	// when a dump is full instead of incremental (chain.go): once the
-	// overhead a chain has added since its last full dump reaches
-	// FullDumpRatio times the estimated extra time of a full dump, or once
-	// the chain would exceed MaxChainSets image sets. A ratio of 0 makes
-	// every dump full; a larger ratio keeps chains longer.
+	// when a dump is full instead of incremental (chain.go): once one more
+	// level of the chain would cost more than the chain's average per
+	// snapshot, FullDumpRatio times the estimated extra time of a full dump
+	// counted in, or once the chain would exceed MaxChainSets image sets. A
+	// ratio of 0 makes every dump full; a larger ratio keeps chains longer.
 	FullDumpRatio       = 1.0
 	FullDumpRatioConfig = "default"
 	MaxChainSets        = 128

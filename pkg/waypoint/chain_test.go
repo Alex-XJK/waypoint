@@ -88,26 +88,34 @@ func TestChainStateFrom(t *testing.T) {
 	saveChainCheckpoint(t, m, "c3", "c2", &ChainInfo{Sets: 3, Root: "c1", DumpMs: 95, MemwriteMs: 60,
 		PagesScanned: pages, PagesWritten: 100, Restored: true}, pages, 220, 220)
 
+	// Level 1 (c2): 10 ms per restore, 1 restore, dump 0; level 2 (c3): 20 ms
+	// per restore, 2 restores, dump 10. Per restore 10j, 1.5 restores per
+	// level, dump 10j - 10: c_j = 25j - 10, so c_3 = 65 and the statistic
+	// A + B(k+1)(k+2)/2 = -10 + 25*6 = 140.
 	st := m.chainStateFrom("c3")
-	want := chainState{Sets: 3, Root: "c1", OverheadMs: 10 + 0 + 2*20 + 10, PriceMs: 0.6*pages - 95, PriceKnown: true}
-	if math.Abs(st.OverheadMs-want.OverheadMs) > 1e-9 || math.Abs(st.PriceMs-want.PriceMs) > 1e-9 {
-		t.Fatalf("chainStateFrom(c3) = %+v, want %+v", st, want)
+	want := chainState{Sets: 3, Root: "c1", OverheadMs: 140, RentMs: 10 + 0 + 2*20 + 10, NextLevelMs: 65,
+		PriceMs: 0.6*pages - 95, PriceKnown: true}
+	for _, v := range [][2]float64{{st.OverheadMs, want.OverheadMs}, {st.RentMs, want.RentMs},
+		{st.NextLevelMs, want.NextLevelMs}, {st.PriceMs, want.PriceMs}} {
+		if math.Abs(v[0]-v[1]) > 1e-9 {
+			t.Fatalf("chainStateFrom(c3) = %+v, want %+v", st, want)
+		}
 	}
-	st.OverheadMs, st.PriceMs = want.OverheadMs, want.PriceMs
+	st.OverheadMs, st.RentMs, st.NextLevelMs, st.PriceMs = want.OverheadMs, want.RentMs, want.NextLevelMs, want.PriceMs
 	if st != want {
 		t.Fatalf("chainStateFrom(c3) = %+v, want %+v", st, want)
 	}
 
 	// From the full checkpoint itself: no overhead, and no incremental dump to subtract.
-	if st := m.chainStateFrom("c1"); st.Sets != 1 || st.OverheadMs != 0 || st.PriceMs != 600 {
+	if st := m.chainStateFrom("c1"); st.Sets != 1 || st.OverheadMs != 0 || st.RentMs != 0 || st.PriceMs != 600 {
 		t.Fatalf("chainStateFrom(c1) = %+v, want 1 set, no overhead, price 600", st)
 	}
 
 	// Faster restores give a negative overhead, kept as it is.
 	saveChainCheckpoint(t, m, "c4", "c3", &ChainInfo{Sets: 4, Root: "c1", DumpMs: 95, MemwriteMs: 60,
 		PagesScanned: pages, PagesWritten: 100, Restored: true}, pages, 100)
-	if st := m.chainStateFrom("c4"); math.Abs(st.OverheadMs-(want.OverheadMs+10-100)) > 1e-9 {
-		t.Fatalf("chainStateFrom(c4).OverheadMs = %g, want %g", st.OverheadMs, want.OverheadMs+10-100)
+	if st := m.chainStateFrom("c4"); math.Abs(st.RentMs-(want.RentMs+10-100)) > 1e-9 {
+		t.Fatalf("chainStateFrom(c4).RentMs = %g, want %g", st.RentMs, want.RentMs+10-100)
 	}
 
 	// A chain the walk cannot follow is unknown.
@@ -120,6 +128,53 @@ func TestChainStateFrom(t *testing.T) {
 		if st := m.chainStateFrom(id); st.Sets != 0 {
 			t.Errorf("chainStateFrom(%s) = %+v, want an unknown chain", id, st)
 		}
+	}
+}
+
+func TestReplacementStat(t *testing.T) {
+	near := func(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
+	if r, n, s := replacementStat(nil); r != 0 || n != 0 || s != 0 {
+		t.Fatalf("no levels: %g %g %g, want zeros", r, n, s)
+	}
+	// One level: its overhead is the prediction and the statistic.
+	if r, n, s := replacementStat([]levelCost{{RestoreMs: 40, Restores: 4, DumpMs: 0}}); r != 40 || n != 40 || s != 40 {
+		t.Fatalf("one level: %g %g %g, want 40 40 40", r, n, s)
+	}
+	// Exact lines: 4 restores of 11 + 7j ms per level, dump 3(j-1) ms, so
+	// c_j = 41 + 31j. Over k = 5 levels the statistic is A + B(k+1)(k+2)/2.
+	var levels []levelCost
+	var rent float64
+	for j := 1; j <= 5; j++ {
+		l := levelCost{RestoreMs: 4 * (11 + 7*float64(j)), Restores: 4, DumpMs: 3 * float64(j-1)}
+		rent += l.RestoreMs + l.DumpMs
+		levels = append(levels, l)
+	}
+	r, n, s := replacementStat(levels)
+	if !near(r, rent) || !near(n, 41+31*6) || !near(s, 41+31*6*7/2.0) {
+		t.Fatalf("linear levels: rent %g next %g stat %g, want %g %g %g", r, n, s, rent, 41+31*6.0, 41+31*21.0)
+	}
+	// The statistic equals sum_{j=0..k} (c_{k+1} - c_j) with c_0 = 0.
+	if want := 6*n - rent; !near(s, want) {
+		t.Fatalf("stat %g, want (k+1)c_{k+1} - sum c_j = %g", s, want)
+	}
+	// A constant overhead per level counts once, however long the chain.
+	levels = nil
+	for j := 1; j <= 30; j++ {
+		levels = append(levels, levelCost{RestoreMs: 44, Restores: 4})
+	}
+	if _, _, s := replacementStat(levels); !near(s, 44) {
+		t.Fatalf("constant overhead over 30 levels: stat %g, want 44", s)
+	}
+	// The newest level restored once so far (its forks still to come) reads
+	// by its overhead per restore, not as a cheap level.
+	levels = []levelCost{{RestoreMs: 44, Restores: 4}, {RestoreMs: 44, Restores: 4}, {RestoreMs: 11, Restores: 1}}
+	if _, n, s := replacementStat(levels); !near(n, 11*3) || !near(s, 33) {
+		t.Fatalf("an unforked newest level: next %g stat %g, want 33 33 (11 ms x 3 restores per level)", n, s)
+	}
+	// Levels without restores (no stats) count only their dump.
+	levels = []levelCost{{DumpMs: 0}, {DumpMs: 5}, {DumpMs: 10}}
+	if _, n, s := replacementStat(levels); !near(n, 15) || !near(s, -5+5*10) {
+		t.Fatalf("dump overhead only: next %g stat %g, want 15 45", n, s)
 	}
 }
 
@@ -138,15 +193,30 @@ func TestChainStateFromWithoutMeasurements(t *testing.T) {
 	}
 }
 
+// restoreTime is the time of one restore of the i-th checkpoint (from 1) of
+// a simulated lineage, which has sets image sets.
+type restoreTime func(i, sets int) float64
+
+// linearRestore takes 200 ms from one image set and 200 + step + g(sets-1)
+// from a chain.
+func linearRestore(step, g float64) restoreTime {
+	return func(_, sets int) float64 {
+		if sets == 1 {
+			return 200
+		}
+		return 200 + step + g*float64(sets-1)
+	}
+}
+
 // simulateChain makes steps checkpoints of one lineage the way snapshotFork
-// records them, without criu. Every checkpoint is restored restores times;
-// a restore of a checkpoint with s sets takes 200 + gRestore*(s-1) ms, an
-// incremental dump's memwrite grows by gDump per set beyond the first
-// incremental one, a full dump of a restored tree takes 610 ms and the
-// session's first, fresh one 244 ms (1000 pages each), an incremental one
-// 90 ms. noise is added to every restore with alternating signs. It returns
-// the sets of every checkpoint and the reasons of the full dumps.
-func simulateChain(t *testing.T, steps, restores int, gRestore, gDump, noise float64) ([]int, []string) {
+// records them, without criu. Every checkpoint is restored restores times,
+// each taking restoreMs; an incremental dump's memwrite grows by gDump per
+// set beyond the first incremental one, a full dump of a restored tree
+// takes 610 ms and the session's first, fresh one 244 ms (1000 pages each),
+// an incremental one 90 ms. noise is added to every restore with
+// alternating signs. It returns the sets of every checkpoint and the
+// reasons of the full dumps.
+func simulateChain(t *testing.T, steps, restores int, restoreMs restoreTime, gDump, noise float64) ([]int, []string) {
 	t.Helper()
 	m := newManager(t.TempDir())
 	const pages = 1000
@@ -171,7 +241,7 @@ func simulateChain(t *testing.T, steps, restores int, gRestore, gDump, noise flo
 		}
 		var times []float64
 		for r := 0; r < restores; r++ {
-			times = append(times, 200+gRestore*float64(c.Sets-1)+sign*noise)
+			times = append(times, restoreMs(i, c.Sets)+sign*noise)
 			sign = -sign
 		}
 		saveChainCheckpoint(t, m, id, prev, c, pages, times...)
@@ -193,12 +263,19 @@ func cycles(sets []int) []int {
 	return out
 }
 
-// wantCycle is the number of incremental dumps after which the rule fires:
-// the first k with R*gRestore*k(k+1)/2 + gDump*k(k-1)/2 >= ratio*price.
-func wantCycle(restores int, gRestore, gDump, ratio, price float64) int {
+// wantCycle is the number of incremental dumps after which the rule fires
+// for restores of linearRestore(step, gRestore) and dump growth gDump. Level
+// j costs c_j = A + Bj, A = R*step - gDump, B = R*gRestore + gDump; the
+// statistic is c_1 at one level and A + B(k+1)(k+2)/2 from two on.
+func wantCycle(restores int, step, gRestore, gDump, ratio, price float64) int {
+	r := float64(restores)
+	a, b := r*step-gDump, r*gRestore+gDump
 	for k := 1; ; k++ {
-		fk := float64(k)
-		if float64(restores)*gRestore*fk*(fk+1)/2+gDump*fk*(fk-1)/2 >= ratio*price {
+		stat := a + b*float64((k+1)*(k+2))/2
+		if k == 1 {
+			stat = a + b
+		}
+		if stat >= ratio*price {
 			return k
 		}
 	}
@@ -210,17 +287,21 @@ func TestFullDumpPeriod(t *testing.T) {
 		name     string
 		ratio    float64
 		restores int
+		step     float64
 	}{
-		{"ratio 1", 1, 1},
-		{"ratio 2", 2, 1},
-		{"ratio 0.5", 0.5, 1},
-		{"four restores per checkpoint", 1, 4},
+		{"ratio 1", 1, 1, 0},
+		{"ratio 2", 2, 1, 0},
+		{"ratio 0.5", 0.5, 1, 0},
+		{"four restores per checkpoint", 1, 4, 0},
+		{"step and growth", 1, 4, 11},
+		{"step and growth, ratio 2", 2, 4, 11},
+		{"step and growth, ratio 0.5", 0.5, 4, 11},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			setChainKnobs(t, tc.ratio, 128)
 			const gRestore, gDump = 6.5, 2.8
-			sets, reasons := simulateChain(t, 80, tc.restores, gRestore, gDump, 0)
+			sets, reasons := simulateChain(t, 80, tc.restores, linearRestore(tc.step, gRestore), gDump, 0)
 			got := cycles(sets)
 			if len(got) < 3 {
 				t.Fatalf("full dumps after %v incremental ones, want at least three cycles; sets %v", got, sets)
@@ -232,19 +313,21 @@ func TestFullDumpPeriod(t *testing.T) {
 			}
 			// Until a full dump of a restored tree is measured, the price is
 			// from the session's first dump and the first cycle is shorter.
-			if want := wantCycle(tc.restores, gRestore, gDump, tc.ratio, freshPrice); got[0] != want {
+			if want := wantCycle(tc.restores, tc.step, gRestore, gDump, tc.ratio, freshPrice); got[0] != want {
 				t.Errorf("first cycle %d incremental dumps, want %d (price from the fresh dump); cycles %v", got[0], want, got)
 			}
-			want := wantCycle(tc.restores, gRestore, gDump, tc.ratio, fullPrice)
+			want := wantCycle(tc.restores, tc.step, gRestore, gDump, tc.ratio, fullPrice)
 			for _, k := range got[1:] {
 				if k != want {
 					t.Errorf("cycle of %d incremental dumps, want %d; cycles %v", k, want, got)
 				}
 			}
-			// The continuous optimum sqrt(2cC/g), g = R*gRestore + gDump.
-			g := float64(tc.restores)*gRestore + gDump
-			if opt := math.Sqrt(2 * tc.ratio * fullPrice / g); math.Abs(float64(want)-opt) > 1.5 {
-				t.Errorf("cycle %d incremental dumps, more than 1.5 from sqrt(2cC/g) = %.2f", want, opt)
+			// A cycle of the full dump and want incremental ones is within one
+			// of the continuous optimum sqrt(2(cC - A)/B).
+			r := float64(tc.restores)
+			a, b := r*tc.step-gDump, r*gRestore+gDump
+			if opt := math.Sqrt(2 * (tc.ratio*fullPrice - a) / b); math.Abs(float64(want+1)-opt) > 1 {
+				t.Errorf("cycle of %d checkpoints, more than 1 from sqrt(2(cC-A)/B) = %.2f", want+1, opt)
 			}
 		})
 	}
@@ -253,7 +336,7 @@ func TestFullDumpPeriod(t *testing.T) {
 func TestFullDumpCapWhenChainCostsNothing(t *testing.T) {
 	setChainKnobs(t, 1, 12)
 	// No growth, restores alternating 3 ms above and below the base.
-	sets, reasons := simulateChain(t, 40, 2, 0, 0, 3)
+	sets, reasons := simulateChain(t, 40, 2, linearRestore(0, 0), 0, 3)
 	for i, s := range sets {
 		if s > 12 {
 			t.Fatalf("checkpoint %d has %d sets, above the cap of 12", i+1, s)
@@ -269,9 +352,61 @@ func TestFullDumpCapWhenChainCostsNothing(t *testing.T) {
 	}
 }
 
+func TestFullDumpStepOnlyRunsToCap(t *testing.T) {
+	setChainKnobs(t, 1, 40)
+	// Every restore from a chain is 11 ms slower at any depth (4 restores,
+	// 44 ms per level, against a price of 520 ms), with noise that does not
+	// cancel within a level. A full dump would not remove the step from the
+	// next level, so only the cap cuts the chain.
+	sets, reasons := simulateChain(t, 100, 3, linearRestore(11, 0), 0, 3)
+	if got := cycles(sets); len(got) < 2 || got[0] != 39 || got[1] != 39 {
+		t.Fatalf("cycles %v, want full dumps only at the cap (39 incremental dumps)", got)
+	}
+	for _, r := range reasons {
+		if r != dumpReasonMaxSets {
+			t.Fatalf("full dump reasons %v, want only %s", reasons, dumpReasonMaxSets)
+		}
+	}
+}
+
+func TestFullDumpAfterCostJump(t *testing.T) {
+	setChainKnobs(t, 1, 128)
+	// A step and no growth until checkpoint 30 (so that even the first
+	// chain, priced from the fresh dump, is not cut), then (images out of
+	// the page cache, say) every set beyond the first costs 30 ms more per
+	// restore. The chain is cut within two checkpoints.
+	const jump = 30
+	restore := func(i, sets int) float64 {
+		g := 0.0
+		if i >= jump {
+			g = 30
+		}
+		return linearRestore(11, g)(i, sets)
+	}
+	sets, reasons := simulateChain(t, jump+6, 4, restore, 0, 0)
+	for i := 1; i < jump-1; i++ {
+		if sets[i] == 1 {
+			t.Fatalf("full dump at checkpoint %d before the jump; sets %v", i+1, sets)
+		}
+	}
+	cut := -1
+	for i := jump - 1; i < len(sets); i++ {
+		if sets[i] == 1 {
+			cut = i + 1
+			break
+		}
+	}
+	if cut < 0 || cut > jump+2 {
+		t.Fatalf("first full dump after the jump at checkpoint %d, want by %d; sets %v", cut, jump+2, sets)
+	}
+	if reasons[0] != dumpReasonOverhead {
+		t.Fatalf("full dump reasons %v, want %s first", reasons, dumpReasonOverhead)
+	}
+}
+
 func TestFullDumpRatioZeroMakesEveryDumpFull(t *testing.T) {
 	setChainKnobs(t, 0, 128)
-	sets, _ := simulateChain(t, 5, 1, 6.5, 2.8, 0)
+	sets, _ := simulateChain(t, 5, 1, linearRestore(0, 6.5), 2.8, 0)
 	for i, s := range sets {
 		if s != 1 {
 			t.Fatalf("checkpoint %d has %d sets with full_dump_ratio 0, want 1", i+1, s)
@@ -353,8 +488,9 @@ func TestFullDumpRate(t *testing.T) {
 }
 
 func TestChainInfoString(t *testing.T) {
-	c := &ChainInfo{Sets: 1, Root: "c4", Decision: &DumpDecision{Full: true, Reason: dumpReasonOverhead, OverheadMs: 530.3, PriceMs: 520}}
-	if got, want := c.String(), "chain_sets=1 full_dump=1 dump_reason=overhead chain_overhead_ms=530.3 full_dump_price_ms=520.0"; got != want {
+	c := &ChainInfo{Sets: 1, Root: "c4", Decision: &DumpDecision{Full: true, Reason: dumpReasonOverhead, OverheadMs: 530.3, PriceMs: 520,
+		RentMs: 610.25, NextLevelMs: 151}}
+	if got, want := c.String(), "chain_sets=1 full_dump=1 dump_reason=overhead chain_overhead_ms=530.3 full_dump_price_ms=520.0 chain_rent_ms=610.2 next_level_ms=151.0"; got != want {
 		t.Fatalf("String() = %q, want %q", got, want)
 	}
 	if got := (&ChainInfo{Sets: 3, Root: "c1"}).String(); got != "chain_sets=3 full_dump=0" || strings.Contains(got, "reason") {

@@ -3,10 +3,11 @@ package waypoint
 // Full or incremental dumps. With incremental_dumps on, a dump of a fork
 // that has a parent image set either extends the image chain of the fork's
 // base checkpoint or is a full dump that starts a new chain. It is full once
-// the overhead the chain has added since its full dump reaches
-// full_dump_ratio times the estimated extra time of a full dump, or once the
-// chain would exceed max_chain_sets. Both sides are measured on this host
-// from criu's stats-dump and stats-restore.
+// one more level would cost more than the chain's average per snapshot,
+// counting full_dump_ratio times the estimated extra time of a full dump
+// into that average (see replacementStat), or once the chain would exceed
+// max_chain_sets. Both sides are measured on this host from criu's
+// stats-dump and stats-restore.
 
 import (
 	"bufio"
@@ -41,10 +42,15 @@ type ChainInfo struct {
 type DumpDecision struct {
 	Full   bool   `json:"full"`
 	Reason string `json:"reason"`
-	// OverheadMs is the overhead the base checkpoint's chain has added since
-	// its full dump; PriceMs is the estimated extra time of a full dump.
-	OverheadMs float64 `json:"overhead_ms"`
-	PriceMs    float64 `json:"price_ms"`
+	// OverheadMs is the replacement statistic of the base checkpoint's chain
+	// (replacementStat), compared with the ratio times PriceMs, the
+	// estimated extra time of a full dump. RentMs is the overhead the chain
+	// has added since its full dump and NextLevelMs the predicted overhead
+	// of one more level.
+	OverheadMs  float64 `json:"overhead_ms"`
+	PriceMs     float64 `json:"price_ms"`
+	RentMs      float64 `json:"rent_ms"`
+	NextLevelMs float64 `json:"next_level_ms"`
 }
 
 // DumpDecision reasons.
@@ -52,7 +58,7 @@ const (
 	dumpReasonRatioZero    = "ratio_zero"     // full_dump_ratio is 0
 	dumpReasonUnknownChain = "unknown_chain"  // the base checkpoint's chain is not recorded
 	dumpReasonMaxSets      = "max_chain_sets" // the chain would exceed max_chain_sets
-	dumpReasonOverhead     = "overhead"       // the overhead reached the ratio times the price
+	dumpReasonOverhead     = "overhead"       // the replacement statistic reached the ratio times the price
 	dumpReasonNoPrice      = "no_price"       // no full dump measured yet; incremental
 	dumpReasonBelowPrice   = "below_price"    // incremental
 )
@@ -65,7 +71,8 @@ func (c *ChainInfo) String() string {
 	}
 	s := fmt.Sprintf("chain_sets=%d full_dump=%d", c.Sets, full)
 	if d := c.Decision; d != nil {
-		s += fmt.Sprintf(" dump_reason=%s chain_overhead_ms=%.1f full_dump_price_ms=%.1f", d.Reason, d.OverheadMs, d.PriceMs)
+		s += fmt.Sprintf(" dump_reason=%s chain_overhead_ms=%.1f full_dump_price_ms=%.1f chain_rent_ms=%.1f next_level_ms=%.1f",
+			d.Reason, d.OverheadMs, d.PriceMs, d.RentMs, d.NextLevelMs)
 	}
 	return s
 }
@@ -73,17 +80,22 @@ func (c *ChainInfo) String() string {
 // chainState is what the full-dump decision knows about the chain of a
 // fork's base checkpoint.
 type chainState struct {
-	Sets       int    // image sets of the base checkpoint; 0 if unknown
-	Root       string // the chain's full checkpoint
-	OverheadMs float64
-	PriceMs    float64
-	PriceKnown bool
+	Sets int    // image sets of the base checkpoint; 0 if unknown
+	Root string // the chain's full checkpoint
+	// OverheadMs is the replacement statistic, RentMs the summed overhead
+	// of the chain's levels and NextLevelMs the predicted overhead of one
+	// more level (replacementStat).
+	OverheadMs  float64
+	RentMs      float64
+	NextLevelMs float64
+	PriceMs     float64
+	PriceKnown  bool
 }
 
 // decideFullDump decides whether a dump that would extend the chain s is
 // full instead.
 func decideFullDump(s chainState, ratio float64, maxSets int) DumpDecision {
-	d := DumpDecision{OverheadMs: s.OverheadMs, PriceMs: s.PriceMs}
+	d := DumpDecision{OverheadMs: s.OverheadMs, PriceMs: s.PriceMs, RentMs: s.RentMs, NextLevelMs: s.NextLevelMs}
 	switch {
 	case ratio == 0:
 		d.Full, d.Reason = true, dumpReasonRatioZero
@@ -117,12 +129,13 @@ func (m *Manager) dumpParent(f *Fork) (string, chainState, *DumpDecision) {
 }
 
 // chainStateFrom walks from the base checkpoint to its chain's full
-// checkpoint. The overhead sums, over the checkpoints after the full one,
-// every restore's time above the full checkpoint's restore time per page
-// and every dump's memwrite time above the chain's first incremental dump's
-// per page written; restores by any fork count. The price is the full-dump
-// time per page times the base's pages scanned, minus the base's own dump
-// time if that dump was incremental.
+// checkpoint. Each checkpoint after the full one is a level of the chain;
+// its overhead is every restore's time above the full checkpoint's restore
+// time per page, plus its dump's memwrite time above the chain's first
+// incremental dump's per page written; restores by any fork count. The
+// overhead is then the replacement statistic over the levels. The price is
+// the full-dump time per page times the base's pages scanned, minus the
+// base's own dump time if that dump was incremental.
 func (m *Manager) chainStateFrom(baseID string) chainState {
 	base, err := m.loadMetadata(baseID)
 	if err != nil || base.Chain == nil || base.Chain.Sets < 1 {
@@ -154,14 +167,20 @@ func (m *Manager) chainStateFrom(baseID string) chainState {
 	if len(path) > 1 {
 		first = path[len(path)-2].Chain
 	}
-	for _, md := range path[:len(path)-1] {
+	levels := make([]levelCost, 0, len(path)-1) // oldest first
+	for i := len(path) - 2; i >= 0; i-- {
+		md := path[i]
+		var lc levelCost
 		if fullPages > 0 {
 			for _, s := range m.restoreSamples(md.ID) {
-				st.OverheadMs += s.RestoreMs - fullMs/fullPages*float64(s.Pages)
+				lc.RestoreMs += s.RestoreMs - fullMs/fullPages*float64(s.Pages)
+				lc.Restores++
 			}
 		}
-		st.OverheadMs += dumpOverheadMs(md.Chain, first)
+		lc.DumpMs = dumpOverheadMs(md.Chain, first)
+		levels = append(levels, lc)
 	}
+	st.RentMs, st.NextLevelMs, st.OverheadMs = replacementStat(levels)
 
 	if msPerPage, ok := m.fullDumpMsPerPage(); ok && base.Chain.PagesScanned > 0 {
 		st.PriceKnown = true
@@ -171,6 +190,94 @@ func (m *Manager) chainStateFrom(baseID string) chainState {
 		}
 	}
 	return st
+}
+
+// levelCost is the overhead one level of a chain has added: the restores of
+// its checkpoint above restores of the chain's full checkpoint, and its dump
+// above the chain's first incremental dump.
+type levelCost struct {
+	RestoreMs float64 // summed over its restores
+	Restores  int
+	DumpMs    float64
+}
+
+// replacementStat returns, for the levels 1..k of a chain (oldest first),
+// their summed overhead, the predicted overhead of level k+1 and the
+// replacement statistic.
+//
+// A cycle of a full dump (level 0, no overhead) and the incremental levels
+// 1..n-1 costs (cC + c_1 + ... + c_{n-1}) / n per snapshot, C being the
+// extra time of the full dump and c the ratio. One more level lowers that
+// average exactly when its overhead c_n is below it. So level k+1 is better
+// a full dump once
+//
+//	sum_{j=0..k} (c_{k+1} - c_j) >= cC,    c_0 = 0.
+//
+// The overheads are modelled as a line c_j = A + Bj, j >= 1: the overhead
+// per restore fitted over the levels' restores (weighted by their number)
+// times the mean number of restores per level, plus the dump overhead
+// fitted over the levels, which keeps a level that has not been forked yet
+// from reading as a cheap one. With the line, the left side is
+// A + B(k+1)(k+2)/2: a constant overhead per level, such as criu's slower
+// restore from any chain, counts once, since a full dump does not remove it
+// from the next level, and only the growth B makes the chain worth cutting,
+// with the period sqrt(2(cC - A)/B). With a single level, A is its overhead
+// and B is 0.
+func replacementStat(levels []levelCost) (rentMs, nextMs, stat float64) {
+	k := len(levels)
+	if k == 0 {
+		return 0, 0, 0
+	}
+	var xs, perRestore, restores, dump, ones []float64
+	total := 0
+	for i, l := range levels {
+		j := float64(i + 1)
+		rentMs += l.RestoreMs + l.DumpMs
+		if l.Restores > 0 {
+			xs = append(xs, j)
+			perRestore = append(perRestore, l.RestoreMs/float64(l.Restores))
+			restores = append(restores, float64(l.Restores))
+			total += l.Restores
+		}
+		dump = append(dump, l.DumpMs)
+		ones = append(ones, 1)
+	}
+	ra, rb := fitLine(xs, perRestore, restores)
+	levelXs := make([]float64, k)
+	for i := range levelXs {
+		levelXs[i] = float64(i + 1)
+	}
+	da, db := fitLine(levelXs, dump, ones)
+	meanRestores := float64(total) / float64(k)
+	a, b := meanRestores*ra+da, meanRestores*rb+db
+	fk := float64(k)
+	return rentMs, a + b*(fk+1), a + b*(fk+1)*(fk+2)/2
+}
+
+// fitLine returns the weighted least-squares line y = a + bx; with a single
+// distinct x, the weighted mean and slope 0; with no weight, 0 and 0.
+func fitLine(xs, ys, ws []float64) (a, b float64) {
+	var sw, sx, sy float64
+	for i := range xs {
+		sw += ws[i]
+		sx += ws[i] * xs[i]
+		sy += ws[i] * ys[i]
+	}
+	if sw == 0 {
+		return 0, 0
+	}
+	mx, my := sx/sw, sy/sw
+	var sxx, sxy float64
+	for i := range xs {
+		dx := xs[i] - mx
+		sxx += ws[i] * dx * dx
+		sxy += ws[i] * dx * (ys[i] - my)
+	}
+	if sxx == 0 {
+		return my, 0
+	}
+	b = sxy / sxx
+	return my - b*mx, b
 }
 
 // dumpOverheadMs is the memwrite time of dump c above that of the chain's
