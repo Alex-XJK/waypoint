@@ -585,6 +585,7 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 		_ = os.RemoveAll(d.overlayDir)
 	}()
 
+	// TODO: openroot will report error on absolute symlinks (doesn't resolve as relative to container root)
 	leftRoot, err := os.OpenRoot(d.leftMountPoint)
 	if err != nil {
 		return err

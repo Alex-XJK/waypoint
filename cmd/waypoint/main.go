@@ -110,6 +110,7 @@ func main() {
 		fmt.Println("  exec <session> <fork-id> -- '<command>'      - Run one bash command line in a fork")
 		fmt.Println("  cp <session> <source> <destination>          - Copy host path <-> fork-id:/path")
 		fmt.Println("  diff <session> <checkpoint-id> <checkpoint-id> [--dir D] - Show diff between two checkpoints (--dir: restrict to directory D)")
+		fmt.Println("  blame <session> <checkpoint-id> <path> 		- Blame a path from a checkpoint through its ancestors")
 		fmt.Println("  snapshot <session> <fork-id> <checkpoint-id> [--park] - Snapshot a live fork (--park: don't resume it)")
 		fmt.Println("  create <session> <checkpoint-id>             - Legacy alias for checkpoint")
 		fmt.Println("  fork-exec <session> <fork-id> <command>      - Legacy alias for exec")
@@ -573,15 +574,23 @@ func main() {
 		ckptIDFirst := os.Args[3]
 		ckptIDSecond := os.Args[4]
 		targetDir := ""
-		if len(os.Args) > 5 {
-			if os.Args[5] == "--dir" {
-				if len(os.Args) < 7 {
-					fmt.Println("Error: --dir requires a value (restricted directory name)")
+
+		// TODO: prevent duplicate of same flag? eg. --dir app --dir home (list/fork don't handle this either)
+		for i := 5; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--dir":
+				if i+1 >= len(os.Args) {
+					fmt.Println("Error: --dir requires a value")
 					os.Exit(1)
 				}
-				targetDir = os.Args[6]
+				targetDir = os.Args[i+1]
+				i++
+			default:
+				fmt.Printf("Error: unknown flag: %s\n", os.Args[i])
+				os.Exit(1)
 			}
 		}
+
 		manager, err := waypoint.LoadManager(sessionID)
 		if err != nil {
 			fmt.Printf("Error loading session: %v\n", err)
