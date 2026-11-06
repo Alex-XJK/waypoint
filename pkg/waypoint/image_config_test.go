@@ -22,6 +22,18 @@ func TestInspectImageConfigParsesOCIConfig(t *testing.T) {
 	}
 }
 
+func TestInspectImageConfigParsesCommand(t *testing.T) {
+	const payload = `{"OCIv1":{"config":{"Entrypoint":["/entry.sh"],"Cmd":["serve","-p","80"]}}}`
+	run := func(*exec.Cmd, bool) (string, error) { return payload, nil }
+	cfg, err := inspectImageConfig("img:1", run)
+	if err != nil {
+		t.Fatalf("inspectImageConfig: %v", err)
+	}
+	if strings.Join(cfg.Entrypoint, " ") != "/entry.sh" || strings.Join(cfg.Cmd, " ") != "serve -p 80" {
+		t.Fatalf("Entrypoint = %q Cmd = %q", cfg.Entrypoint, cfg.Cmd)
+	}
+}
+
 func TestInspectImageConfigRejectsGarbage(t *testing.T) {
 	run := func(*exec.Cmd, bool) (string, error) { return "not json", nil }
 	if _, err := inspectImageConfig("img:1", run); err == nil {

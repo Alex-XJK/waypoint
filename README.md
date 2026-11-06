@@ -221,7 +221,8 @@ including `main`, gets its own network namespace, so forks of one checkpoint can
 all listen on the same port; outbound traffic goes through a
 [pasta](https://passt.top) process per fork (package `passt`). A session keeps
 the mode it was created with. Private-mode forks can also be connected to each
-other across sessions; see [Connect Forks of Different Sessions](#41-connect-forks-of-different-sessions).
+other across sessions; see [Connect Forks of Different Sessions](#41-connect-forks-of-different-sessions)
+and [Multi-Service Projects with Compose Files](#9-multi-service-projects-with-compose-files).
 Where SELinux confines pasta (Fedora, for example), it cannot open Waypoint's
 network namespaces; `sudo ./setup check` detects this and prints a workaround.
 
@@ -470,6 +471,61 @@ If this basic version of the cleanup command fails, **waypoint** will automatica
 - `--force` to forcefully remove and unmount all related resources.
 
 For debugging, set `preserve_session_on_cleanup` to `true` in the config file, or set `WAYPOINT_PRESERVE_SESSION_ON_CLEANUP=true`. Cleanup will still stop processes and unmount resources, but it will keep the session directory and session registry entry for inspection.
+
+### 9. Multi-Service Projects with Compose Files
+
+`waypoint compose` runs a compose file as a *project*: one session per service,
+all in `private` network mode, connected by a project network on which each
+service is reachable by its name. A whole project is checkpointed and forked as
+one unit, and connections between its services survive both:
+
+```bash
+cd my-project                    # holds compose.yaml
+sudo waypoint compose up         # or: up -f FILE [-f OVERRIDE] -p NAME
+sudo waypoint compose exec my-project main web -- 'curl -s http://api:8000/health'
+sudo waypoint compose checkpoint my-project ready
+sudo waypoint compose fork my-project ready --n 4      # prints four replica IDs
+sudo waypoint compose exec my-project r-1a2b3c4d web -- 'run-episode'
+sudo waypoint compose snapshot my-project r-1a2b3c4d step-1 [--park]
+sudo waypoint compose list my-project [--json]
+sudo waypoint compose destroy my-project r-1a2b3c4d
+sudo waypoint compose suspend my-project               # end all replicas, keep checkpoints
+sudo waypoint compose cleanup my-project [--force]
+```
+
+- A **replica** is one live copy of the whole project: the fork of the same
+  name in every service's session. `up` starts replica `main`; `fork` creates
+  more from a group checkpoint. Each replica has its own network, and every
+  replica gives each service the same address, so a forked service still finds
+  the connections it had.
+- A **group checkpoint** is a checkpoint of the same name in every service's
+  session. While it is taken, traffic between the replica's services is held
+  back, so the services' snapshots agree on what was sent and received; TCP
+  retransmits what was held, and traffic may pause for about a second after.
+  Connections to the outside world (through pasta) are not preserved by a fork.
+- The member sessions are ordinary sessions (`compose list` shows their IDs), so
+  `waypoint exec`, `cp`, `info`, and `list` work on them directly. Commands that
+  change forks, checkpoints, or the session itself (`fork`, `checkpoint`,
+  `snapshot`, `destroy`, `suspend`, `cleanup`) refuse a member session, as does
+  `--attach` onto a project's fabric: change a project through `compose`, so
+  that its services stay in step. (A lone fork of one service could not restore
+  its connections, and one attached to a live replica's fabric would collide
+  with that replica's addresses.)
+
+Supported compose settings: `image`, `build` (`context`, `dockerfile`, `args`,
+`target`), `command`, `entrypoint` (with the image's `ENTRYPOINT`/`CMD` as
+defaults, as in Docker), `environment` (and `env_file`), `working_dir`, and
+`depends_on` (start order only). Interpolation, `.env`, overrides, `extends`,
+and profiles are handled by [compose-go](https://github.com/compose-spec/compose-go).
+Each service's command runs as a background job of its persistent shell, with
+output in `/.waypoint/service.log`; its hostname is the service name. Other
+settings (`ports`, `volumes`, `healthcheck`, `restart`, extra networks,
+resource limits, ...) are reported as warnings and ignored. Two extensions:
+`x-waypoint-rootfs: <dir>` on a service uses a directory as its rootfs, as for
+`init`, instead of an image; `x-waypoint-subnet: <cidr>` at the top level sets
+the project subnet (default `10.89.0.0/24`), which must not overlap the host's
+networks. Go 1.24+ programs listen with MPTCP by default, which CRIU cannot
+checkpoint; set `GODEBUG=multipathtcp=0` in their `environment`.
 
 ## Demo 🎥
 

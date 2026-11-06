@@ -117,7 +117,11 @@ Two binaries, one library:
   `./setup check`, not at runtime.
 - `fabric.go` — fabric attachment (see [Fabric attachment](#fabric-attachment)):
   `NetworkAttachment`, `CheckNetworkAttachment`, `AttachMain`, the veth
-  attach/detach, and a minimal rtnetlink client over `x/sys/unix`.
+  attach/detach, fabric creation and barrier, and a minimal rtnetlink client
+  over `x/sys/unix`.
+- `guest.go` — `GuestOptions` / `SetGuestOptions` (guest env, working
+  directory, hostname, `/etc/hosts` lines, applied by `StartShell`) and
+  `ImageCommand` (a built image's `ENTRYPOINT`/`CMD`).
 - `netns.go` — `private` network mode: `newForkNetwork` (create a fork's
   network namespace, pinned under `/run/waypoint`, and start its pasta),
   `releaseNetwork` / `sweepSessionNetwork` (teardown), `startInNetNS` (start
@@ -182,9 +186,12 @@ Two binaries, one library:
     fork-<fork>.lock        stable per-fork flock
 
 /tmp/waypoint-sessions-info/<session>.json   global registry (find a session)
+/tmp/waypoint-sessions-info/groups/<project>/  compose project: group.json,
+                                               replicas/, checkpoints/, locks/
 /dev/shm/waypoint/<session>/<ckpt>/          tmpfs images (tmpfs_images only)
 /run/waypoint/<session>/<fork>/netns         network namespace pin, and
 /run/waypoint/<session>/<fork>/pasta.pid       pasta's PID (private network mode)
+/run/waypoint/groups/<project>/<replica>/netns compose replica's fabric pin
 ```
 
 `/tmp/waypoint-sessions/<session>/temp/shell_<session>.sock` is the canonical
@@ -424,7 +431,65 @@ asynchronous namespace teardown) so the address stops answering at once. The
 fabric itself, its addressing, and any barrier around a group snapshot belong
 to the caller; Waypoint only validates that the fabric is a network namespace
 with `br0` and that the subnet does not overlap a host network (pasta copies
-those into the fork). `scripts/test-fabric.sh` plays the fabric owner.
+those into the fork). For owners that want them, `CreateFabric`,
+`SetFabricBarrier`, and `ReleaseFabric` create such a namespace, hold traffic
+on it, and unpin it: the barrier takes `br0` down, which disables its ports, so
+frames between attached forks are dropped (and later retransmitted by TCP); a
+port added during the barrier joins disabled. `scripts/test-fabric.sh` plays
+the fabric owner with its own nft rule instead.
+
+## Compose projects
+
+`pkg/group` is a coordinator built from sessions, not beside them; `pkg/compose`
+turns a compose file into its `group.Spec`, and is the only package importing
+compose-go. `cmd/waypoint/compose.go` is the `waypoint compose` CLI.
+
+```
+project P            = one private-mode session per service + group.json
+                       (service -> session ID, fabric address)
+replica R            = fork R in every member session, attached to fabric R;
+                       `up` starts R = main (every member's main fork)
+group checkpoint C   = checkpoint C in every member session + checkpoints/C.json
+```
+
+Every replica's fabric gives each service the same address (the subnet's .2,
+.3, ... in service order), and each service's `/etc/hosts` maps every service
+name to its address, so a connection a service holds at checkpoint time finds
+the same address and the same peer in any replica forked from it.
+
+- **up**: create the project record and fabric `main`, then, in parallel per
+  service, a session (`NewManagerWithNetwork(private)`, `SetGroup`,
+  `AttachMain`, `SetGuestOptions` for environment, working directory,
+  hostname, and hosts), built or initialized as for `build`/`init`. Once every
+  shell is up, each service's command (compose `entrypoint`/`command` over the
+  image's `ENTRYPOINT`/`CMD`) is started in dependency order as a background
+  job of its shell, so it is part of every checkpoint. A failure removes
+  everything created.
+- **snapshot/checkpoint**: under the replica lock, claim the checkpoint ID in
+  the manifest and every member, raise the fabric barrier, snapshot (or park)
+  every member in parallel, lower it. All-or-nothing: if a member fails, the
+  manifest is `failed` and the replica `degraded`; the member checkpoints that
+  succeeded remain (checkpoints are immutable).
+- **fork**: claim the replica IDs under the group lock, then per replica in
+  parallel: create its fabric with the barrier raised, fork every member
+  attached to it, lower the barrier. A replica that fails is torn down,
+  destroying only the member forks it created.
+- **destroy / suspend / cleanup** fan out to the members' `DestroyFork`,
+  `Suspend`, `Cleanup`, and release the replicas' fabrics.
+
+Member sessions record their project and service (`SessionInfo.Group`,
+`.Service`). The session CLI commands that change forks, checkpoints, or the
+session's lifetime refuse a session that its project's `group.json` still
+lists (`group.MemberService`), and `--attach` refuses a namespace under
+`<net runtime>/groups/` (`group.IsProjectFabric`). The guard is in the CLI, not
+in `pkg/waypoint`, which `pkg/group` drives directly; a session whose project
+was removed or recreated without it is standalone again.
+
+Locks: `groups/P/locks/group.lock` guards short record transitions;
+`replica-R.lock` is held around the long work on one replica; members take
+their own session and fork locks inside. The group lock is never held while a
+replica lock is taken. Because restores re-exec the running binary through
+the hidden entry points, the coordinator runs inside `waypoint` itself.
 
 ## Three flows end to end
 

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -22,9 +23,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// BuildEnvironment builds a rootfs from a Dockerfile, mounts the session
-// overlay on top of it, and starts the shell inside.
+// BuildEnvironment builds a rootfs from dockerfileDir/Dockerfile, mounts the
+// session overlay on top of it, and starts the shell inside.
 func (m *Manager) BuildEnvironment(dockerfileDir string, quiet bool) (string, int, error) {
+	return m.BuildEnvironmentFrom(BuildSpec{Context: dockerfileDir}, quiet)
+}
+
+// BuildEnvironmentFrom is BuildEnvironment for a full build specification.
+func (m *Manager) BuildEnvironmentFrom(spec BuildSpec, quiet bool) (string, int, error) {
 	originalDir := filepath.Join(m.baseDir, "original")
 
 	// Ensure originalDir is clean
@@ -37,12 +43,13 @@ func (m *Manager) BuildEnvironment(dockerfileDir string, quiet bool) (string, in
 
 	// Build from Dockerfile to create a virtual system environment
 	var imageConfig ImageConfig
-	if err := BuildFromDockerfile(dockerfileDir, originalDir, quiet, &imageConfig); err != nil {
+	if err := BuildImage(spec, originalDir, quiet, &imageConfig); err != nil {
 		return "", 0, fmt.Errorf("failed to build from Dockerfile: %w", err)
 	}
 
 	m.imageEnv = imageConfig.Env
 	m.imageWorkDir = imageConfig.WorkingDir
+	m.imageEntrypoint, m.imageCmd = imageConfig.Entrypoint, imageConfig.Cmd
 	m.originalDir = originalDir
 
 	// Initialize overlay environment on top of it
@@ -98,7 +105,46 @@ func imageRefComponent(s string) string {
 }
 
 func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool, cfg *ImageConfig) error {
-	imageTag := fmt.Sprintf("waypoint_%s:%d", imageRefComponent(filepath.Base(dockerfileDir)), time.Now().Unix())
+	return BuildImage(BuildSpec{Context: dockerfileDir}, workspaceDir, quiet, cfg)
+}
+
+// BuildSpec describes a buildah build. Dockerfile is relative to Context
+// unless absolute, and defaults to "Dockerfile"; Args are --build-arg values.
+type BuildSpec struct {
+	Context    string
+	Dockerfile string
+	Args       map[string]string
+	Target     string
+}
+
+// buildahBudArgs returns the `buildah bud` arguments for spec, tagging imageTag.
+func buildahBudArgs(spec BuildSpec, imageTag string) []string {
+	dockerfile := spec.Dockerfile
+	if dockerfile == "" {
+		dockerfile = "Dockerfile"
+	}
+	if !filepath.IsAbs(dockerfile) {
+		dockerfile = filepath.Join(spec.Context, dockerfile)
+	}
+	args := []string{"bud", "-t", imageTag, "-f", dockerfile}
+	keys := make([]string, 0, len(spec.Args))
+	for k := range spec.Args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "--build-arg", k+"="+spec.Args[k])
+	}
+	if spec.Target != "" {
+		args = append(args, "--target", spec.Target)
+	}
+	return append(args, spec.Context)
+}
+
+// BuildImage builds spec with buildah and copies the image's rootfs into
+// workspaceDir; cfg, if set, receives the image's runtime configuration.
+func BuildImage(spec BuildSpec, workspaceDir string, quiet bool, cfg *ImageConfig) error {
+	imageTag := fmt.Sprintf("waypoint_%s:%d", imageRefComponent(filepath.Base(spec.Context)), time.Now().Unix())
 
 	run := func(cmd *exec.Cmd, capture bool) (string, error) {
 		var stdout bytes.Buffer
@@ -122,9 +168,7 @@ func BuildFromDockerfile(dockerfileDir, workspaceDir string, quiet bool, cfg *Im
 	}
 
 	// 1. buildah bud
-	if _, err := run(exec.Command(
-		"buildah", "bud", "-t", imageTag, "-f", filepath.Join(dockerfileDir, "Dockerfile"), dockerfileDir,
-	), false); err != nil {
+	if _, err := run(exec.Command("buildah", buildahBudArgs(spec, imageTag)...), false); err != nil {
 		return err
 	}
 
@@ -308,9 +352,13 @@ var waypointPlumbingEnv = []string{
 }
 
 // ImageConfig is the part of a built image's OCI config the session adopts.
+// Entrypoint and Cmd are not run by the session itself; they are the image's
+// default command, for callers that start one (see ImageCommand).
 type ImageConfig struct {
 	Env        []string
 	WorkingDir string
+	Entrypoint []string
+	Cmd        []string
 }
 
 type imageInspect struct {
@@ -318,6 +366,8 @@ type imageInspect struct {
 		Config struct {
 			Env        []string `json:"Env"`
 			WorkingDir string   `json:"WorkingDir"`
+			Entrypoint []string `json:"Entrypoint"`
+			Cmd        []string `json:"Cmd"`
 		} `json:"config"`
 	} `json:"OCIv1"`
 }
@@ -338,17 +388,22 @@ func inspectImageConfig(imageTag string, run func(*exec.Cmd, bool) (string, erro
 	return ImageConfig{
 		Env:        inspected.OCIv1.Config.Env,
 		WorkingDir: inspected.OCIv1.Config.WorkingDir,
+		Entrypoint: inspected.OCIv1.Config.Entrypoint,
+		Cmd:        inspected.OCIv1.Config.Cmd,
 	}, nil
 }
 
 // sessionEnv assembles the environment bash_init is launched with: the fixed
-// OCI-style base, then the built image's env, then the unattended settings,
-// then Waypoint's own variables.
+// OCI-style base, then the built image's env, then the caller's guest env
+// (SetGuestOptions), then the unattended settings, then Waypoint's own
+// variables.
 //
 // Order is the whole design. Each layer overrides the one before it:
 //
 //   - the image overrides the base, so a `FROM python:3.12` PATH wins and an
 //     image declaring none simply keeps the default;
+//   - the guest env overrides the image, as a compose service's
+//     `environment` overrides its image's ENV;
 //   - the unattended settings override the image, because they are an
 //     anti-hang floor rather than a preference -- a fork's shell is driven
 //     over a socket, so an image that put PAGER back to less would hang
@@ -363,11 +418,15 @@ func inspectImageConfig(imageTag string, run func(*exec.Cmd, bool) (string, erro
 // handling.
 func (m *Manager) sessionEnv() []string {
 	layered := make([]string, 0,
-		len(baseGuestEnv)+len(m.imageEnv)+len(unattendedGuestEnv)+len(waypointPlumbingEnv))
+		len(baseGuestEnv)+len(m.imageEnv)+len(m.guest.Env)+len(unattendedGuestEnv)+len(waypointPlumbingEnv)+1)
 	layered = append(layered, baseGuestEnv...)
 	layered = append(layered, m.imageEnv...)
+	layered = append(layered, m.guest.Env...)
 	layered = append(layered, unattendedGuestEnv...)
 	layered = append(layered, waypointPlumbingEnv...)
+	if m.guest.Hostname != "" {
+		layered = append(layered, "WAYPOINT_HOSTNAME="+m.guest.Hostname)
+	}
 
 	// Keep each key's final value, at the position that value was set.
 	winner := make(map[string]int, len(layered))
@@ -432,7 +491,17 @@ func (m *Manager) StartShell(workDir string) (int, string, error) {
 	// host. A rootfs missing one fails the startup handshake, and the shell
 	// log surfaced below carries the loader's error naming the library.
 
-	cmd := exec.Command(bashInitSrc, canonicalSocketPath, workDir, m.imageWorkDir)
+	if len(m.guest.Hosts) > 0 {
+		if err := appendGuestHosts(workDir, m.guest.Hosts); err != nil {
+			return ShellNotEnabled, "", err
+		}
+	}
+	guestWorkDir := m.imageWorkDir
+	if m.guest.WorkDir != "" {
+		guestWorkDir = m.guest.WorkDir
+	}
+
+	cmd := exec.Command(bashInitSrc, canonicalSocketPath, workDir, guestWorkDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: uintptr(unix.CLONE_NEWPID | unix.CLONE_NEWNS | unix.CLONE_NEWIPC | unix.CLONE_NEWUTS),
 		Setsid:     true, // new session = no controlling TTY

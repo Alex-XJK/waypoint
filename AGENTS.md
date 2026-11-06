@@ -47,7 +47,8 @@ sources disagree, especially namespace and platform assumptions.
 | `pkg/waypoint/manager.go`, `config.go` | Session registry, paths, configuration, cross-process locks, and atomic record writes. |
 | `pkg/waypoint/checkpoint.go`, `fork.go` | Checkpoint DAG, live fork lifecycle, materialization, snapshotting, and exec client. |
 | `pkg/waypoint/build.go`, `overlay.go`, `criu.go` | Rootfs staging/Buildah builds, shell startup, OverlayFS, and CRIU orchestration. |
-| `pkg/waypoint/netns.go`, `fabric.go` | Private network mode (per-fork netns + pasta) and fabric attachment. |
+| `pkg/waypoint/netns.go`, `fabric.go`, `guest.go` | Private network mode (per-fork netns + pasta), fabric attachment, and guest options. |
+| `pkg/group/`, `pkg/compose/`, `cmd/waypoint/compose.go` | Compose projects: the multi-session coordinator, compose-file translation (the only compose-go importer), and its CLI. |
 | `pkg/waypoint/copy.go`, `inspect.go`, `cleanup.go` | Fork-aware file transfer, runtime inspection, and process/mount teardown. |
 | `pkg/waypoint/imagestore.go`, `criustats.go` | Optional tmpfs image storage/flush and phase timing. |
 | `cmd/bash-init/` | Namespace init and persistent shell supervisor; exec protocol server. |
@@ -108,7 +109,24 @@ waypoint info [session [checkpoint-id]]
 waypoint suspend <session>
 waypoint cleanup <session> [--force]
 waypoint version
+waypoint compose up [-f FILE]... [-p NAME] [--quiet]
+waypoint compose checkpoint <project> <checkpoint-id>
+waypoint compose snapshot <project> <replica> <checkpoint-id> [--park]
+waypoint compose fork <project> <checkpoint-id> [--id ID] [--n K]
+waypoint compose exec <project> <replica> <service> -- <command>
+waypoint compose destroy <project> <replica>
+waypoint compose suspend <project>
+waypoint compose list [project] [--json]
+waypoint compose cleanup <project> [--force]
 ```
+
+A compose project's state is its member sessions plus small records under the
+session registry (`groups/<project>/`); keep replica changes going through
+`pkg/group` so members stay in step, and keep compose-go out of every package
+but `pkg/compose`. The session commands that mutate forks, checkpoints, or
+session lifetime refuse a live project's member sessions and `--attach` onto a
+project fabric; new mutating session commands should load through the same
+guard (`loadStandaloneSession`).
 
 `checkpoint` snapshots `main`; `snapshot` selects a fork. `main` cannot be parked.
 `destroy` removes a selected fork; session teardown uses `suspend` or `cleanup`.
@@ -198,6 +216,10 @@ Choose validation for the affected behavior:
 - For changes to private network mode, also run `sudo ./scripts/test-private-network.sh`
   (per-fork ports, egress through pasta, and namespace lifecycle across snapshot,
   park, destroy, suspend, and cleanup).
+- For changes to `pkg/group`, `pkg/compose`, the compose CLI, or guest options,
+  also run `sudo ./scripts/test-compose.sh` (a two-service project: name
+  resolution, guest config, an optional Buildah build, group checkpoints,
+  forks, park, destroy, suspend, cleanup, and connection survival).
 - For changes to fabric attachment, also run `sudo ./scripts/test-fabric.sh`
   (TCP connections between attached forks of two sessions across snapshot,
   fork, park, suspend, and cleanup; refusals; fabric ports removed on release).

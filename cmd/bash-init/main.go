@@ -547,7 +547,11 @@ func setupNamespaceRuntime(chrootDir string) error {
 	// The session owns a fresh UTS namespace (CLONE_NEWUTS at launch), so
 	// this names only the sandbox. Without the namespace, guests would
 	// report — or as root, rename — the host's hostname.
-	if err := unix.Sethostname([]byte("waypoint")); err != nil {
+	hostname := os.Getenv("WAYPOINT_HOSTNAME")
+	if hostname == "" {
+		hostname = "waypoint"
+	}
+	if err := unix.Sethostname([]byte(hostname)); err != nil {
 		return fmt.Errorf("set sandbox hostname failed: %w", err)
 	}
 

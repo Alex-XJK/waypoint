@@ -4,6 +4,9 @@
 - Added `--attach <fabric-netns>=<ipv4/prefix>` to `init --shell`, `build`, and `fork` (`private` network mode): the fork is connected by a veth pair to the bridge `br0` of a caller-owned network namespace, so forks of different sessions can hold TCP connections that survive snapshot and fork. Destroy, park, suspend, and cleanup detach it.
 - `setup check` now verifies that pasta can serve a Waypoint network namespace, and explains the SELinux workaround where pasta is confined.
 - Added `scripts/test-fabric.sh`, a runtime test of connected forks across snapshot, fork, park, suspend, and cleanup.
+- Added `waypoint compose` (`up`, `checkpoint`, `snapshot`, `fork`, `exec`, `destroy`, `list`, `suspend`, `cleanup`): a compose file becomes a project of one private-mode session per service on a shared fabric, reachable by service name; projects are checkpointed behind a fabric barrier and forked into replicas whose inter-service TCP connections survive. Compose files are parsed with compose-go; unsupported settings are warned about and ignored. `x-waypoint-rootfs` and `x-waypoint-subnet` extensions. Session commands that change forks, checkpoints, or the session (`fork`, `checkpoint`, `snapshot`, `destroy`, `suspend`, `cleanup`) refuse a project's member sessions, and `--attach` refuses a project's fabric.
+- `build` sessions now record the image's `ENTRYPOINT`/`CMD`; sessions can be given guest environment, working directory, hostname, and `/etc/hosts` entries (`Manager.SetGuestOptions`).
+- Added `scripts/test-compose.sh`.
 
 ## v0.7.1 — Per-Fork Network Namespaces
 **Private networking for concurrent forks, with restore and copy fixes**

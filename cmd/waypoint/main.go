@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Alex-XJK/waypoint/pkg/group"
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
 
@@ -102,6 +103,10 @@ func attachFlag(args []string, i int) waypoint.NetworkAttachment {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
+	if group.IsProjectFabric(a.FabricNS) {
+		fmt.Printf("Error: %s is a compose project's fabric; its addresses belong to the project's replicas\n", a.FabricNS)
+		os.Exit(1)
+	}
 	return a
 }
 
@@ -115,6 +120,35 @@ func checkAttach(a *waypoint.NetworkAttachment) {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// loadStandaloneSession loads a session for a command that changes its forks,
+// checkpoints, or lifetime. A compose project's member session is refused:
+// its forks are replicas shared with the other services, so changing one
+// member alone desynchronizes the project, and a lone fork either fails to
+// restore its connections or collides with a live replica's addresses.
+// Members of a project that no longer exists are standalone again.
+func loadStandaloneSession(command, sessionID string) *waypoint.Manager {
+	manager, err := waypoint.LoadManager(sessionID)
+	if err != nil {
+		fmt.Printf("Error loading session: %v\n", err)
+		os.Exit(1)
+	}
+	project, _ := manager.Group()
+	if project == "" {
+		return manager
+	}
+	service, err := group.MemberService(project, sessionID)
+	if err != nil {
+		fmt.Printf("Error checking compose project %s: %v\n", project, err)
+		os.Exit(1)
+	}
+	if service != "" {
+		fmt.Printf("Error: session %s is service %q of compose project %s; use `waypoint compose %s %s ...` instead\n",
+			sessionID, service, project, command, project)
+		os.Exit(1)
+	}
+	return manager
 }
 
 // attachMain applies an --attach value to a new session's main fork.
@@ -167,6 +201,7 @@ func main() {
 		fmt.Println("  suspend <session>                            - End all live forks; keep checkpoints on disk")
 		fmt.Println("  cleanup <session> [--force]                  - Clean up session")
 		fmt.Println("  info [session [checkpoint-id]]               - Show system, session, or checkpoint info")
+		fmt.Println("  compose <command> [args...]                  - Multi-session projects from compose files")
 		fmt.Println("  version                                      - Show version")
 		fmt.Println()
 		fmt.Printf("Version: %s, DAPLab\n", Version)
@@ -328,11 +363,7 @@ func main() {
 		sessionID := os.Args[2]
 		checkpointID := os.Args[3]
 
-		manager, err := waypoint.LoadManager(sessionID)
-		if err != nil {
-			fmt.Printf("Error loading session: %v\n", err)
-			os.Exit(1)
-		}
+		manager := loadStandaloneSession("checkpoint", sessionID)
 
 		ckpt, err := manager.SnapshotFork(waypoint.MainForkID, checkpointID)
 		if err != nil {
@@ -395,11 +426,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		manager, err := waypoint.LoadManager(sessionID)
-		if err != nil {
-			fmt.Printf("Error loading session: %v\n", err)
-			os.Exit(1)
-		}
+		manager := loadStandaloneSession("fork", sessionID)
 		results := forkCheckpointsConcurrently(count, func(_ int) (*waypoint.Fork, error) {
 			spec := waypoint.ForkSpec{Attach: attach}
 			if forkID != "" {
@@ -425,6 +452,9 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "compose":
+		runCompose(os.Args[2:])
+
 	case "fork-exec":
 		// Legacy alias: same contract as exec, minus the `--`.
 		if len(os.Args) < 4 {
@@ -446,11 +476,7 @@ func main() {
 		sessionID := os.Args[2]
 		forkID := os.Args[3]
 
-		manager, err := waypoint.LoadManager(sessionID)
-		if err != nil {
-			fmt.Printf("Error loading session: %v\n", err)
-			os.Exit(1)
-		}
+		manager := loadStandaloneSession("destroy", sessionID)
 		if err := manager.DestroyFork(forkID); err != nil {
 			fmt.Printf("Error destroying fork: %v\n", err)
 			os.Exit(1)
@@ -473,12 +499,9 @@ func main() {
 		}
 		sessionID, forkID, checkpointID := args[0], args[1], args[2]
 
-		manager, err := waypoint.LoadManager(sessionID)
-		if err != nil {
-			fmt.Printf("Error loading session: %v\n", err)
-			os.Exit(1)
-		}
+		manager := loadStandaloneSession("snapshot", sessionID)
 		var ckpt *waypoint.Checkpoint
+		var err error
 		if park {
 			ckpt, err = manager.ParkFork(forkID, checkpointID)
 		} else {
@@ -583,11 +606,7 @@ func main() {
 			fmt.Println("Usage: suspend <session>")
 			os.Exit(1)
 		}
-		manager, err := waypoint.LoadManager(os.Args[2])
-		if err != nil {
-			fmt.Printf("Error loading session: %v\n", err)
-			os.Exit(1)
-		}
+		manager := loadStandaloneSession("suspend", os.Args[2])
 		if err := manager.Suspend(); err != nil {
 			fmt.Printf("Error suspending session: %v\n", err)
 			os.Exit(1)
@@ -612,11 +631,7 @@ func main() {
 			}
 		}
 
-		manager, err := waypoint.LoadManager(sessionID)
-		if err != nil {
-			fmt.Printf("Error loading session: %v\n", err)
-			os.Exit(1)
-		}
+		manager := loadStandaloneSession("cleanup", sessionID)
 
 		if force {
 			if err := manager.CleanupForce(); err != nil {

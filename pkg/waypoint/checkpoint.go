@@ -7,6 +7,7 @@ package waypoint
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -50,6 +51,9 @@ type Checkpoint struct {
 	CriuPath string
 	Metadata *Metadata
 }
+
+// ErrForkExists reports a fork ID that is already taken in the session.
+var ErrForkExists = errors.New("already exists")
 
 // ForkSpec describes a fork to be materialized. Attach, in private network
 // mode, connects the fork to a fabric before it is restored, so that
@@ -217,7 +221,7 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 			return err
 		}
 		if _, err := os.Stat(f.RootDir); err == nil {
-			return fmt.Errorf("fork %s already exists", f.ID)
+			return fmt.Errorf("fork %s %w", f.ID, ErrForkExists)
 		} else if !os.IsNotExist(err) {
 			return err
 		}

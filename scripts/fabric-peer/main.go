@@ -7,8 +7,8 @@
 //   - bulk-server/bulk-client: a ~12 MB/s stream of counters, so socket queues
 //     hold unacknowledged data when a checkpoint is taken.
 //
-// Status goes to files under /tmp. Nothing reconnects: a broken connection
-// stays broken and visible. No deadlines either: they are timer-based and
+// Status goes to files under /tmp. Clients retry their first dial, but
+// nothing reconnects: a broken connection stays broken and visible. No deadlines either: they are timer-based and
 // would fire spuriously after a restore.
 package main
 
@@ -77,8 +77,22 @@ func server(addr string) {
 	}
 }
 
+// dial retries for up to 10s, since a peer started at the same time may not
+// be listening yet. Only the first connection is retried.
+func dial(addr string) (net.Conn, error) {
+	var err error
+	for i := 0; i < 100; i++ {
+		var c net.Conn
+		if c, err = net.Dial("tcp", addr); err == nil {
+			return c, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil, err
+}
+
 func client(addr string) {
-	c, err := net.Dial("tcp", addr)
+	c, err := dial(addr)
 	if err != nil {
 		writeStatus("/tmp/cli.status", "state=dial-failed:"+err.Error())
 		select {}
@@ -151,7 +165,7 @@ func bulkServer(addr string) {
 
 // bulkClient writes counters at ~12 MB/s so socket queues are rarely empty.
 func bulkClient(addr string) {
-	c, err := net.Dial("tcp", addr)
+	c, err := dial(addr)
 	if err != nil {
 		writeStatus("/tmp/bulkc.status", "state=dial-failed:"+err.Error())
 		select {}

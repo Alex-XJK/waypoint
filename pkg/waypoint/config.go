@@ -146,6 +146,13 @@ const maxUnixSocketPath = 107
 // The host dials /proc/<pid>/root/<sessionsDir>/<16hex>/temp/shell_<16hex>.sock
 // (see socketPathThroughProcRoot); past the limit the dial fails much later
 // with an opaque "connect: invalid argument".
+// StateDirs resolves the configuration and returns the sessions directory
+// (runtime and checkpoint data) and the session registry directory.
+func StateDirs() (sessionsDir, infoDir string) {
+	loadConfig()
+	return DefaultSessionsDir, SessionInfoDir
+}
+
 func validateSessionsDir(dir string) error {
 	// Session paths become OverlayFS lowerdir/upperdir mount options, whose
 	// syntax cannot escape these separators.

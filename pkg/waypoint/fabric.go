@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -98,8 +99,10 @@ func CheckNetworkAttachment(a NetworkAttachment) error {
 	return checkAttachment(a)
 }
 
-func checkAttachment(a NetworkAttachment) error {
-	_, subnet, err := parseAttachmentAddress(a.Address)
+// CheckAttachmentAddress validates a fabric address on its own: an IPv4 host
+// address whose subnet is clear of the host's networks.
+func CheckAttachmentAddress(cidr string) error {
+	_, subnet, err := parseAttachmentAddress(cidr)
 	if err != nil {
 		return err
 	}
@@ -107,6 +110,13 @@ func checkAttachment(a NetworkAttachment) error {
 		if n := overlappingNetwork(subnet, hostAddrs); n != "" {
 			return fmt.Errorf("fabric subnet %s overlaps host network %s, which pasta copies into every fork", subnet, n)
 		}
+	}
+	return nil
+}
+
+func checkAttachment(a NetworkAttachment) error {
+	if err := CheckAttachmentAddress(a.Address); err != nil {
+		return err
 	}
 	fabric, err := openNetNS(a.FabricNS)
 	if err != nil {
@@ -338,4 +348,76 @@ func (m *Manager) checkSessionAttachment(a NetworkAttachment) error {
 		return fmt.Errorf("session %s uses the %s network mode; fabric attachment needs %s", m.sessionID, NetworkShared, NetworkPrivate)
 	}
 	return checkAttachment(a)
+}
+
+// --- fabric lifecycle (for the fabric's owner) ---
+
+// CreateFabric creates a fabric: a network namespace pinned at pin, with lo
+// and FabricBridge up. With barrier set, the bridge is created down, so forks
+// attached to it cannot exchange traffic until SetFabricBarrier releases it.
+func CreateFabric(pin string, barrier bool) error {
+	if err := os.MkdirAll(filepath.Dir(pin), 0o755); err != nil {
+		return err
+	}
+	releaseNetNS(pin) // stale, from an earlier fabric at this path
+	if err := createNetNS(pin); err != nil {
+		return err
+	}
+	ns, err := openNetNS(pin)
+	if err != nil {
+		releaseNetNS(pin)
+		return err
+	}
+	defer ns.Close()
+	err = withThreadNetNS(enterNetNS(ns), func() error {
+		linkInfo := rtattr(unix.IFLA_INFO_KIND, cString("bridge"))
+		attrs := append(rtattr(unix.IFLA_IFNAME, cString(FabricBridge)), rtattr(unix.IFLA_LINKINFO, linkInfo)...)
+		if err := rtnl(unix.RTM_NEWLINK, unix.NLM_F_CREATE|unix.NLM_F_EXCL, linkMsg(0, 0), attrs); err != nil {
+			return fmt.Errorf("create bridge %s: %w", FabricBridge, err)
+		}
+		if barrier {
+			return nil
+		}
+		return setLinkUp(FabricBridge, true)
+	})
+	if err != nil {
+		releaseNetNS(pin)
+	}
+	return err
+}
+
+// SetFabricBarrier stops (on) or resumes traffic between the forks attached
+// to the fabric at pin. The barrier takes FabricBridge down, which disables
+// its ports: frames between attached forks are dropped and TCP retransmits
+// them once the bridge is back up. A fork attached while the barrier is on
+// joins disabled. Raising the barrier before snapshotting every attached fork
+// makes their snapshots one consistent cut of the connections between them.
+func SetFabricBarrier(pin string, on bool) error {
+	ns, err := openNetNS(pin)
+	if err != nil {
+		return err
+	}
+	defer ns.Close()
+	return withThreadNetNS(enterNetNS(ns), func() error { return setLinkUp(FabricBridge, !on) })
+}
+
+// ReleaseFabric unpins the fabric at pin. Forks still attached keep the
+// namespace alive until they are released; detaching them first is the
+// owner's job.
+func ReleaseFabric(pin string) {
+	releaseNetNS(pin)
+	_ = os.Remove(filepath.Dir(pin))
+}
+
+func setLinkUp(name string, up bool) error {
+	link, err := net.InterfaceByName(name)
+	if err != nil {
+		return err
+	}
+	msg := linkMsg(link.Index, 0)
+	if up {
+		binary.NativeEndian.PutUint32(msg[8:], unix.IFF_UP)
+	}
+	binary.NativeEndian.PutUint32(msg[12:], unix.IFF_UP) // change mask
+	return rtnl(unix.RTM_NEWLINK, 0, msg, nil)
 }

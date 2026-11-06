@@ -93,6 +93,80 @@ _waypoint_query_list()
     command "$waypoint_command" list "$@" </dev/null
 }
 
+# _waypoint_complete_compose <current> <section> [project]: complete project
+# names (no project) or the names listed under a section ("Services:",
+# "Checkpoints:", "Replicas:") of `waypoint compose list <project>`.
+_waypoint_complete_compose()
+{
+    local current="$1" expected="$2" project="${3:-}" output line section="" first_line=1
+    local waypoint_command="${COMP_WORDS[0]:-waypoint}"
+    _waypoint_unquote_word "$waypoint_command" waypoint_command
+    local -a args=(compose list)
+    [[ -z "$project" ]] || args+=("$project")
+    output="$(command "$waypoint_command" "${args[@]}" </dev/null 2>/dev/null)" || return 0
+    while IFS= read -r line; do
+        if (( first_line )); then
+            first_line=0
+            if [[ -n "$project" && "$line" != "Project $project "* ]]; then
+                return 0
+            fi
+            [[ "$line" != 'No projects found' ]] || return 0
+            [[ -z "$project" ]] || continue
+        fi
+        if [[ -n "$project" ]]; then
+            case "$line" in
+                'Services:'|'Checkpoints:'|'Replicas:') section="$line"; continue ;;
+            esac
+            [[ "$section" == "$expected" && "$line" == '  '* ]] || continue
+            line="${line:2}"
+            line="${line%% *}"
+        fi
+        [[ "$line" == [a-zA-Z0-9]* && "$line" != *[!a-zA-Z0-9._-]* ]] || continue
+        _waypoint_complete_words "$current" "$line"
+    done <<< "$output"
+}
+
+# _waypoint_compose: complete `waypoint compose ...`; words[2] is the verb.
+_waypoint_compose()
+{
+    local verb="${words[2]:-}" project="${words[3]:-}"
+    if (( cword == 2 )); then
+        _waypoint_complete_words "$cur" up checkpoint snapshot fork exec destroy list suspend cleanup
+        return
+    fi
+    case "$verb" in
+        up)
+            case "${words[cword-1]}" in
+                -f|--file) _waypoint_complete_paths "$cur"; return ;;
+                -p|--project-name) return ;;
+            esac
+            _waypoint_complete_words "$cur" -f -p --quiet
+            ;;
+        checkpoint|snapshot|fork|exec|destroy|suspend|cleanup|list)
+            if (( cword == 3 )); then
+                _waypoint_complete_compose "$cur" ""
+                [[ "$verb" != list ]] || _waypoint_complete_words "$cur" --json
+                return
+            fi
+            case "$verb:$cword" in
+                snapshot:4|exec:4|destroy:4) _waypoint_complete_compose "$cur" 'Replicas:' "$project" ;;
+                fork:4) _waypoint_complete_compose "$cur" 'Checkpoints:' "$project" ;;
+                exec:5) _waypoint_complete_compose "$cur" 'Services:' "$project" ;;
+                exec:6) _waypoint_complete_words "$cur" -- ;;
+                snapshot:6) _waypoint_complete_words "$cur" --park ;;
+                cleanup:4) _waypoint_complete_words "$cur" --force ;;
+                list:4) _waypoint_complete_words "$cur" --json ;;
+                fork:*)
+                    case "${words[cword-1]}" in
+                        --id|--n) return ;;
+                    esac
+                    _waypoint_complete_words "$cur" --id --n
+                    ;;
+            esac
+            ;;
+    esac
+}
+
 _waypoint_complete_list_output()
 {
     local current="$1"
@@ -258,8 +332,12 @@ _waypoint()
     if (( cword == 1 )); then
         _waypoint_complete_words "$cur" \
             init build checkpoint fork exec cp snapshot create fork-exec \
-            destroy list suspend cleanup info version --version -v
+            destroy list suspend cleanup info compose version --version -v
         return
+    fi
+    if [[ "$command" == compose ]]; then
+        _waypoint_compose
+        return 0
     fi
 
     # snapshot alone permits its flag before or between positional arguments.

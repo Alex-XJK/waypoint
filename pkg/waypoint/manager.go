@@ -38,8 +38,15 @@ type Manager struct {
 	// NetworkShared. networkLock is its criu --network-lock method.
 	network     string
 	networkLock string
+	// group and service, set by SetGroup, record the session's owner.
+	group, service string
 	// mainAttach, set by AttachMain, connects main to a fabric at StartShell.
 	mainAttach *NetworkAttachment
+	// guest, set by SetGuestOptions, customizes the guest at StartShell.
+	guest GuestOptions
+	// imageEntrypoint and imageCmd are a built image's default command.
+	imageEntrypoint []string
+	imageCmd        []string
 }
 
 // SessionInfo holds information about a checkpoint session.
@@ -57,6 +64,10 @@ type SessionInfo struct {
 	ImageWorkDir   string   `json:"image_workdir,omitempty"`
 	Network        string   `json:"network,omitempty"`
 	NetworkLock    string   `json:"network_lock,omitempty"`
+	// Group and Service name the compose project and service that own the
+	// session, if any (see pkg/group).
+	Group   string `json:"group,omitempty"`
+	Service string `json:"service,omitempty"`
 }
 
 // PID values for special cases
@@ -68,12 +79,24 @@ const ShellNotEnabled = 0       // Shell is not enabled for this session
 
 // NewManagerWithSession creates a new manager with a random session ID.
 func NewManagerWithSession() (*Manager, string, error) {
+	return NewManagerWithNetwork("")
+}
+
+// NewManagerWithNetwork is NewManagerWithSession with the session's network
+// mode set to network instead of the configured one ("" keeps it).
+func NewManagerWithNetwork(network string) (*Manager, string, error) {
+	if network != "" && !validNetworkMode(network) {
+		return nil, "", fmt.Errorf("invalid network mode %q", network)
+	}
 	sessionID, err := generateSessionID()
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to generate session ID: %w", err)
 	}
 
 	loadConfig()
+	if network == "" {
+		network = NetworkMode
+	}
 
 	if err := validateSessionsDir(DefaultSessionsDir); err != nil {
 		return nil, "", err
@@ -82,7 +105,7 @@ func NewManagerWithSession() (*Manager, string, error) {
 	manager := newManager(filepath.Join(DefaultSessionsDir, sessionID))
 	manager.sessionID = sessionID
 	manager.shellPid = ShellNotEnabled
-	manager.network = NetworkMode
+	manager.network = network
 	if manager.privateNetwork() {
 		manager.networkLock = detectNetworkLock()
 	}
@@ -117,6 +140,7 @@ func LoadManager(sessionID string) (*Manager, error) {
 	manager.imageWorkDir = sessionInfo.ImageWorkDir
 	manager.network = sessionInfo.Network
 	manager.networkLock = sessionInfo.NetworkLock
+	manager.group, manager.service = sessionInfo.Group, sessionInfo.Service
 
 	return manager, nil
 }
@@ -168,8 +192,22 @@ func saveSessionInfo(sessionID string, manager *Manager) error {
 		ImageWorkDir:   manager.imageWorkDir,
 		Network:        manager.network,
 		NetworkLock:    manager.networkLock,
+		Group:          manager.group,
+		Service:        manager.service,
 	}
 	return writeSessionInfo(&sessionInfo)
+}
+
+// SetGroup records that the session is service of compose project group.
+func (m *Manager) SetGroup(group, service string) error {
+	m.group, m.service = group, service
+	return saveSessionInfo(m.sessionID, m)
+}
+
+// Group returns the compose project and service recorded by SetGroup; both
+// are empty for a standalone session.
+func (m *Manager) Group() (group, service string) {
+	return m.group, m.service
 }
 
 func loadSessionInfo(sessionID string) (*SessionInfo, error) {
@@ -271,6 +309,10 @@ func validateID(kind, id string) error {
 	return nil
 }
 
+// ValidateID checks an identifier of the given kind (for messages) against
+// the rules for session, fork, and checkpoint IDs.
+func ValidateID(kind, id string) error { return validateID(kind, id) }
+
 func validateSessionID(id string) error { return validateID("session", id) }
 func validateForkID(id string) error    { return validateID("fork", id) }
 
@@ -327,6 +369,15 @@ func (m *Manager) shellLogPath() string {
 }
 
 // --- cross-process locking & atomic writes ---
+
+// WithFileLock is withFileLock, for coordinators that keep their own locks
+// next to sessions' (see pkg/group).
+func WithFileLock(path string, fn func() error) error { return withFileLock(path, fn) }
+
+// AtomicWriteFile is atomicWriteFile, for the same callers.
+func AtomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	return atomicWriteFile(path, data, mode)
+}
 
 // withFileLock runs fn while holding an exclusive flock on path. Locks are
 // file-based because each CLI invocation is a separate process.

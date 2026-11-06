@@ -45,6 +45,27 @@ export WAYPOINT_COMPLETION_TEST_MODE=normal
 cat > "$test_dir/bin/waypoint" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$WAYPOINT_COMPLETION_TEST_CALLS"
+if [[ $1 == compose && $2 == list && $# -le 3 ]]; then
+    if [[ $# == 2 ]]; then
+        printf 'shop\nlab\n'
+    elif [[ $3 == shop ]]; then
+        cat <<'LISTING'
+Project shop (ready, subnet 10.89.0.0/24)
+Services:
+  db session=aaaa addr=10.89.0.2/24
+  web session=bbbb addr=10.89.0.3/24
+Checkpoints:
+  G parent= from=main status=ready
+Replicas:
+  main checkpoint=G status=running
+  r-1 checkpoint=G status=running
+LISTING
+    else
+        printf 'Error: project %s: not found\n' "$3" >&2
+        exit 1
+    fi
+    exit 0
+fi
 if [[ $1 != list || $# -gt 2 ]]; then
     printf 'UNEXPECTED invocation: %s\n' "$*" >> "$WAYPOINT_COMPLETION_TEST_CALLS"
     exit 97
@@ -260,6 +281,36 @@ complete_words waypoint list demo-session --
 exactly --json
 complete_words waypoint cleanup demo-session --
 exactly --force
+complete_words waypoint comp
+exactly compose
+complete_words waypoint compose ''
+contains up
+contains fork
+contains exec
+complete_words waypoint compose fork ''
+exactly shop lab
+complete_words waypoint compose fork shop ''
+exactly G
+complete_words waypoint compose exec shop ''
+exactly main r-1
+complete_words waypoint compose exec shop r-1 ''
+exactly db web
+complete_words waypoint compose exec shop r-1 web ''
+exactly --
+complete_words waypoint compose snapshot shop main G2 ''
+exactly --park
+complete_words waypoint compose fork nope ''
+empty
+complete_words waypoint compose fork shop G --
+contains --id
+contains --n
+complete_words waypoint compose fork shop G --id ''
+empty
+complete_words waypoint compose up -
+contains -f
+contains -p
+complete_words waypoint compose up -p ''
+empty
 for command in init build; do
     complete_words waypoint "$command" host
     has_path 'host dir'
