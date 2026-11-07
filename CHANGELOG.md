@@ -1,13 +1,10 @@
 # Changelog
 
-## Unreleased (v0.7.2-dev) — Incremental Dumps
-**Checkpoints that write only the memory a fork changed, with full dumps chosen from measured costs**
-- Requires the `waypoint` branch build of our CRIU fork, 4.2.1.20261101 or later (see Install CRIU in the README).
-- Added `incremental_dumps` (`WAYPOINT_INCREMENTAL_DUMPS`, default off): each restore passes `--track-mem --next-images-dir`, and the fork's next checkpoint or snapshot dumps only the pages changed since, linked to the earlier images as their parent.
-- With `incremental_dumps` on, each dump decides from criu's own dump and restore statistics whether to extend the image chain or take a full dump, at the chain length that minimizes the long-run cost per snapshot; `full_dump_ratio` (default 1) and `max_chain_sets` (default 128) tune it. Checkpoint metadata gains a `chain` record with the decision and its inputs.
-- Added `waypoint_log_level` (`WAYPOINT_LOG_LEVEL`, default 2), CRIU's `-v` for every dump and restore; a failed dump or restore reports its log's path and tail.
-- Removed the pre-resume hook that advanced `ns_last_pid` after a restore (added in v0.7.1); our CRIU restores `ns_last_pid` itself, and the hook cost 30–40 ms per restore. With the stock CRIU 4.2 package, restored trees again hand out pids below the ones they hold, and a tree that then holds a socketpair across such pids cannot be restored after its next snapshot.
-- Added `scripts/membench.sh` for memory-heavy checkpoint benchmarks, and recorded the host, CRIU and knob settings on every row of the benchmark CSVs.
+## v0.8.0 — Incremental Memory Checkpoints
+**Checkpoints that write only the memory a fork changed, on Waypoint's own CRIU build**
+- Designed and added incremental memory dumps: a checkpoint or snapshot of a restored fork writes only the memory changed since that restore, chained to the earlier image, and a full dump is taken when the measured cost of the chain calls for one (`incremental_dumps`, off by default).
+- Added a configurable CRIU log level for every dump and restore (`waypoint_log_level`).
+- Waypoint now requires the `waypoint` branch of [our CRIU fork](https://github.com/Alex-XJK/criu/tree/waypoint). On the stock CRIU package not every capability is available: Waypoint runs with full dumps only and no longer works around CRIU's pid allocation after a restore, which v0.7.1 did in a pre-resume hook.
 
 ## v0.7.1 — Per-Fork Network Namespaces
 **Private networking for concurrent forks, with restore and copy fixes**

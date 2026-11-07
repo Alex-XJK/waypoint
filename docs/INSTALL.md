@@ -40,7 +40,36 @@ sudo ./setup check
 `deps-ubuntu` intentionally changes system state. It installs common host packages,
 enables Ubuntu `universe`, falls back to `ppa:criu/ppa` when CRIU is unavailable
 from the configured apt sources, and installs the Go version from `go.mod` into
-`/usr/local/go` when `go` is missing or too old.
+`/usr/local/go` when `go` is missing or too old. The CRIU it installs is the
+distribution package; since v0.8.0 Waypoint needs our own CRIU build installed
+beside it, see [CRIU Build](#criu-build).
+
+## CRIU Build
+
+Since v0.8.0, Waypoint requires the `waypoint` branch of
+[our CRIU fork](https://github.com/Alex-XJK/criu/tree/waypoint), version
+4.2.1.20261101 or later. It adds what Waypoint needs on top of CRIU 4.2: a restore
+that leaves the tree ready for an incremental dump (`restore --next-images-dir`), a
+dump that links its parent past that image set, `ns_last_pid` restored with each
+pid namespace, and a fix for a crash when restoring socketpairs whose holders have
+inverted pids. Keep the distribution package for CRIU's runtime libraries and the
+`crit` command, and install our `criu` beside it; the build dependencies are listed
+at <https://criu.org/Installation>:
+
+```bash
+git clone -b waypoint https://github.com/Alex-XJK/criu.git
+cd criu
+make -j"$(nproc)"
+sudo make install-criu        # /usr/local/sbin/criu
+criu --version                # Version: 4.2.1.20261101 or later
+```
+
+`/usr/local/sbin` precedes `/usr/sbin` in root's default `PATH`, so `sudo waypoint`
+and `sudo ./setup check` pick up the new build; `sudo waypoint info` reports the
+version found. The stock CRIU package is not fully supported: Waypoint runs on it
+with full dumps only, `incremental_dumps` fails at the first fork, and a restored
+tree hands out pids below the ones it already holds, which breaks the next restore
+of a tree holding a socketpair across such pids.
 
 ## What Gets Installed
 
@@ -114,8 +143,8 @@ Required for normal operation:
 
 - Linux with root privileges
 - OverlayFS support
-- CRIU, including the `criu` and `crit` commands; the host check requires CRIU
-  4.0 or newer on aarch64
+- CRIU, including the `criu` and `crit` commands: the `waypoint` branch of our
+  CRIU fork, 4.2.1.20261101 or later (see [CRIU Build](#criu-build))
 - `cp` and `uname` (coreutils)
 - `/bin/bash` inside the workspace/rootfs when using `--shell`
 

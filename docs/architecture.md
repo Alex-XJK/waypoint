@@ -115,11 +115,15 @@ Two binaries, one library:
   so CRIU treats the overlay as externally managed); and the restore side —
   `runRestoreHelper` / `RunForkRestoreChildFromArgs` / `restoreForkChild`
   re-exec into fresh mount/IPC namespaces, mount this fork's overlay at
-  the canonical path, and `criu restore` the image. A fork with its own network
-  namespace is dumped with that namespace marked external and restored into it
-  with `--inherit-fd`. Host compatibility (criu present, recent enough, kernel
-  features, the ARM64 PAC / CRIU-4.0 rule) is validated out of band by
-  `./setup check`, not at runtime.
+  the canonical path, and `criu restore` the image. With `incremental_dumps`,
+  the restore adds `--track-mem --next-images-dir` so that the fork's next dump
+  can be incremental, and that dump names the set as `--prev-images-dir` (see
+  `chain.go`). A fork with its own network namespace is dumped with that
+  namespace marked external and restored into it with `--inherit-fd`. Waypoint
+  requires the `waypoint` branch of our CRIU fork (README, Install CRIU); host
+  compatibility (criu present, recent enough, kernel features, the ARM64 PAC /
+  CRIU-4.0 rule) is validated out of band by `./setup check`, and nothing at
+  runtime detects another build.
 - `netns.go` — `private` network mode: `newForkNetwork` (create a fork's
   network namespace, pinned under `/run/waypoint`, and start its pasta),
   `releaseNetwork` / `sweepSessionNetwork` (teardown), `startInNetNS` (start
@@ -136,21 +140,22 @@ Two binaries, one library:
   copy the images to `checkpoints/<ckpt>/criu.disk` in the background and
   atomically repoint the symlink; an images `flock` keeps restores and the
   flusher from racing. With the flag off, `criu` is a plain directory.
-- `chain.go` — full or incremental dumps (`incremental_dumps` only). Each
-  checkpoint's `ChainInfo` records its place in its image chain (`Sets`, the
-  chain's `Root`), its dump measurements from `stats-dump`, and the
-  `DumpDecision`. Before a dump of a fork with a parent image set,
-  `decideFullDump` walks the base checkpoint's chain back to its root, takes
-  each level's overhead (restore time above the root's per page, from the
-  `restore-stats.jsonl` that `recordRestore` appends at every restore, plus
-  dump time above the chain's first incremental dump), fits it as a line in
-  the level (`replacementStat`), and takes a full dump once the fitted cost of
-  one more level, summed against the past levels, reaches `full_dump_ratio`
-  times the price: the time per page of a full dump of a restored tree
-  (`full-dump-rate.json` of the session, else `.full-dump-rate.json` of the
-  sessions dir, else the session's first dump) times the base's pages
-  scanned. `max_chain_sets` caps the chain; a base without a chain record
-  gets a full dump. `recordFullDump` updates the rates after each full dump.
+- `chain.go` — the full-or-incremental decision (`incremental_dumps` only).
+  Every checkpoint carries a `ChainInfo`: its place in its memory-image chain
+  (`Sets` image sets back to the chain's `Root`), what its dump cost (from
+  `stats-dump`), and the `DumpDecision` that produced it. Before dumping a fork
+  whose restore left a parent image set, `decideFullDump` walks the base
+  checkpoint's chain back to its full dump and prices every link: restore time
+  above the root's, per page, from the `restore-stats.jsonl` that `recordRestore`
+  appends on each restore, plus dump time above the chain's first incremental
+  dump. `replacementStat` fits those per-link costs as a line and calls for a
+  full dump once one more link would cost more than the chain's average per
+  snapshot, with `full_dump_ratio` times the estimated extra time of a full dump
+  counted in — the measured full-dump rate (`full-dump-rate.json` of the session,
+  else `.full-dump-rate.json` of the sessions dir, else the session's first dump)
+  times the base's pages. `max_chain_sets` caps the chain, and a base without a
+  chain record gets a full dump. `recordFullDump` updates the rates after each
+  full dump.
 - `criustats.go` — the `phase_stats` instrumentation: `RestoreBreakdown` /
   `SnapshotBreakdown` (persisted in fork.json / checkpoint metadata, printed
   as flat `key_ms=` tokens) and a minimal protobuf-varint parser for CRIU's
@@ -190,8 +195,8 @@ Two binaries, one library:
                               restore from this checkpoint wrote; the fork's
                               next dump is taken against it, and Waypoint's
                               CRIU links that dump's parent past it to this
-                              checkpoint's criu/. Nothing removes it yet, not
-                              even destroy
+                              checkpoint's criu/. Removed with the session,
+                              not by destroy
     restore-stats.jsonl     incremental_dumps only: one line per restore from
                               this checkpoint (criu restore time, pages)
   full-dump-rate.json       incremental_dumps only: the session's measured
@@ -374,7 +379,9 @@ which is just step 3, so the revived fork gets a new private upper on chain
 - **`checkpoints/<id>/upper` is written exactly once** — by the rename that
   sealed it. After that it only ever appears on the read-only side of
   overlay mounts. Deleting a checkpoint that others chain on would corrupt
-  every descendant, which is why nodes are immutable DAG entries.
+  every descendant — and, with `incremental_dumps`, every memory image that
+  references its `criu/` as a parent — which is why nodes are immutable DAG
+  entries.
 - **A fork's cost is its delta.** `forks/<id>/upper` is created empty on every
   fork *and* after every snapshot, then receives private runtime writes such as
   the restored socket; history lives in the sealed layers.

@@ -26,6 +26,20 @@ introducing a second state model or execution mechanism incidentally. For change
 limited to documentation or tests, summarize the content or coverage and validation;
 a separate architecture explanation is unnecessary.
 
+## Branches and releases
+
+`develop` is the integration branch and the base of every pull request; treat it as
+the project's working `main`. `main` holds releases only: the maintainer (Alex) opens
+the pull request from `develop` to `main` after reviewing and testing the changes and
+writing the release-facing text. Feature branches therefore leave `README.md`,
+`CHANGELOG.md`, `CITATION.cff`, `CONTRIBUTORS.md`, and `docs/INSTALL.md` to the
+release (`docs/architecture.md` and `docs/exec-protocol.md` change with the code
+they describe); notes that a later change must act on go in this file, and code a
+later release may re-enable is commented out rather than deleted. The version in
+`cmd/waypoint/main.go` carries a `-dev` suffix on `develop` (for example
+`v0.8.1-dev`) and drops it in the release pull request, which also updates
+`CHANGELOG.md` and `CITATION.cff`.
+
 ## Repository orientation
 
 Waypoint is a Linux tool for checkpointing and concurrently forking live process
@@ -48,7 +62,7 @@ sources disagree, especially namespace and platform assumptions.
 | `pkg/waypoint/checkpoint.go`, `fork.go` | Checkpoint DAG, live fork lifecycle, materialization, snapshotting, and exec client. |
 | `pkg/waypoint/build.go`, `overlay.go`, `criu.go` | Rootfs staging/Buildah builds, shell startup, OverlayFS, and CRIU orchestration. |
 | `pkg/waypoint/copy.go`, `inspect.go`, `cleanup.go` | Fork-aware file transfer, runtime inspection, and process/mount teardown. |
-| `pkg/waypoint/imagestore.go`, `criustats.go` | Optional tmpfs image storage/flush and phase timing. |
+| `pkg/waypoint/imagestore.go`, `chain.go`, `criustats.go` | Optional tmpfs image storage/flush, the full-or-incremental dump decision, and phase timing. |
 | `cmd/bash-init/` | Namespace init and persistent shell supervisor; exec protocol server. |
 | `contrib/bash-completion/`, `scripts/` | Bash completion and executable validation workflows. |
 | `setup`, `Makefile`, `.github/workflows/` | Build/install/check entry points and CI/release automation. |
@@ -157,8 +171,11 @@ sessions so configuration is resolved consistently.
 `WAYPOINT_SESSIONS_DIR` holds runtime/checkpoint data; `WAYPOINT_SESSION_INFO_DIR`
 holds registry records. Both default under `/tmp`. Use durable locations for both
 when persistence across reboots matters. Keep runtime paths short enough for Unix
-sockets and valid for OverlayFS mount options. `WAYPOINT_TMPFS_IMAGES` and
-`WAYPOINT_PHASE_STATS` are opt-in; pending tmpfs images are not durable until flushed.
+sockets and valid for OverlayFS mount options. `WAYPOINT_TMPFS_IMAGES`,
+`WAYPOINT_INCREMENTAL_DUMPS`, and `WAYPOINT_PHASE_STATS` are opt-in; pending tmpfs
+images are not durable until flushed, and incremental dumps chain a checkpoint's
+memory image to its parent's (`chain.go` decides when a full dump starts a new
+chain). `WAYPOINT_LOG_LEVEL` is CRIU's `-v` for every dump and restore (default 2).
 `WAYPOINT_NETWORK=private` (opt-in, needs pasta) gives each fork of a new session its
 own network namespace; a session keeps the mode it was created with.
 
@@ -185,13 +202,15 @@ a CRIU minimum on aarch64 for pointer-authentication support. Preserve the exist
 external-mount mapping and synchronous detached-restore protocol when changing CRIU
 integration; a successful build cannot establish that dump/restore works.
 
-The host's `criu` must be the `waypoint` branch build of our CRIU fork
-(`criu --version` reports `4.2.1.20261101` or later). It restores `ns_last_pid`
-itself, fixes the socketpair restore crash, and provides what `incremental_dumps`
-needs (`restore --next-images-dir`, and a dump that links its parent past the next
-images dir). Waypoint no longer works around CRIU bugs: with the stock 4.2 package
-`scripts/test-ns-last-pid.sh` fails, a snapshot of a restored postfix-like tree
-cannot be restored, and with `incremental_dumps` on the first fork fails.
+Waypoint requires the `waypoint` branch of our CRIU fork (`criu --version` reports
+4.2.1.20261101 or later): it restores `ns_last_pid`, fixes the socketpair restore
+crash, and provides `restore --next-images-dir` with dumps that link their parent
+past that image set, which `incremental_dumps` needs. Waypoint neither detects nor
+works around other builds; with the stock 4.2 package `scripts/test-ns-last-pid.sh`
+fails, a snapshot of a restored tree that holds a socketpair across inverted pids
+cannot be restored, and with `incremental_dumps` on the first fork fails. Whether to
+detect the stock build at run time and degrade is the maintainer's decision; do not
+add such a check as part of another change.
 
 Choose validation for the affected behavior:
 
@@ -208,6 +227,11 @@ Choose validation for the affected behavior:
 - For changes to restore, also run
   `sudo ./scripts/test-ns-last-pid.sh` (new pids after checkpoint, fork, and a
   second-generation fork stay above the restored tree's).
+- For changes to dumps, restores, or `chain.go`, also run
+  `sudo ./scripts/membench.sh` with `INCREMENTAL="0 1"`: it times checkpoints,
+  snapshots, and forks against a memory-heavy holder, with incremental dumps off
+  and on, and asserts the holder's state after every chain. `MEM_MB=128 DEPTH=4
+  FORKS=2 PATTERNS=random` is a quick check.
 - `sudo ./scripts/test-search-workflow.sh` adds an offline Dockerfile build, file
   transfer, concurrent branching, recursive snapshots/backtracking, export, and
   cleanup workload. Its header documents prerequisites and scaling options.
