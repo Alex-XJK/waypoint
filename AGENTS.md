@@ -185,13 +185,13 @@ a CRIU minimum on aarch64 for pointer-authentication support. Preserve the exist
 external-mount mapping and synchronous detached-restore protocol when changing CRIU
 integration; a successful build cannot establish that dump/restore works.
 
-Temporary note for the `drop-ns-last-pid-workaround` branch: the pre-resume action
-script that advanced `ns_last_pid` is commented out, not removed. The host's `criu`
-must be the `waypoint` branch build of our CRIU fork (`criu --version` reports
-`4.2.1.20261026` or later), which restores `ns_last_pid` itself and fixes the
-socketpair restore crash; with the stock 4.2 package `scripts/test-ns-last-pid.sh`
-fails and a snapshot of a restored postfix-like tree cannot be restored. A later
-version will decide at run time which criu it has. Remove this note then.
+The host's `criu` must be the `waypoint` branch build of our CRIU fork
+(`criu --version` reports `4.2.1.20261101` or later). It restores `ns_last_pid`
+itself, fixes the socketpair restore crash, and provides what `incremental_dumps`
+needs (`restore --next-images-dir`, and a dump that links its parent past the next
+images dir). Waypoint no longer works around CRIU bugs: with the stock 4.2 package
+`scripts/test-ns-last-pid.sh` fails, a snapshot of a restored postfix-like tree
+cannot be restored, and with `incremental_dumps` on the first fork fails.
 
 Choose validation for the affected behavior:
 
@@ -205,7 +205,7 @@ Choose validation for the affected behavior:
 - For changes to private network mode, also run `sudo ./scripts/test-private-network.sh`
   (per-fork ports, egress through pasta, and namespace lifecycle across snapshot,
   park, destroy, suspend, and cleanup).
-- For changes to restore or the CRIU action script, also run
+- For changes to restore, also run
   `sudo ./scripts/test-ns-last-pid.sh` (new pids after checkpoint, fork, and a
   second-generation fork stay above the restored tree's).
 - `sudo ./scripts/test-search-workflow.sh` adds an offline Dockerfile build, file
