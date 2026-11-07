@@ -104,7 +104,7 @@ commands, such as `./setup build`, `sudo ./setup install`, and
 
 - Linux system with root privileges
 - OverlayFS support (most modern Linux distributions)
-- CRIU installed and configured, including the `criu` and `crit` commands; CRIU 4.0 or newer is required on aarch64 by the default host check
+- CRIU installed and configured, including the `criu` and `crit` commands: the `waypoint` branch build of [our CRIU fork](https://github.com/Alex-XJK/criu/tree/waypoint), version `4.2.1.20261101` or later (see [Install CRIU](#install-criu)); CRIU 4.0 or newer is required on aarch64 by the default host check
 - Host utilities used by Waypoint: `cp` and `uname` (coreutils); teardown and mount handling are pure syscalls
 - `/bin/bash` inside the workspace/rootfs when using `--shell`
 - Go 1.25 or the version listed in `go.mod` (for building from source)
@@ -132,14 +132,30 @@ go version
 
 #### Install CRIU
 
-```bash
-# Ubuntu/Debian
-sudo apt-get install criu
-# or go to https://launchpad.net/~criu/+archive/ubuntu/ppa
+Waypoint needs the `waypoint` branch of [our CRIU fork](https://github.com/Alex-XJK/criu/tree/waypoint).
+On top of CRIU 4.2 it restores each pid namespace's `ns_last_pid`, fixes a restore
+crash on socketpairs whose holders have inverted pids, and adds what
+`incremental_dumps` needs (`restore --next-images-dir`, and a dump that links its
+parent past the image set that restore wrote). Build it with CRIU's usual
+dependencies (see <https://criu.org/Installation>); `make deps-ubuntu` installs
+the distribution's CRIU, whose `crit` can stay, and this replaces its `criu`:
 
-# Verify installation
+```bash
+git clone -b waypoint https://github.com/Alex-XJK/criu.git
+cd criu
+make -j"$(nproc)"
+sudo make install-criu        # installs /usr/local/sbin/criu
+
+# Verify installation: 4.2.1.20261101 or later
+criu --version
 sudo criu check
 ```
+
+With the stock CRIU 4.2 package Waypoint still runs with full dumps, but it no
+longer works around CRIU's bugs: after a restore new processes can get pids below
+the ones the tree holds, a restored tree that then holds a socketpair across such
+pids fails at its next restore, and `incremental_dumps` fails at the first fork.
+`waypoint info` prints the `criu --version` it found.
 
 #### Build from Source
 
@@ -194,6 +210,8 @@ You can create a configuration file to set global options. Example content:
   "preserve_session_on_cleanup": false,
   "tmpfs_images": false,
   "incremental_dumps": false,
+  "full_dump_ratio": 1,
+  "max_chain_sets": 128,
   "phase_stats": false,
   "waypoint_log_level": 2,
   "network": "shared"
@@ -220,13 +238,27 @@ breakdowns. Both options default to `false`.
 `incremental_dumps` (`WAYPOINT_INCREMENTAL_DUMPS`, default `false`) makes each
 checkpoint or snapshot dump only the memory a fork changed since it was last
 restored; the new images link to the earlier ones as their parent, so forking from
-a long chain reads one image set per dump in the chain. It needs the `waypoint`
-branch of [Alex's CRIU fork](https://github.com/Alex-XJK/criu/tree/waypoint):
-`restore --next-images-dir`, and a dump that links its parent past the small
-image set that restore wrote. Each restore leaves that set under the checkpoint
+a chain reads one image set per incremental dump in it. It needs [our CRIU
+build](#install-criu). Each restore leaves a small image set under the checkpoint
 it restored from (`checkpoints/<ckpt>/next/`); nothing removes it yet. The option
 has no effect while `tmpfs_images` is on, and forks of a checkpoint dumped with
 `tmpfs_images` dump in full.
+
+With `incremental_dumps` on, each dump decides from measured costs whether to
+extend the chain or take a full dump that starts a new one. A longer chain makes
+every fork from it slower, and a full dump costs extra time once. Waypoint fits
+the per-level cost of the chain from criu's own restore and dump statistics and
+takes a full dump once one more level would cost more than the chain's average per
+snapshot, with `full_dump_ratio` times the estimated extra time of a full dump
+counted in; that minimizes the long-run cost per snapshot. `full_dump_ratio`
+(`WAYPOINT_FULL_DUMP_RATIO`, default `1`) trades the two: `0` makes every dump
+full, a larger value keeps chains longer. `max_chain_sets`
+(`WAYPOINT_MAX_CHAIN_SETS`, default `128`) caps a chain whose cost does not grow.
+The decision and its inputs are kept in each checkpoint's metadata (`chain`) and
+printed on the `phases` line with `phase_stats` on. The time of a full dump is
+learned from full dumps of restored trees and kept per session and per sessions
+dir; until one has been measured, a session prices its first chain from its first
+dump, which is faster, and cuts that chain early.
 
 `waypoint_log_level` (`WAYPOINT_LOG_LEVEL`, default `2`) is Waypoint's log
 level. For now it is the `-v` level of every CRIU dump and restore: `0` none,
@@ -550,13 +582,16 @@ sudo waypoint cleanup abc123def456
 
 ```
 /custom/path/waypoint-sessions/    # Configured sessions directory
+    ├── .full-dump-rate.json        # incremental_dumps: full dump time, all sessions
     └── abc123def456/               # A session
         ├── original/               # Session-owned rootfs, shared read-only
         ├── checkpoints/            # Immutable checkpoint DAG nodes
         │   └── before-run/
         │       ├── upper/          # Sealed, immutable filesystem delta
-        │       └── criu/           # CRIU memory image (+ dump.log)
-        │           └── *.img
+        │       ├── criu/           # CRIU memory image (+ dump.log)
+        │       │   └── *.img
+        │       ├── next/           # incremental_dumps: one image set per restore
+        │       └── restore-stats.jsonl  # incremental_dumps: criu restore times
         ├── forks/                  # Live, mutable fork instances
         │   ├── main/               # The main fork (from init --shell or build)
         │   │   ├── fork.json       # Live fork record
@@ -568,6 +603,7 @@ sudo waypoint cleanup abc123def456
         │   └── runB/
         ├── metadata/               # Checkpoint metadata
         │   └── before-run.json     # "Metadata" for the before-run checkpoint
+        ├── full-dump-rate.json     # incremental_dumps: measured full dump time
         ├── locks/                  # Session/fork flocks
         ├── temp/                   # Main shell startup/restore log
         └── work/                   # Canonical merged mountpoint (per-fork)

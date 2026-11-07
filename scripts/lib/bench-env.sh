@@ -4,8 +4,9 @@
 #
 # Sourcing it points Waypoint at WORK and pins the config knobs that change
 # what is measured, so that the host's config file cannot: tmpfs_images,
-# incremental_dumps and phase_stats off and log level 2, the settings of the
-# baseline numbers, unless the environment sets them. The functions, in the
+# incremental_dumps and phase_stats off, log level 2, and full_dump_ratio 1
+# and max_chain_sets 128 (the defaults; they matter only with
+# incremental_dumps on), unless the environment sets them. The functions, in the
 # order the scripts call them:
 #   bench_require           root, criu and a static busybox
 #   bench_csv_header <h>    writes <h> to an empty CSV; refuses a CSV whose
@@ -22,6 +23,8 @@ export WAYPOINT_TMPFS_IMAGES="${WAYPOINT_TMPFS_IMAGES:-false}"
 export WAYPOINT_INCREMENTAL_DUMPS="${WAYPOINT_INCREMENTAL_DUMPS:-false}"
 export WAYPOINT_PHASE_STATS="${WAYPOINT_PHASE_STATS:-false}"
 export WAYPOINT_LOG_LEVEL="${WAYPOINT_LOG_LEVEL:-2}"
+export WAYPOINT_FULL_DUMP_RATIO="${WAYPOINT_FULL_DUMP_RATIO:-1}"
+export WAYPOINT_MAX_CHAIN_SETS="${WAYPOINT_MAX_CHAIN_SETS:-128}"
 
 # utc is the same for all rows of one run; images_fs is the file system the
 # images are written to; criu_gitid is the second line of `criu --version`;
@@ -104,7 +107,8 @@ bench_env() {
   [ "$(wpinfo tmpfs_images)" != 1 ] || { IMAGES_FS=tmpfs; IMAGES_DIR="$(wpinfo tmpfs_images_dir)"; }
   # shellcheck disable=SC2034  # read by the scripts
   ENV_PREFIX="$(date -u +%FT%TZ),$(printf %s "$LABEL" | tr ',\n' '  '),$HOST,$(uname -r),$(printf %s "${CPU:-unknown}" | tr ',' ' '),$(nproc),$GOVERNOR,$IMAGES_FS,$CRIU_VERSION,${CRIU_GITID:--},$WP_VERSION,$WP_COMMIT,$LOG_LEVEL"
-  printf 'waypoint %s %s (%s) on %s: Linux %s, %s x %s (%s), criu %s %s, images on %s (%s), log level %s\n' \
+  printf 'waypoint %s %s (%s) on %s: Linux %s, %s x %s (%s), criu %s %s, images on %s (%s), log level %s, full_dump_ratio %s, max_chain_sets %s\n' \
     "$WP_VERSION" "$WP_COMMIT" "$W" "$HOST" "$(uname -r)" "$(nproc)" "${CPU:-unknown cpu}" "$GOVERNOR" \
-    "$CRIU_VERSION" "${CRIU_GITID:--}" "$IMAGES_DIR" "$IMAGES_FS" "$LOG_LEVEL"
+    "$CRIU_VERSION" "${CRIU_GITID:--}" "$IMAGES_DIR" "$IMAGES_FS" "$LOG_LEVEL" \
+    "$(wpinfo full_dump_ratio)" "$(wpinfo max_chain_sets)"
 }

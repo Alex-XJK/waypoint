@@ -15,7 +15,8 @@
 # effective config from `waypoint info`) and Go unless WAYPOINT_BIN and
 # BASH_INIT_BIN are given. incremental_dumps=1 needs a CRIU with
 # `restore --next-images-dir`; with the stock one the first fork fails.
-# lib/bench-env.sh pins tmpfs_images off and the log level to 2 unless the
+# lib/bench-env.sh pins tmpfs_images off, the log level to 2, and
+# full_dump_ratio and max_chain_sets to their defaults unless the
 # environment sets them; the host's config file does not apply to them.
 # CPU frequency scaling shows in the numbers, so the header names the governor.
 #

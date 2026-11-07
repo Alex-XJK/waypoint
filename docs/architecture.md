@@ -88,11 +88,13 @@ Two binaries, one library:
   `info` command. Knobs: sessions dir, bash_init path,
   `preserve_session_on_cleanup`, `tmpfs_images` + `tmpfs_images_dir` (see
   `imagestore.go`), `incremental_dumps` (parent-chained CRIU images; off
-  while `tmpfs_images` is on), `phase_stats` (see `criustats.go`), and
+  while `tmpfs_images` is on) with `full_dump_ratio` and `max_chain_sets`
+  (see `chain.go`), `phase_stats` (see `criustats.go`), and
   `waypoint_log_level` (criu's `-v` for every dump and restore, default 2; the
   restore helper child resolves it again with `loadConfig`).
 - `checkpoint.go` — immutable checkpoints: `Metadata` (checkpoint record:
-  `ParentID`, `LayerIDs`, `PID`, `Status`) and its JSON persistence, plus the
+  `ParentID`, `LayerIDs`, `PID`, `Status`, and with `incremental_dumps` the
+  `Chain` record) and its JSON persistence, plus the
   `Materializer` interface + `CRIUMaterializer`:
   - `Materialize` — checkpoint -> new live fork (allocate record under the
     session lock, then restore under the fork lock).
@@ -134,6 +136,21 @@ Two binaries, one library:
   copy the images to `checkpoints/<ckpt>/criu.disk` in the background and
   atomically repoint the symlink; an images `flock` keeps restores and the
   flusher from racing. With the flag off, `criu` is a plain directory.
+- `chain.go` — full or incremental dumps (`incremental_dumps` only). Each
+  checkpoint's `ChainInfo` records its place in its image chain (`Sets`, the
+  chain's `Root`), its dump measurements from `stats-dump`, and the
+  `DumpDecision`. Before a dump of a fork with a parent image set,
+  `decideFullDump` walks the base checkpoint's chain back to its root, takes
+  each level's overhead (restore time above the root's per page, from the
+  `restore-stats.jsonl` that `recordRestore` appends at every restore, plus
+  dump time above the chain's first incremental dump), fits it as a line in
+  the level (`replacementStat`), and takes a full dump once the fitted cost of
+  one more level, summed against the past levels, reaches `full_dump_ratio`
+  times the price: the time per page of a full dump of a restored tree
+  (`full-dump-rate.json` of the session, else `.full-dump-rate.json` of the
+  sessions dir, else the session's first dump) times the base's pages
+  scanned. `max_chain_sets` caps the chain; a base without a chain record
+  gets a full dump. `recordFullDump` updates the rates after each full dump.
 - `criustats.go` — the `phase_stats` instrumentation: `RestoreBreakdown` /
   `SnapshotBreakdown` (persisted in fork.json / checkpoint metadata, printed
   as flat `key_ms=` tokens) and a minimal protobuf-varint parser for CRIU's
@@ -175,6 +192,10 @@ Two binaries, one library:
                               CRIU links that dump's parent past it to this
                               checkpoint's criu/. Nothing removes it yet, not
                               even destroy
+    restore-stats.jsonl     incremental_dumps only: one line per restore from
+                              this checkpoint (criu restore time, pages)
+  full-dump-rate.json       incremental_dumps only: the session's measured
+                              time per page of a full dump (chain.go)
   forks/<fork>/
     fork.json               live fork record
     upper/                  this fork's private CoW layer; contains the socket
@@ -187,6 +208,8 @@ Two binaries, one library:
     session.lock            session-wide flock
     fork-<fork>.lock        stable per-fork flock
 
+/tmp/waypoint-sessions/.full-dump-rate.json  the same rate for every session
+                                             in the sessions dir
 /tmp/waypoint-sessions-info/<session>.json   global registry (find a session)
 /dev/shm/waypoint/<session>/<ckpt>/          tmpfs images (tmpfs_images only)
 /run/waypoint/<session>/<fork>/netns         network namespace pin, and

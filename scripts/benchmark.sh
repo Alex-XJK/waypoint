@@ -8,7 +8,8 @@
 # BASH_INIT_BIN are given; pasta for the private network mode; python3 to
 # read the effective config from `waypoint info`. Sessions, registry and
 # rootfs live in a private temp dir. lib/bench-env.sh pins tmpfs_images,
-# incremental_dumps and phase_stats off and the log level to 2 unless the
+# incremental_dumps and phase_stats off, the log level to 2, and
+# full_dump_ratio and max_chain_sets to their defaults unless the
 # environment sets them (WAYPOINT_TMPFS_IMAGES etc.); the host's config file
 # does not apply to them. CPU frequency scaling shows in the numbers, so the
 # header names the cpufreq governor.
