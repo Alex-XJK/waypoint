@@ -17,7 +17,7 @@ import (
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
 
-var Version = "v0.7.1"
+var Version = "v0.7.2-dev"
 
 // printExecResult writes the command output to stdout and exits with the
 // command's own exit code.
@@ -32,6 +32,14 @@ func printExecResult(result *waypoint.ExecResult) {
 	if result.ExitCode != 0 {
 		os.Exit(result.ExitCode)
 	}
+}
+
+// chainTokens is the image chain part of a checkpoint's phases line.
+func chainTokens(c *waypoint.ChainInfo) string {
+	if c == nil {
+		return ""
+	}
+	return " " + c.String()
 }
 
 // execUsage is the usage line for `exec`.
@@ -124,11 +132,6 @@ func main() {
 	}
 
 	switch os.Args[1] {
-	case "__waypoint_criu_action":
-		if err := waypoint.RunCriuAction(); err != nil {
-			fmt.Fprintf(os.Stderr, "criu action hook: %v\n", err)
-		}
-		return
 	case "__waypoint_restore_fork_child":
 		if err := waypoint.RunForkRestoreChildFromArgs(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -271,7 +274,7 @@ func main() {
 		}
 		fmt.Printf("Checkpoint '%s' created successfully\n", checkpointID)
 		if ckpt.Metadata != nil && ckpt.Metadata.Snapshot != nil {
-			fmt.Printf("phases %s\n", ckpt.Metadata.Snapshot)
+			fmt.Printf("phases %s%s\n", ckpt.Metadata.Snapshot, chainTokens(ckpt.Metadata.Chain))
 		}
 
 	case "fork":
@@ -413,7 +416,7 @@ func main() {
 			fmt.Printf("Fork '%s' snapshotted as checkpoint '%s'\n", forkID, checkpointID)
 		}
 		if ckpt.Metadata != nil && ckpt.Metadata.Snapshot != nil {
-			fmt.Printf("phases %s\n", ckpt.Metadata.Snapshot)
+			fmt.Printf("phases %s%s\n", ckpt.Metadata.Snapshot, chainTokens(ckpt.Metadata.Chain))
 		}
 
 	case "exec":

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased (v0.7.2-dev) — Incremental Dumps
+**Checkpoints that write only the memory a fork changed, with full dumps chosen from measured costs**
+- Requires the `waypoint` branch build of our CRIU fork, 4.2.1.20261101 or later (see Install CRIU in the README).
+- Added `incremental_dumps` (`WAYPOINT_INCREMENTAL_DUMPS`, default off): each restore passes `--track-mem --next-images-dir`, and the fork's next checkpoint or snapshot dumps only the pages changed since, linked to the earlier images as their parent.
+- With `incremental_dumps` on, each dump decides from criu's own dump and restore statistics whether to extend the image chain or take a full dump, at the chain length that minimizes the long-run cost per snapshot; `full_dump_ratio` (default 1) and `max_chain_sets` (default 128) tune it. Checkpoint metadata gains a `chain` record with the decision and its inputs.
+- Added `waypoint_log_level` (`WAYPOINT_LOG_LEVEL`, default 2), CRIU's `-v` for every dump and restore; a failed dump or restore reports its log's path and tail.
+- Removed the pre-resume hook that advanced `ns_last_pid` after a restore (added in v0.7.1); our CRIU restores `ns_last_pid` itself, and the hook cost 30–40 ms per restore. With the stock CRIU 4.2 package, restored trees again hand out pids below the ones they hold, and a tree that then holds a socketpair across such pids cannot be restored after its next snapshot.
+- Added `scripts/membench.sh` for memory-heavy checkpoint benchmarks, and recorded the host, CRIU and knob settings on every row of the benchmark CSVs.
+
 ## v0.7.1 — Per-Fork Network Namespaces
 **Private networking for concurrent forks, with restore and copy fixes**
 - Added the `private` network mode (`WAYPOINT_NETWORK=private` or `network` in the config file): each fork, including `main`, gets its own network namespace and port space, with outbound traffic through a per-fork pasta process. `shared` remains the default.
