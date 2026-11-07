@@ -24,8 +24,31 @@ abstract: >-
   (files, memory and live terminal sessions) and fork it into
   many independent live copies. Built on CRIU and OverlayFS.
 license: Apache-2.0
-version: 0.7.1
-date-released: '2026-10-16'
+version: 0.8.0
+date-released: '2026-11-07'
+preferred-citation:
+  type: article
+  title: "StateFork: Branchable Infrastructure for Agent Exploration"
+  authors:
+    - family-names: Xu
+      given-names: Jiakai
+    - family-names: Zhou
+      given-names: Tianle
+    - family-names: Liargkovas
+      given-names: Georgios
+    - family-names: Gillai
+      given-names: Danielle
+    - family-names: Fu
+      given-names: Ruizhe
+    - family-names: Shen
+      given-names: Patrick
+    - family-names: Wu
+      given-names: Eugene
+    - family-names: Kaffes
+      given-names: Kostis
+  year: 2026
+  doi: 10.48550/arXiv.2609.38648
+  url: https://arxiv.org/abs/2609.38648
 references:
   - type: article
     title: "StateFork: Branchable Infrastructure for Agent Exploration"
@@ -48,3 +71,18 @@ references:
         given-names: Kostis
     year: 2026
     url: https://arxiv.org/abs/2609.38648
+  - type: conference-paper
+    title: "Toward Systems Foundations for Agentic Exploration"
+    authors:
+      - family-names: Xu
+        given-names: Jiakai
+      - family-names: Zhou
+        given-names: Tianle
+      - family-names: Wu
+        given-names: Eugene
+      - family-names: Kaffes
+        given-names: Kostis
+    year: 2025
+    conference:
+      name: "SOSP 2025 Workshop on Systems for Agentic AI (SAA '25)"
+    url: https://arxiv.org/abs/2510.05556

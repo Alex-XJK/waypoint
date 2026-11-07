@@ -12,6 +12,7 @@ This project thrives thanks to the efforts and expertise of the following people
 - Designed and implemented the v0.4.0 in-place filesystem architecture and subsequent OverlayFS checkpoint/restore pipeline.
 - Designed the v0.5.0 RPC-style shell session and continues to lead the evolution of the Dockerfile build, runtime, restore-readiness, installation, and usability workflows.
 - Proposed the initial direction of the v0.7.0 concurrent fork architecture and guided its design through implementation and release.
+- Designed the v0.8.0 incremental memory checkpoint architecture and maintains the CRIU internals ([our CRIU fork](https://github.com/Alex-XJK/criu/tree/waypoint)) that support it at the system level.
 
 
 ## Project Contributors
@@ -25,7 +26,7 @@ This project thrives thanks to the efforts and expertise of the following people
 - Applied built-image `ENV` and `WORKDIR` settings to Dockerfile-based sessions.
 - Extended the reach of the concurrent fork model with the `cp` verb for host-to-fork file and directory transfer.
 - Designed a user field verification and Bash command pre-validation module to enhance the robustness.
-- Fixed restored process trees handing out pids below the ones they already hold with CRIU's pre-resume hook.
+- Helped integrate Waypoint with the new CRIU build for v0.8.0 and added the configurable log level.
 
 
 ### Rohan Timmaraju
