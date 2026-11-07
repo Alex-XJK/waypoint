@@ -208,6 +208,8 @@ Choose validation for the affected behavior:
 - For changes to restore, also run
   `sudo ./scripts/test-ns-last-pid.sh` (new pids after checkpoint, fork, and a
   second-generation fork stay above the restored tree's).
+- For changes to `diff`, also run `sudo ./scripts/test-diff.sh` (records between
+  two checkpoints, argument errors, and refusal of checkpoints that are not ready).
 - `sudo ./scripts/test-search-workflow.sh` adds an offline Dockerfile build, file
   transfer, concurrent branching, recursive snapshots/backtracking, export, and
   cleanup workload. Its header documents prerequisites and scaling options.
