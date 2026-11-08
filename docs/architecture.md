@@ -467,9 +467,12 @@ the same address and the same peer in any replica forked from it.
   everything created.
 - **snapshot/checkpoint**: under the replica lock, claim the checkpoint ID in
   the manifest and every member, raise the fabric barrier, snapshot (or park)
-  every member in parallel, lower it. All-or-nothing: if a member fails, the
-  manifest is `failed` and the replica `degraded`; the member checkpoints that
-  succeeded remain (checkpoints are immutable).
+  every member in parallel, lower it (`claimCheckpoint`, `cut`,
+  `commitSnapshot`). All-or-nothing: if a member fails, the manifest is
+  `failed` and the replica `degraded`; the member checkpoints that succeeded
+  remain (checkpoints are immutable). SIGINT, SIGTERM, and SIGHUP are held
+  from the claim to the last record write, so an interrupt cannot leave the
+  replica behind its barrier; a barrier that cannot be raised frees the ID.
 - **fork**: claim the replica IDs under the group lock, then per replica in
   parallel: create its fabric with the barrier raised, fork every member
   attached to it, lower the barrier. A replica that fails is torn down,

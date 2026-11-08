@@ -16,75 +16,112 @@ import (
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
 
-const composeUsage = `Usage: waypoint compose <command> [args...]
-Commands:
-  up [-f FILE]... [-p NAME] [--quiet]               - Start a project from a compose file
-  checkpoint <project> <checkpoint-id>              - Snapshot the main replica
-  snapshot <project> <replica> <checkpoint-id> [--park] - Snapshot a replica (--park: don't resume it)
-  fork <project> <checkpoint-id> [--id ID] [--n K]  - Materialize live replica(s)
-  exec <project> <replica> <service> -- '<command>' - Run one bash command line in a service
-  destroy <project> <replica>                       - Destroy a replica
-  list [project] [--json]                           - List projects, or a project's replicas and checkpoints
-  suspend <project>                                 - End all replicas; keep checkpoints
-  cleanup <project> [--force]                       - Remove the project and its sessions`
+// composeCommands is the one description of each subcommand's syntax, for
+// both the overview and a subcommand's own usage line.
+var composeCommands = []struct{ name, args, help string }{
+	{"up", "[-f FILE]... [-p NAME] [--quiet]", "Start a project from a compose file"},
+	{"checkpoint", "<project> <checkpoint-id>", "Snapshot the main replica"},
+	{"snapshot", "<project> <replica> <checkpoint-id> [--park]", "Snapshot a replica (--park: don't resume it)"},
+	{"fork", "<project> <checkpoint-id> [--id ID] [--n K]", "Materialize live replica(s)"},
+	{"exec", "<project> <replica> <service> -- '<command>'", "Run one bash command line in a service"},
+	{"destroy", "<project> <replica>", "Destroy a replica"},
+	{"list", "[project] [--json]", "List projects, or a project's replicas and checkpoints"},
+	{"suspend", "<project>", "End all replicas; keep checkpoints"},
+	{"cleanup", "<project> [--force]", "Remove the project and its sessions"},
+}
 
-func composeFail(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
+// composeUsage prints cmd's usage line, or the overview for an unknown
+// command, and exits.
+func composeUsage(cmd string) {
+	for _, c := range composeCommands {
+		if c.name == cmd {
+			fmt.Printf("Usage: compose %s %s\n", c.name, c.args)
+			os.Exit(1)
+		}
+	}
+	fmt.Println("Usage: waypoint compose <command> [args...]")
+	fmt.Println("Commands:")
+	for _, c := range composeCommands {
+		fmt.Printf("  %-54s - %s\n", c.name+" "+c.args, c.help)
+	}
 	os.Exit(1)
 }
 
-func composeArgs(args []string, n int, usage string) {
-	if len(args) != n {
-		fmt.Println("Usage: compose " + usage)
-		os.Exit(1)
+// composeFail reports an error the way the session commands do, and exits.
+func composeFail(err error) {
+	fmt.Printf("Error: %v\n", err)
+	os.Exit(1)
+}
+
+// composeFlag is a flag a subcommand accepts: the name its values are
+// collected under (so aliases share one) and whether it takes a value.
+type composeFlag struct {
+	name  string
+	value bool
+}
+
+// composeArgs splits a subcommand's arguments into positionals and flags,
+// which may appear in any order. It exits with the usage line unless there
+// are between minPos and maxPos positionals, and with an error for an
+// unknown flag or a missing value. A flag without a value collects "".
+func composeArgs(cmd string, args []string, minPos, maxPos int, flags map[string]composeFlag) ([]string, map[string][]string) {
+	var pos []string
+	got := map[string][]string{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		flag, known := flags[arg]
+		switch {
+		case known && flag.value:
+			if i++; i >= len(args) {
+				composeFail(fmt.Errorf("%s requires a value", arg))
+			}
+			got[flag.name] = append(got[flag.name], args[i])
+		case known:
+			got[flag.name] = append(got[flag.name], "")
+		case strings.HasPrefix(arg, "-"):
+			composeFail(fmt.Errorf("unknown flag: %s", arg))
+		default:
+			pos = append(pos, arg)
+		}
 	}
+	if len(pos) < minPos || len(pos) > maxPos {
+		composeUsage(cmd)
+	}
+	return pos, got
 }
 
 func runCompose(args []string) {
 	if len(args) == 0 {
-		fmt.Println(composeUsage)
-		os.Exit(1)
+		composeUsage("")
 	}
-	group.Logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, format, a...) }
 	cmd, args := args[0], args[1:]
 	switch cmd {
 	case "up":
-		var files []string
+		_, flags := composeArgs(cmd, args, 0, 0, map[string]composeFlag{
+			"-f": {"file", true}, "--file": {"file", true},
+			"-p": {"name", true}, "--project-name": {"name", true},
+			"--quiet": {"quiet", false},
+		})
+		_, quiet := flags["quiet"]
 		name := ""
-		quiet := false
-		for i := 0; i < len(args); i++ {
-			switch args[i] {
-			case "-f", "--file", "-p", "--project-name":
-				if i+1 >= len(args) {
-					composeFail("%s requires a value", args[i])
-				}
-				if args[i] == "-f" || args[i] == "--file" {
-					files = append(files, args[i+1])
-				} else {
-					name = args[i+1]
-				}
-				i++
-			case "--quiet":
-				quiet = true
-			default:
-				composeFail("unknown flag: %s", args[i])
-			}
+		if names := flags["name"]; len(names) > 0 {
+			name = names[len(names)-1]
 		}
-		if quiet {
-			group.Logf = func(string, ...any) {}
+		var logf group.Logger
+		if !quiet {
+			logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, format, a...) }
 		}
-		project, err := compose.Load(files, name)
+		project, err := compose.Load(flags["file"], name)
 		if err != nil {
-			composeFail("%v", err)
+			composeFail(err)
 		}
-		defer project.Close()
 		for _, w := range project.Warnings {
 			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 		}
-		rec, err := group.Up(project.Spec)
+		rec, err := group.Up(project.Spec, logf)
+		project.Close()
 		if err != nil {
-			project.Close()
-			composeFail("%v", err)
+			composeFail(err)
 		}
 		if quiet {
 			fmt.Println(rec.Name)
@@ -96,70 +133,53 @@ func runCompose(args []string) {
 		}
 
 	case "checkpoint":
-		composeArgs(args, 2, "checkpoint <project> <checkpoint-id>")
-		if _, err := group.Snapshot(args[0], group.MainReplica, args[1], false); err != nil {
-			composeFail("%v", err)
+		pos, _ := composeArgs(cmd, args, 2, 2, nil)
+		if _, err := group.Snapshot(pos[0], group.MainReplica, pos[1], false); err != nil {
+			composeFail(err)
 		}
-		fmt.Printf("Checkpoint '%s' created successfully\n", args[1])
+		fmt.Printf("Checkpoint '%s' created successfully\n", pos[1])
 
 	case "snapshot":
-		if len(args) == 4 && args[3] == "--park" {
-			if _, err := group.Snapshot(args[0], args[1], args[2], true); err != nil {
-				composeFail("%v", err)
-			}
-			fmt.Printf("Replica '%s' parked as checkpoint '%s'\n", args[1], args[2])
-			return
+		pos, flags := composeArgs(cmd, args, 3, 3, map[string]composeFlag{"--park": {"park", false}})
+		_, park := flags["park"]
+		if _, err := group.Snapshot(pos[0], pos[1], pos[2], park); err != nil {
+			composeFail(err)
 		}
-		composeArgs(args, 3, "snapshot <project> <replica> <checkpoint-id> [--park]")
-		if _, err := group.Snapshot(args[0], args[1], args[2], false); err != nil {
-			composeFail("%v", err)
+		verb := "snapshotted"
+		if park {
+			verb = "parked"
 		}
-		fmt.Printf("Replica '%s' snapshotted as checkpoint '%s'\n", args[1], args[2])
+		fmt.Printf("Replica '%s' %s as checkpoint '%s'\n", pos[1], verb, pos[2])
 
 	case "fork":
-		if len(args) < 2 {
-			fmt.Println("Usage: compose fork <project> <checkpoint-id> [--id ID] [--n K]")
-			os.Exit(1)
-		}
-		var ids []string
-		count := 1
-		for i := 2; i < len(args); i++ {
-			if i+1 >= len(args) {
-				composeFail("%s requires a value", args[i])
+		pos, flags := composeArgs(cmd, args, 2, 2, map[string]composeFlag{"--id": {"id", true}, "--n": {"n", true}})
+		ids, count := flags["id"], 1
+		if counts := flags["n"]; len(counts) > 0 {
+			n, err := strconv.Atoi(counts[len(counts)-1])
+			if err != nil || n <= 0 {
+				composeFail(fmt.Errorf("invalid replica count: %s", counts[len(counts)-1]))
 			}
-			switch args[i] {
-			case "--id":
-				ids = append(ids, args[i+1])
-			case "--n":
-				n, err := strconv.Atoi(args[i+1])
-				if err != nil || n <= 0 {
-					composeFail("invalid replica count: %s", args[i+1])
-				}
-				count = n
-			default:
-				composeFail("unknown flag: %s", args[i])
-			}
-			i++
+			count = n
 		}
 		if len(ids) > 1 || (len(ids) == 1 && count != 1) {
-			composeFail("--id can only be used when creating one replica")
+			composeFail(errors.New("--id can only be used when creating one replica"))
 		}
-		replicas, err := group.Fork(args[0], args[1], ids, count)
+		replicas, err := group.Fork(pos[0], pos[1], ids, count)
 		for _, r := range replicas {
 			fmt.Println(r.ID)
 		}
 		if err != nil {
-			composeFail("%v", err)
+			composeFail(err)
 		}
 
 	case "exec":
+		// Everything after `--` is the command, never a flag.
 		if len(args) < 4 || args[3] != "--" {
-			fmt.Println("Usage: compose exec <project> <replica> <service> -- '<bash command line>'")
-			os.Exit(1)
+			composeUsage(cmd)
 		}
 		command, err := parseExecCommand(args[4:])
 		if err != nil {
-			composeFail("%v", err)
+			composeFail(err)
 		}
 		result, err := group.Exec(args[0], args[1], args[2], command)
 		if errors.Is(err, waypoint.ErrCommandSyntax) {
@@ -167,93 +187,99 @@ func runCompose(args []string) {
 			os.Exit(2)
 		}
 		if err != nil {
-			composeFail("%v", err)
+			composeFail(err)
 		}
 		printExecResult(result)
 
 	case "destroy":
-		composeArgs(args, 2, "destroy <project> <replica>")
-		if err := group.Destroy(args[0], args[1]); err != nil {
-			composeFail("%v", err)
+		pos, _ := composeArgs(cmd, args, 2, 2, nil)
+		if err := group.Destroy(pos[0], pos[1]); err != nil {
+			composeFail(err)
 		}
-		fmt.Printf("Replica '%s' destroyed\n", args[1])
+		fmt.Printf("Replica '%s' destroyed\n", pos[1])
 
 	case "list":
-		asJSON := len(args) > 0 && args[len(args)-1] == "--json"
-		if asJSON {
-			args = args[:len(args)-1]
-		}
-		if len(args) == 0 {
-			names, err := group.ListProjects()
-			if err != nil {
-				composeFail("%v", err)
-			}
-			if asJSON {
-				printJSON(names)
-				return
-			}
-			if len(names) == 0 {
-				fmt.Println("No projects found")
-			}
-			for _, n := range names {
-				fmt.Println(n)
-			}
-			return
-		}
-		composeArgs(args, 1, "list [project] [--json]")
-		listing, err := group.List(args[0])
-		if err != nil {
-			composeFail("%v", err)
-		}
-		if asJSON {
-			printJSON(listing)
-			return
-		}
-		fmt.Printf("Project %s (%s, subnet %s)\n", listing.Record.Name, listing.Record.Status, listing.Record.Subnet)
-		fmt.Println("Services:")
-		for _, s := range listing.Record.Services {
-			fmt.Printf("  %s session=%s addr=%s\n", s.Name, s.SessionID, s.Address)
-		}
-		if len(listing.Checkpoints) > 0 {
-			fmt.Println("Checkpoints:")
-			for _, c := range listing.Checkpoints {
-				fmt.Printf("  %s parent=%s from=%s status=%s\n", c.ID, c.Parent, c.FromReplica, c.Status)
-			}
-		}
-		if len(listing.Replicas) > 0 {
-			fmt.Println("Replicas:")
-			for _, r := range listing.Replicas {
-				fmt.Printf("  %s checkpoint=%s status=%s\n", r.ID, r.Checkpoint, r.Status)
-			}
+		pos, flags := composeArgs(cmd, args, 0, 1, map[string]composeFlag{"--json": {"json", false}})
+		_, asJSON := flags["json"]
+		if len(pos) == 0 {
+			listComposeProjects(asJSON)
+		} else {
+			listComposeProject(pos[0], asJSON)
 		}
 
 	case "suspend":
-		composeArgs(args, 1, "suspend <project>")
-		if err := group.Suspend(args[0]); err != nil {
-			composeFail("%v", err)
+		pos, _ := composeArgs(cmd, args, 1, 1, nil)
+		if err := group.Suspend(pos[0]); err != nil {
+			composeFail(err)
 		}
-		fmt.Printf("Project '%s' suspended; fork a checkpoint to continue\n", args[0])
+		fmt.Printf("Project '%s' suspended; fork a checkpoint to continue\n", pos[0])
 
 	case "cleanup":
-		force := len(args) == 2 && args[1] == "--force"
-		if !force {
-			composeArgs(args, 1, "cleanup <project> [--force]")
+		pos, flags := composeArgs(cmd, args, 1, 1, map[string]composeFlag{"--force": {"force", false}})
+		_, force := flags["force"]
+		if err := group.Cleanup(pos[0], force); err != nil {
+			composeFail(err)
 		}
-		if err := group.Cleanup(args[0], force); err != nil {
-			composeFail("%v", err)
+		if waypoint.PreserveSessionOnCleanup {
+			fmt.Printf("Project '%s' stopped; the project and its sessions are preserved\n", pos[0])
+			return
 		}
-		fmt.Printf("Project '%s' cleaned up\n", args[0])
+		fmt.Printf("Project '%s' cleaned up\n", pos[0])
 
 	default:
-		fmt.Println(composeUsage)
-		os.Exit(1)
+		composeUsage("")
+	}
+}
+
+func listComposeProjects(asJSON bool) {
+	names, err := group.ListProjects()
+	if err != nil {
+		composeFail(err)
+	}
+	if asJSON {
+		printJSON(names)
+		return
+	}
+	if len(names) == 0 {
+		fmt.Println("No projects found")
+	}
+	for _, n := range names {
+		fmt.Println(n)
+	}
+}
+
+func listComposeProject(name string, asJSON bool) {
+	listing, err := group.List(name)
+	if err != nil {
+		composeFail(err)
+	}
+	if asJSON {
+		printJSON(listing)
+		return
+	}
+	fmt.Printf("Project %s (%s, subnet %s)\n", listing.Record.Name, listing.Record.Status, listing.Record.Subnet)
+	fmt.Println("Services:")
+	for _, s := range listing.Record.Services {
+		fmt.Printf("  %s session=%s addr=%s\n", s.Name, s.SessionID, s.Address)
+	}
+	if len(listing.Checkpoints) > 0 {
+		fmt.Println("Checkpoints:")
+		for _, c := range listing.Checkpoints {
+			fmt.Printf("  %s parent=%s from=%s status=%s\n", c.ID, c.Parent, c.FromReplica, c.Status)
+		}
+	}
+	if len(listing.Replicas) > 0 {
+		fmt.Println("Replicas:")
+		for _, r := range listing.Replicas {
+			fmt.Printf("  %s checkpoint=%s status=%s\n", r.ID, r.Checkpoint, r.Status)
+		}
 	}
 }
 
 func printJSON(v any) {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		composeFail("encoding output: %v", err)
+		composeFail(fmt.Errorf("encoding output: %w", err))
 	}
-	fmt.Println(strings.TrimRight(string(data), "\n"))
+	fmt.Println(string(data))
 }

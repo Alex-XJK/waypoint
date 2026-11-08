@@ -7,11 +7,11 @@ package compose
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/compose-spec/compose-go/v2/cli"
 	"github.com/compose-spec/compose-go/v2/types"
@@ -149,37 +149,59 @@ func (p *Project) service(project *types.Project, s types.ServiceConfig) (group.
 	return svc, nil
 }
 
+// The settings translate honors, plus those compose-go has already resolved
+// into them (env_file, extends, profiles) and labels, which have nothing to
+// lose. Everything else a service or its build sets is warned about, so a
+// setting compose gains later is reported rather than silently dropped.
+var (
+	supportedService = map[string]bool{
+		"image": true, "build": true, "command": true, "entrypoint": true,
+		"environment": true, "env_file": true, "working_dir": true,
+		"depends_on": true, "networks": true, "profiles": true, "extends": true,
+		"labels": true, "label_file": true, "annotations": true,
+	}
+	supportedBuild = map[string]bool{"context": true, "dockerfile": true, "args": true, "target": true}
+)
+
+// settings returns the names of the settings v carries, sorted: the keys of
+// its JSON form, where compose-go omits whatever is unset.
+func settings(v any) []string {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var set map[string]json.RawMessage
+	if json.Unmarshal(data, &set) != nil {
+		return nil
+	}
+	return sortedKeys(set)
+}
+
+// inert reports a setting that is present but asks for nothing.
+func inert(key string, s types.ServiceConfig) bool {
+	switch key {
+	case "scale":
+		return s.Scale != nil && *s.Scale == 1
+	case "init":
+		return s.Init != nil && !*s.Init
+	case "healthcheck":
+		return s.HealthCheck != nil && s.HealthCheck.Disable
+	}
+	return false
+}
+
 // unsupported warns about the service settings Waypoint ignores.
 func (p *Project) unsupported(s types.ServiceConfig) {
-	ignored := map[string]bool{
-		"ports":             len(s.Ports) > 0,
-		"expose":            len(s.Expose) > 0,
-		"volumes":           len(s.Volumes) > 0 || len(s.VolumesFrom) > 0,
-		"healthcheck":       s.HealthCheck != nil && !s.HealthCheck.Disable,
-		"restart":           s.Restart != "",
-		"deploy":            s.Deploy != nil,
-		"scale":             s.Scale != nil && *s.Scale != 1,
-		"user":              s.User != "",
-		"hostname":          s.Hostname != "",
-		"extra_hosts":       len(s.ExtraHosts) > 0,
-		"dns":               len(s.DNS) > 0 || len(s.DNSSearch) > 0 || len(s.DNSOpts) > 0,
-		"network_mode":      s.NetworkMode != "",
-		"cap_add":           len(s.CapAdd) > 0 || len(s.CapDrop) > 0,
-		"privileged":        s.Privileged,
-		"devices":           len(s.Devices) > 0,
-		"secrets":           len(s.Secrets) > 0,
-		"configs":           len(s.Configs) > 0,
-		"tmpfs":             len(s.Tmpfs) > 0,
-		"sysctls":           len(s.Sysctls) > 0,
-		"ulimits":           len(s.Ulimits) > 0,
-		"limits":            s.MemLimit != 0 || s.CPUS != 0 || s.PidsLimit != 0,
-		"init":              s.Init != nil && *s.Init,
-		"tty":               s.Tty || s.StdinOpen,
-		"build.secrets/ssh": s.Build != nil && (len(s.Build.Secrets) > 0 || len(s.Build.SSH) > 0),
-	}
-	for _, key := range sortedKeys(ignored) {
-		if ignored[key] {
+	for _, key := range settings(s) {
+		if !supportedService[key] && !inert(key, s) {
 			p.warn("service %s: %s is ignored", s.Name, key)
+		}
+	}
+	if s.Build != nil {
+		for _, key := range settings(*s.Build) {
+			if !supportedBuild[key] {
+				p.warn("service %s: build.%s is ignored", s.Name, key)
+			}
 		}
 	}
 	for _, dep := range sortedKeys(s.DependsOn) {
@@ -273,15 +295,4 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-// DescribeService summarizes how a service's rootfs is made, for messages.
-func DescribeService(s group.Service) string {
-	switch {
-	case s.Rootfs != "":
-		return "rootfs " + s.Rootfs
-	case s.Build != nil:
-		return "build " + strings.TrimSpace(s.Build.Context)
-	}
-	return "?"
 }

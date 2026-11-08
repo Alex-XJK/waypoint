@@ -67,7 +67,7 @@ type Record struct {
 	Name      string          `json:"name"`
 	Subnet    string          `json:"subnet"`
 	Services  []ServiceRecord `json:"services"`
-	Status    string          `json:"status"`
+	Status    ProjectStatus   `json:"status"`
 	CreatedAt int64           `json:"created_at"`
 }
 
@@ -82,31 +82,52 @@ type ServiceRecord struct {
 
 // Replica is a live replica of the project.
 type Replica struct {
-	ID         string `json:"id"`
-	Checkpoint string `json:"checkpoint,omitempty"`
-	Fabric     string `json:"fabric"`
-	Status     string `json:"status"`
-	CreatedAt  int64  `json:"created_at"`
+	ID         string        `json:"id"`
+	Checkpoint string        `json:"checkpoint,omitempty"`
+	Fabric     string        `json:"fabric"`
+	Status     ReplicaStatus `json:"status"`
+	CreatedAt  int64         `json:"created_at"`
 }
 
 // Checkpoint is a group checkpoint's manifest: checkpoint ID in every member.
 type Checkpoint struct {
-	ID          string `json:"id"`
-	Parent      string `json:"parent,omitempty"`
-	FromReplica string `json:"from_replica"`
-	Status      string `json:"status"`
-	Error       string `json:"error,omitempty"`
-	CreatedAt   int64  `json:"created_at"`
+	ID          string           `json:"id"`
+	Parent      string           `json:"parent,omitempty"`
+	FromReplica string           `json:"from_replica"`
+	Status      CheckpointStatus `json:"status"`
+	Error       string           `json:"error,omitempty"`
+	CreatedAt   int64            `json:"created_at"`
 }
 
+// ProjectStatus is a project's lifecycle: creating while `up` runs, then
+// ready. Only cleanup accepts a project that is not ready.
+type ProjectStatus string
+
 const (
-	StatusCreating = "creating"
-	StatusReady    = "ready"
-	StatusRunning  = "running"
-	StatusFailed   = "failed"
-	// StatusDegraded marks a replica whose members may no longer agree,
+	ProjectCreating ProjectStatus = "creating"
+	ProjectReady    ProjectStatus = "ready"
+)
+
+// ReplicaStatus is a replica's lifecycle: creating while its members are
+// forked, then running. Only a running replica can be snapshotted.
+type ReplicaStatus string
+
+const (
+	ReplicaCreating ReplicaStatus = "creating"
+	ReplicaRunning  ReplicaStatus = "running"
+	// ReplicaDegraded marks a replica whose members may no longer agree,
 	// after a failed group snapshot.
-	StatusDegraded = "degraded"
+	ReplicaDegraded ReplicaStatus = "degraded"
+)
+
+// CheckpointStatus is a group checkpoint's lifecycle: creating while its
+// members are snapshotted, then ready (forkable) or failed.
+type CheckpointStatus string
+
+const (
+	CheckpointCreating CheckpointStatus = "creating"
+	CheckpointReady    CheckpointStatus = "ready"
+	CheckpointFailed   CheckpointStatus = "failed"
 )
 
 // Listing is the stable JSON shape of `compose list <project> --json`.
@@ -216,6 +237,9 @@ func IsProjectFabric(pin string) bool {
 }
 
 func loadReplica(name, id string) (*Replica, error) {
+	if err := waypoint.ValidateID("replica", id); err != nil {
+		return nil, err
+	}
 	var r Replica
 	if err := readJSON(replicaPath(name, id), &r); err != nil {
 		if os.IsNotExist(err) {
@@ -227,6 +251,9 @@ func loadReplica(name, id string) (*Replica, error) {
 }
 
 func loadCheckpoint(name, id string) (*Checkpoint, error) {
+	if err := waypoint.ValidateID("checkpoint", id); err != nil {
+		return nil, err
+	}
 	var c Checkpoint
 	if err := readJSON(checkpointPath(name, id), &c); err != nil {
 		if os.IsNotExist(err) {
@@ -322,7 +349,7 @@ func plan(spec Spec) ([]ServiceRecord, string, error) {
 		return nil, "", fmt.Errorf("invalid subnet %q: want an IPv4 CIDR", subnet)
 	}
 	ones, _ := ipNet.Mask.Size()
-	if hosts := 1<<(32-ones) - 3; len(spec.Services) > hosts {
+	if hosts := max(1<<(32-ones)-3, 0); len(spec.Services) > hosts {
 		return nil, "", fmt.Errorf("subnet %s has room for %d services, not %d", subnet, hosts, len(spec.Services))
 	}
 	base := ipNet.IP.To4()

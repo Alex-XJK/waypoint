@@ -15,18 +15,27 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
 
-// Logf, if set, receives progress messages.
-var Logf = func(format string, args ...any) {}
+// Logger receives progress messages; a nil Logger discards them.
+type Logger func(format string, args ...any)
 
-// parallel runs fn(i) for i in [0,n) concurrently and joins the errors.
-func parallel(n int, fn func(i int) error) error {
+func (l Logger) printf(format string, args ...any) {
+	if l != nil {
+		l(format, args...)
+	}
+}
+
+// parallel runs fn(i) for i in [0,n) concurrently and returns each call's
+// error at its index.
+func parallel(n int, fn func(i int) error) []error {
 	errs := make([]error, n)
 	var wg sync.WaitGroup
 	wg.Add(n)
@@ -37,30 +46,66 @@ func parallel(n int, fn func(i int) error) error {
 		}(i)
 	}
 	wg.Wait()
-	return errors.Join(errs...)
+	return errs
 }
 
-func members(rec *Record) ([]*waypoint.Manager, error) {
-	ms := make([]*waypoint.Manager, len(rec.Services))
+// project is a ready project loaded for an operation: its record and its
+// member sessions, members[i] being the session of rec.Services[i].
+type project struct {
+	rec     *Record
+	members []*waypoint.Manager
+}
+
+func load(name string) (*project, error) {
+	rec, err := LoadRecord(name)
+	if err != nil {
+		return nil, err
+	}
+	if rec.Status != ProjectReady {
+		return nil, fmt.Errorf("project %s is %s", name, rec.Status)
+	}
+	p := &project{rec: rec, members: make([]*waypoint.Manager, len(rec.Services))}
 	for i, s := range rec.Services {
-		if s.SessionID == "" {
-			return nil, fmt.Errorf("service %s has no session", s.Name)
-		}
-		m, err := waypoint.LoadManager(s.SessionID)
-		if err != nil {
+		if p.members[i], err = waypoint.LoadManager(s.SessionID); err != nil {
 			return nil, fmt.Errorf("service %s: %w", s.Name, err)
 		}
-		ms[i] = m
 	}
-	return ms, nil
+	return p, nil
+}
+
+// each runs fn on every member in parallel and joins the errors, each named
+// by its service.
+func (p *project) each(fn func(i int, m *waypoint.Manager) error) error {
+	return errors.Join(parallel(len(p.members), func(i int) error {
+		if err := fn(i, p.members[i]); err != nil {
+			return fmt.Errorf("service %s: %w", p.rec.Services[i].Name, err)
+		}
+		return nil
+	})...)
+}
+
+// withReplica runs fn on replica id under its lock. The replica is looked up
+// before the lock is taken too, so an unknown ID leaves no lockfile behind.
+func (p *project) withReplica(id string, fn func(rep *Replica) error) error {
+	name := p.rec.Name
+	if _, err := loadReplica(name, id); err != nil {
+		return err
+	}
+	return waypoint.WithFileLock(replicaLockPath(name, id), func() error {
+		rep, err := loadReplica(name, id)
+		if err != nil {
+			return err
+		}
+		return fn(rep)
+	})
 }
 
 // --- up ---
 
 // Up creates the project's sessions, starts each service's main fork on
 // fabric "main", and runs the services' commands in order. Builds run quietly;
-// progress goes to Logf. On failure everything created so far is removed.
-func Up(spec Spec) (*Record, error) {
+// progress goes to logf. On failure everything created so far is removed.
+func Up(spec Spec, logf Logger) (*Record, error) {
 	services, subnet, err := plan(spec)
 	if err != nil {
 		return nil, err
@@ -80,7 +125,7 @@ func Up(spec Spec) (*Record, error) {
 		}
 		return nil, err
 	}
-	rec := &Record{Name: name, Subnet: subnet, Services: services, Status: StatusCreating, CreatedAt: time.Now().Unix()}
+	rec := &Record{Name: name, Subnet: subnet, Services: services, Status: ProjectCreating, CreatedAt: time.Now().Unix()}
 	var recMu sync.Mutex
 	saveRec := func() error {
 		recMu.Lock()
@@ -93,7 +138,7 @@ func Up(spec Spec) (*Record, error) {
 	}
 
 	fail := func(err error) (*Record, error) {
-		Logf("up failed; removing project %s\n", name)
+		logf.printf("up failed; removing project %s\n", name)
 		_ = Cleanup(name, true)
 		return nil, err
 	}
@@ -104,50 +149,25 @@ func Up(spec Spec) (*Record, error) {
 	}
 	hosts := hostsLines(services)
 	commands := make([][]string, len(spec.Services))
-	err = parallel(len(spec.Services), func(i int) error {
+	if err := errors.Join(parallel(len(spec.Services), func(i int) error {
 		svc := spec.Services[i]
-		m, sessionID, err := waypoint.NewManagerWithNetwork(waypoint.NetworkPrivate)
+		attach := waypoint.NetworkAttachment{FabricNS: pin, Address: services[i].Address}
+		// The session is recorded as soon as it exists, so a failed up
+		// removes it.
+		created := func(sessionID string) error {
+			recMu.Lock()
+			rec.Services[i].SessionID = sessionID
+			recMu.Unlock()
+			logf.printf("starting service %s (session %s)\n", svc.Name, sessionID)
+			return saveRec()
+		}
+		argv, err := startMember(name, svc, attach, hosts, created)
 		if err != nil {
 			return fmt.Errorf("service %s: %w", svc.Name, err)
 		}
-		recMu.Lock()
-		rec.Services[i].SessionID = sessionID
-		recMu.Unlock()
-		if err := saveRec(); err != nil {
-			return err
-		}
-		if err := m.SetGroup(name, svc.Name); err != nil {
-			return err
-		}
-		if err := m.AttachMain(waypoint.NetworkAttachment{FabricNS: pin, Address: services[i].Address}); err != nil {
-			return fmt.Errorf("service %s: %w", svc.Name, err)
-		}
-		if err := m.SetGuestOptions(waypoint.GuestOptions{Env: svc.Env, WorkDir: svc.WorkDir, Hostname: svc.Name, Hosts: hosts}); err != nil {
-			return fmt.Errorf("service %s: %w", svc.Name, err)
-		}
-		Logf("starting service %s (session %s)\n", svc.Name, sessionID)
-		if svc.Build != nil {
-			if _, _, err := m.BuildEnvironmentFrom(*svc.Build, true); err != nil {
-				return fmt.Errorf("service %s: %w", svc.Name, err)
-			}
-		} else {
-			staged, err := m.StageEnvironment(svc.Rootfs)
-			if err != nil {
-				return fmt.Errorf("service %s: %w", svc.Name, err)
-			}
-			work, err := m.InitEnvironment(staged)
-			if err != nil {
-				return fmt.Errorf("service %s: %w", svc.Name, err)
-			}
-			if _, _, err := m.StartShell(work); err != nil {
-				return fmt.Errorf("service %s: %w", svc.Name, err)
-			}
-		}
-		entrypoint, cmd := m.ImageCommand()
-		commands[i] = serviceArgv(svc, entrypoint, cmd)
+		commands[i] = argv
 		return nil
-	})
-	if err != nil {
+	})...); err != nil {
 		return fail(err)
 	}
 
@@ -163,7 +183,7 @@ func Up(spec Spec) (*Record, error) {
 		if err != nil {
 			return fail(err)
 		}
-		Logf("running %s: %s\n", s.Name, strings.Join(commands[i], " "))
+		logf.printf("running %s: %s\n", s.Name, strings.Join(commands[i], " "))
 		res, err := m.ExecuteForkCommand(waypoint.MainForkID, line)
 		if err != nil {
 			return fail(fmt.Errorf("start service %s: %w", s.Name, err))
@@ -174,15 +194,56 @@ func Up(spec Spec) (*Record, error) {
 	}
 
 	if err := writeJSON(replicaPath(name, MainReplica), Replica{
-		ID: MainReplica, Fabric: pin, Status: StatusRunning, CreatedAt: time.Now().Unix(),
+		ID: MainReplica, Fabric: pin, Status: ReplicaRunning, CreatedAt: time.Now().Unix(),
 	}); err != nil {
 		return fail(err)
 	}
-	rec.Status = StatusReady
+	rec.Status = ProjectReady
 	if err := saveRec(); err != nil {
 		return fail(err)
 	}
 	return rec, nil
+}
+
+// startMember creates svc's session and brings its main fork's shell up,
+// attached to the project's main fabric. It calls created with the session ID
+// once the session exists, and returns the argv the service should run.
+func startMember(project string, svc Service, attach waypoint.NetworkAttachment, hosts []string, created func(sessionID string) error) ([]string, error) {
+	m, sessionID, err := waypoint.NewManagerWithNetwork(waypoint.NetworkPrivate)
+	if err != nil {
+		return nil, err
+	}
+	if err := created(sessionID); err != nil {
+		return nil, err
+	}
+	if err := m.SetGroup(project, svc.Name); err != nil {
+		return nil, err
+	}
+	if err := m.AttachMain(attach); err != nil {
+		return nil, err
+	}
+	if err := m.SetGuestOptions(waypoint.GuestOptions{Env: svc.Env, WorkDir: svc.WorkDir, Hostname: svc.Name, Hosts: hosts}); err != nil {
+		return nil, err
+	}
+	if svc.Build != nil {
+		if _, _, err := m.BuildEnvironmentFrom(*svc.Build, true); err != nil {
+			return nil, err
+		}
+	} else {
+		staged, err := m.StageEnvironment(svc.Rootfs)
+		if err != nil {
+			return nil, err
+		}
+		work, err := m.InitEnvironment(staged)
+		if err != nil {
+			return nil, err
+		}
+		if _, _, err := m.StartShell(work); err != nil {
+			return nil, err
+		}
+	}
+	entrypoint, cmd := m.ImageCommand()
+	return serviceArgv(svc, entrypoint, cmd), nil
 }
 
 // --- snapshot ---
@@ -199,77 +260,116 @@ func Snapshot(name, replica, ckpt string, park bool) (*Checkpoint, error) {
 	if park && replica == MainReplica {
 		return nil, fmt.Errorf("cannot park %s: the project needs a live main replica", MainReplica)
 	}
-	rec, err := LoadRecord(name)
-	if err != nil {
-		return nil, err
-	}
-	ms, err := members(rec)
+	p, err := load(name)
 	if err != nil {
 		return nil, err
 	}
 	var manifest *Checkpoint
-	err = waypoint.WithFileLock(replicaLockPath(name, replica), func() error {
-		rep, err := loadReplica(name, replica)
-		if err != nil {
-			return err
-		}
-		if rep.Status != StatusRunning {
+	err = p.withReplica(replica, func(rep *Replica) error {
+		if rep.Status != ReplicaRunning {
 			return fmt.Errorf("replica %s is %s", replica, rep.Status)
 		}
-		if err := waypoint.WithFileLock(groupLockPath(name), func() error {
-			if _, err := os.Stat(checkpointPath(name, ckpt)); err == nil {
-				return fmt.Errorf("checkpoint %s already exists in project %s", ckpt, name)
-			}
-			for _, s := range rec.Services {
-				if _, err := waypoint.LoadCheckpointMetadata(s.SessionID, ckpt); err == nil {
-					return fmt.Errorf("checkpoint %s already exists in service %s", ckpt, s.Name)
-				}
-			}
-			manifest = &Checkpoint{ID: ckpt, Parent: rep.Checkpoint, FromReplica: replica, Status: StatusCreating, CreatedAt: time.Now().Unix()}
-			return writeJSON(checkpointPath(name, ckpt), manifest)
-		}); err != nil {
+		var err error
+		if manifest, err = p.claimCheckpoint(rep, ckpt); err != nil {
 			return err
 		}
-
-		if err := waypoint.SetFabricBarrier(rep.Fabric, true); err != nil {
-			return fmt.Errorf("raise barrier: %w", err)
-		}
-		snapErr := parallel(len(ms), func(i int) error {
-			var err error
-			if park {
-				_, err = ms[i].ParkFork(replica, ckpt)
-			} else {
-				_, err = ms[i].SnapshotFork(replica, ckpt)
-			}
-			if err != nil {
-				return fmt.Errorf("service %s: %w", rec.Services[i].Name, err)
-			}
-			return nil
-		})
-		if !park || snapErr != nil {
-			if err := waypoint.SetFabricBarrier(rep.Fabric, false); err != nil {
-				snapErr = errors.Join(snapErr, fmt.Errorf("lower barrier: %w", err))
-			}
-		}
-		if snapErr != nil {
-			manifest.Status, manifest.Error = StatusFailed, snapErr.Error()
-			rep.Status = StatusDegraded
-			_ = writeJSON(replicaPath(name, replica), rep)
-			_ = writeJSON(checkpointPath(name, ckpt), manifest)
-			return snapErr
-		}
-		manifest.Status = StatusReady
-		if err := writeJSON(checkpointPath(name, ckpt), manifest); err != nil {
+		// From here to the last record write, an interrupt would strand the
+		// replica behind its barrier with the manifest still "creating".
+		defer holdSignals()()
+		err = p.cut(rep, ckpt, park)
+		if errors.Is(err, errNotCut) {
+			_ = os.Remove(checkpointPath(name, ckpt)) // nothing was snapshotted; free the ID
 			return err
 		}
-		if park {
-			waypoint.ReleaseFabric(rep.Fabric)
-			return os.Remove(replicaPath(name, replica))
-		}
-		rep.Checkpoint = ckpt
-		return writeJSON(replicaPath(name, replica), rep)
+		return p.commitSnapshot(rep, manifest, park, err)
 	})
 	return manifest, err
+}
+
+// claimCheckpoint reserves ckpt in the project, refusing an ID that the
+// project or any member already has, and returns its "creating" manifest.
+func (p *project) claimCheckpoint(rep *Replica, ckpt string) (*Checkpoint, error) {
+	name := p.rec.Name
+	manifest := &Checkpoint{ID: ckpt, Parent: rep.Checkpoint, FromReplica: rep.ID, Status: CheckpointCreating, CreatedAt: time.Now().Unix()}
+	err := waypoint.WithFileLock(groupLockPath(name), func() error {
+		if _, err := os.Stat(checkpointPath(name, ckpt)); err == nil {
+			return fmt.Errorf("checkpoint %s already exists in project %s", ckpt, name)
+		}
+		for _, s := range p.rec.Services {
+			if _, err := waypoint.LoadCheckpointMetadata(s.SessionID, ckpt); err == nil {
+				return fmt.Errorf("checkpoint %s already exists in service %s", ckpt, s.Name)
+			}
+		}
+		return writeJSON(checkpointPath(name, ckpt), manifest)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return manifest, nil
+}
+
+// errNotCut marks a cut that failed before any member was touched.
+var errNotCut = errors.New("replica not snapshotted")
+
+// cut snapshots (or parks) every member fork of rep as ckpt behind the fabric
+// barrier, which makes the member snapshots one consistent cut. The barrier is
+// lowered again however the snapshots end, except after a successful park:
+// that replica is gone, and its fabric is released as it is.
+func (p *project) cut(rep *Replica, ckpt string, park bool) (err error) {
+	if err := waypoint.SetFabricBarrier(rep.Fabric, true); err != nil {
+		return fmt.Errorf("%w: raise barrier: %w", errNotCut, err)
+	}
+	defer func() {
+		if park && err == nil {
+			return
+		}
+		if lowerErr := waypoint.SetFabricBarrier(rep.Fabric, false); lowerErr != nil {
+			err = errors.Join(err, fmt.Errorf("lower barrier: %w", lowerErr))
+		}
+	}()
+	return p.each(func(_ int, m *waypoint.Manager) error {
+		var err error
+		if park {
+			_, err = m.ParkFork(rep.ID, ckpt)
+		} else {
+			_, err = m.SnapshotFork(rep.ID, ckpt)
+		}
+		return err
+	})
+}
+
+// commitSnapshot records how the cut ended: a failed manifest and a degraded
+// replica after cutErr; otherwise a ready manifest and the replica rebased on
+// it or, when parked, released.
+func (p *project) commitSnapshot(rep *Replica, manifest *Checkpoint, park bool, cutErr error) error {
+	name := p.rec.Name
+	if cutErr != nil {
+		manifest.Status, manifest.Error = CheckpointFailed, cutErr.Error()
+		rep.Status = ReplicaDegraded
+		_ = writeJSON(replicaPath(name, rep.ID), rep)
+		_ = writeJSON(checkpointPath(name, manifest.ID), manifest)
+		return cutErr
+	}
+	manifest.Status = CheckpointReady
+	if err := writeJSON(checkpointPath(name, manifest.ID), manifest); err != nil {
+		return err
+	}
+	if park {
+		waypoint.ReleaseFabric(rep.Fabric)
+		return os.Remove(replicaPath(name, rep.ID))
+	}
+	rep.Checkpoint = manifest.ID
+	return writeJSON(replicaPath(name, rep.ID), rep)
+}
+
+// holdSignals keeps SIGINT, SIGTERM, and SIGHUP from killing the process
+// until the returned function is called; signals that arrive meanwhile are
+// dropped. A member's own child processes still receive a terminal's signal;
+// their failure comes back as that member's error.
+func holdSignals() (release func()) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	return func() { signal.Stop(ch) }
 }
 
 // --- fork ---
@@ -280,7 +380,7 @@ func Snapshot(name, replica, ckpt string, park bool) (*Checkpoint, error) {
 // restored. ids names the replicas; with ids empty, n replicas get generated
 // IDs. A replica that fails is torn down; the others are kept.
 func Fork(name, ckpt string, ids []string, n int) ([]Replica, error) {
-	rec, err := LoadRecord(name)
+	p, err := load(name)
 	if err != nil {
 		return nil, err
 	}
@@ -288,12 +388,8 @@ func Fork(name, ckpt string, ids []string, n int) ([]Replica, error) {
 	if err != nil {
 		return nil, err
 	}
-	if manifest.Status != StatusReady {
+	if manifest.Status != CheckpointReady {
 		return nil, fmt.Errorf("checkpoint %s is %s", ckpt, manifest.Status)
-	}
-	ms, err := members(rec)
-	if err != nil {
-		return nil, err
 	}
 	if len(ids) == 0 {
 		for i := 0; i < n; i++ {
@@ -311,16 +407,15 @@ func Fork(name, ckpt string, ids []string, n int) ([]Replica, error) {
 	}
 
 	// Claim every replica ID before any long work.
-	replicas := make([]Replica, len(ids))
 	if err := waypoint.WithFileLock(groupLockPath(name), func() error {
-		for i, id := range ids {
+		for _, id := range ids {
 			if _, err := os.Stat(replicaPath(name, id)); err == nil {
 				return fmt.Errorf("replica %s already exists", id)
 			}
-			replicas[i] = Replica{ID: id, Checkpoint: ckpt, Fabric: fabricPin(name, id), Status: StatusCreating, CreatedAt: time.Now().Unix()}
 		}
-		for i := range replicas {
-			if err := writeJSON(replicaPath(name, replicas[i].ID), replicas[i]); err != nil {
+		for _, id := range ids {
+			rep := Replica{ID: id, Checkpoint: ckpt, Fabric: fabricPin(name, id), Status: ReplicaCreating, CreatedAt: time.Now().Unix()}
+			if err := writeJSON(replicaPath(name, id), rep); err != nil {
 				return err
 			}
 		}
@@ -329,67 +424,62 @@ func Fork(name, ckpt string, ids []string, n int) ([]Replica, error) {
 		return nil, err
 	}
 
-	errs := make([]error, len(replicas))
-	_ = parallel(len(replicas), func(r int) error {
-		rep := &replicas[r]
-		errs[r] = waypoint.WithFileLock(replicaLockPath(name, rep.ID), func() error {
-			created := make([]bool, len(ms))
-			if err := forkReplica(rec, ms, rep, created); err != nil {
-				_ = teardownReplica(rec, ms, rep, created)
+	replicas := make([]Replica, len(ids))
+	errs := parallel(len(ids), func(r int) error {
+		return p.withReplica(ids[r], func(rep *Replica) error {
+			if created, err := p.forkReplica(rep); err != nil {
+				_ = p.teardownReplica(rep, created)
 				_ = os.Remove(replicaPath(name, rep.ID))
 				return fmt.Errorf("replica %s: %w", rep.ID, err)
 			}
+			replicas[r] = *rep
 			return nil
 		})
-		return nil
 	})
 	var ok []Replica
-	for i, rep := range replicas {
-		if errs[i] == nil {
+	for r, rep := range replicas {
+		if errs[r] == nil {
 			ok = append(ok, rep)
 		}
 	}
 	return ok, errors.Join(errs...)
 }
 
-// forkReplica materializes rep in every member, marking in created each
-// member whose fork it made (failed or not), so a rollback removes only those.
-func forkReplica(rec *Record, ms []*waypoint.Manager, rep *Replica, created []bool) error {
+// forkReplica materializes rep in every member. created marks each member
+// whose fork it made (failed or not), so a rollback removes only those.
+func (p *project) forkReplica(rep *Replica) (created []bool, err error) {
+	created = make([]bool, len(p.members))
 	if err := waypoint.CreateFabric(rep.Fabric, true); err != nil {
-		return fmt.Errorf("create fabric: %w", err)
+		return created, fmt.Errorf("create fabric: %w", err)
 	}
-	err := parallel(len(ms), func(i int) error {
-		f, err := ms[i].ForkCheckpoint(rep.Checkpoint, waypoint.ForkSpec{
+	if err := p.each(func(i int, m *waypoint.Manager) error {
+		f, err := m.ForkCheckpoint(rep.Checkpoint, waypoint.ForkSpec{
 			ID:     rep.ID,
-			Attach: &waypoint.NetworkAttachment{FabricNS: rep.Fabric, Address: rec.Services[i].Address},
+			Attach: &waypoint.NetworkAttachment{FabricNS: rep.Fabric, Address: p.rec.Services[i].Address},
 		})
 		// A fork record left by a failed restore is ours too; an existing
 		// fork with this ID (refused before any record) is not.
 		created[i] = f != nil || (err != nil && !errors.Is(err, waypoint.ErrForkExists))
-		if err != nil {
-			return fmt.Errorf("service %s: %w", rec.Services[i].Name, err)
-		}
-		return nil
-	})
-	if err != nil {
 		return err
+	}); err != nil {
+		return created, err
 	}
 	if err := waypoint.SetFabricBarrier(rep.Fabric, false); err != nil {
-		return fmt.Errorf("lower barrier: %w", err)
+		return created, fmt.Errorf("lower barrier: %w", err)
 	}
-	rep.Status = StatusRunning
-	return writeJSON(replicaPath(rec.Name, rep.ID), rep)
+	rep.Status = ReplicaRunning
+	return created, writeJSON(replicaPath(p.rec.Name, rep.ID), rep)
 }
 
 // teardownReplica destroys the replica's member forks (only those marked in
 // only, if given) and releases its fabric. A member without the fork is fine.
-func teardownReplica(rec *Record, ms []*waypoint.Manager, rep *Replica, only []bool) error {
-	err := parallel(len(ms), func(i int) error {
+func (p *project) teardownReplica(rep *Replica, only []bool) error {
+	err := p.each(func(i int, m *waypoint.Manager) error {
 		if only != nil && !only[i] {
 			return nil
 		}
-		if err := ms[i].DestroyFork(rep.ID); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("service %s: %w", rec.Services[i].Name, err)
+		if err := m.DestroyFork(rep.ID); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
 		}
 		return nil
 	})
@@ -404,38 +494,38 @@ func Destroy(name, replica string) error {
 	if replica == MainReplica {
 		return fmt.Errorf("cannot destroy %s; use suspend or cleanup to end the project's forks", MainReplica)
 	}
-	rec, err := LoadRecord(name)
+	p, err := load(name)
 	if err != nil {
 		return err
 	}
-	ms, err := members(rec)
-	if err != nil {
-		return err
-	}
-	return waypoint.WithFileLock(replicaLockPath(name, replica), func() error {
-		rep, err := loadReplica(name, replica)
-		if err != nil {
-			return err
-		}
-		if err := teardownReplica(rec, ms, rep, nil); err != nil {
+	return p.withReplica(replica, func(rep *Replica) error {
+		if err := p.teardownReplica(rep, nil); err != nil {
 			return err
 		}
 		return os.Remove(replicaPath(name, replica))
 	})
 }
 
-// Exec runs one bash command line in service's fork of replica.
+// Exec runs one bash command line in service's fork of replica. It loads only
+// that service's session, so it does not depend on the other members.
 func Exec(name, replica, service, command string) (*waypoint.ExecResult, error) {
 	rec, err := LoadRecord(name)
 	if err != nil {
 		return nil, err
 	}
+	if rec.Status != ProjectReady {
+		return nil, fmt.Errorf("project %s is %s", name, rec.Status)
+	}
 	for _, s := range rec.Services {
 		if s.Name != service {
 			continue
 		}
-		if _, err := loadReplica(name, replica); err != nil {
+		rep, err := loadReplica(name, replica)
+		if err != nil {
 			return nil, err
+		}
+		if rep.Status == ReplicaCreating {
+			return nil, fmt.Errorf("replica %s is %s", replica, rep.Status)
 		}
 		m, err := waypoint.LoadManager(s.SessionID)
 		if err != nil {
@@ -451,20 +541,11 @@ func Exec(name, replica, service, command string) (*waypoint.ExecResult, error) 
 // Suspend ends every live replica, keeping the project and its checkpoints;
 // fork a group checkpoint to continue.
 func Suspend(name string) error {
-	rec, err := LoadRecord(name)
+	p, err := load(name)
 	if err != nil {
 		return err
 	}
-	ms, err := members(rec)
-	if err != nil {
-		return err
-	}
-	err = parallel(len(ms), func(i int) error {
-		if err := ms[i].Suspend(); err != nil {
-			return fmt.Errorf("service %s: %w", rec.Services[i].Name, err)
-		}
-		return nil
-	})
+	err = p.each(func(_ int, m *waypoint.Manager) error { return m.Suspend() })
 	return errors.Join(err, releaseReplicas(name))
 }
 
@@ -483,17 +564,15 @@ func releaseReplicas(name string) error {
 
 // Cleanup removes the project: every member session, every fabric, and the
 // project's records. With force, member sessions are torn down even when
-// processes or mounts still hold them.
+// processes or mounts still hold them. It accepts a project in any state,
+// including one a failed up left half-created. When the configuration
+// preserves sessions on cleanup, the project that names them is kept too.
 func Cleanup(name string, force bool) error {
 	rec, err := LoadRecord(name)
 	if err != nil {
 		return err
 	}
-	var (
-		mu   sync.Mutex
-		errs []error
-	)
-	_ = parallel(len(rec.Services), func(i int) error {
+	errs := parallel(len(rec.Services), func(i int) error {
 		s := rec.Services[i]
 		if s.SessionID == "" {
 			return nil
@@ -508,26 +587,14 @@ func Cleanup(name string, force bool) error {
 			err = m.Cleanup()
 		}
 		if err != nil {
-			mu.Lock()
-			errs = append(errs, fmt.Errorf("service %s: %w", s.Name, err))
-			mu.Unlock()
+			return fmt.Errorf("service %s: %w", s.Name, err)
 		}
 		return nil
 	})
-	if err := releaseReplicas(name); err != nil {
-		errs = append(errs, err)
-	}
-	if len(errs) > 0 && !force {
-		return errors.Join(errs...)
-	}
-	if waypoint.PreserveSessionOnCleanup {
-		// The member sessions were kept; keep the project that names them.
-		Logf("Preserving project %s with its sessions\n", name)
-		return errors.Join(errs...)
+	err = errors.Join(append(errs, releaseReplicas(name))...)
+	if (err != nil && !force) || waypoint.PreserveSessionOnCleanup {
+		return err
 	}
 	_ = os.RemoveAll(netRuntimeDir(name))
-	if err := os.RemoveAll(projectDir(name)); err != nil {
-		errs = append(errs, err)
-	}
-	return errors.Join(errs...)
+	return errors.Join(err, os.RemoveAll(projectDir(name)))
 }

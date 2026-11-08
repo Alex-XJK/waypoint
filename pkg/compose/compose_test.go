@@ -121,6 +121,51 @@ networks:
 	}
 }
 
+// A plain service must load without warnings: whatever compose-go fills in
+// while normalizing is not something the user asked for.
+func TestLoadIsQuietAboutSupportedSettings(t *testing.T) {
+	p, _ := load(t, `
+services:
+  web:
+    build: {context: ., dockerfile: Dockerfile, target: prod, args: {V: "1"}}
+    command: serve
+    entrypoint: ["/entry.sh"]
+    working_dir: /app
+    environment: {MODE: dev}
+    labels: {tier: front}
+    scale: 1
+    init: false
+    healthcheck: {disable: true}
+    depends_on: [db]
+  db:
+    image: postgres
+`)
+	if len(p.Warnings) != 0 {
+		t.Fatalf("unexpected warnings:\n%s", strings.Join(p.Warnings, "\n"))
+	}
+}
+
+// Settings are warned about by exclusion, so ones no list names are caught.
+func TestLoadWarnsAboutUnlistedSettings(t *testing.T) {
+	p, _ := load(t, `
+services:
+  web:
+    build: {context: ., network: host}
+    container_name: front
+    shm_size: 64m
+    mem_limit: 1g
+`)
+	all := strings.Join(p.Warnings, "\n")
+	for _, want := range []string{
+		"web: container_name is ignored", "web: shm_size is ignored",
+		"web: mem_limit is ignored", "web: build.network is ignored",
+	} {
+		if !strings.Contains(all, want) {
+			t.Fatalf("warnings lack %q:\n%s", want, all)
+		}
+	}
+}
+
 func TestLoadRejects(t *testing.T) {
 	for want, yaml := range map[string]string{
 		"needs image, build, or": "services:\n  a:\n    command: echo hi\n",

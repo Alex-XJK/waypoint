@@ -141,11 +141,6 @@ func LoadConfigInfo() ConfigInfo {
 // 108 bytes including the trailing NUL.
 const maxUnixSocketPath = 107
 
-// validateSessionsDir fails fast when the sessions dir is so deep that the
-// host-side shell socket dial path would exceed the unix sun_path limit.
-// The host dials /proc/<pid>/root/<sessionsDir>/<16hex>/temp/shell_<16hex>.sock
-// (see socketPathThroughProcRoot); past the limit the dial fails much later
-// with an opaque "connect: invalid argument".
 // StateDirs resolves the configuration and returns the sessions directory
 // (runtime and checkpoint data) and the session registry directory.
 func StateDirs() (sessionsDir, infoDir string) {
@@ -153,6 +148,11 @@ func StateDirs() (sessionsDir, infoDir string) {
 	return DefaultSessionsDir, SessionInfoDir
 }
 
+// validateSessionsDir fails fast when the sessions dir is so deep that the
+// host-side shell socket dial path would exceed the unix sun_path limit.
+// The host dials /proc/<pid>/root/<sessionsDir>/<16hex>/temp/shell_<16hex>.sock
+// (see socketPathThroughProcRoot); past the limit the dial fails much later
+// with an opaque "connect: invalid argument".
 func validateSessionsDir(dir string) error {
 	// Session paths become OverlayFS lowerdir/upperdir mount options, whose
 	// syntax cannot escape these separators.
