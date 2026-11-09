@@ -27,6 +27,16 @@ type GuestOptions struct {
 // SetGuestOptions makes StartShell apply o. Call it before init's StartShell
 // or BuildEnvironment.
 func (m *Manager) SetGuestOptions(o GuestOptions) error {
+	if err := o.Validate(); err != nil {
+		return err
+	}
+	m.guest = o
+	return nil
+}
+
+// Validate reports the first option SetGuestOptions would refuse, for callers
+// that want to check before creating a session.
+func (o GuestOptions) Validate() error {
 	for _, e := range o.Env {
 		if envKey(e) == "" {
 			return fmt.Errorf("invalid guest environment entry %q: want KEY=VALUE", e)
@@ -46,7 +56,6 @@ func (m *Manager) SetGuestOptions(o GuestOptions) error {
 			return fmt.Errorf("invalid hosts line %q: want \"<address> <name>...\"", line)
 		}
 	}
-	m.guest = o
 	return nil
 }
 
@@ -78,8 +87,9 @@ func validHostname(name string) bool {
 }
 
 // appendGuestHosts appends lines to /etc/hosts of the merged rootfs at
-// rootfs. The file is opened through an os.Root, so an image whose /etc/hosts
-// is a symlink cannot redirect the write outside the rootfs.
+// rootfs, after ending an unterminated last line. The file is opened through
+// an os.Root, so an image whose /etc/hosts is a symlink cannot redirect the
+// write outside the rootfs.
 func appendGuestHosts(rootfs string, lines []string) error {
 	root, err := os.OpenRoot(rootfs)
 	if err != nil {
@@ -89,12 +99,19 @@ func appendGuestHosts(rootfs string, lines []string) error {
 	if err := root.MkdirAll("etc", 0o755); err != nil {
 		return fmt.Errorf("prepare /etc/hosts: %w", err)
 	}
-	f, err := root.OpenFile("etc/hosts", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+	f, err := root.OpenFile("etc/hosts", os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o644)
 	if err != nil {
 		return fmt.Errorf("open /etc/hosts: %w", err)
 	}
 	defer f.Close()
-	if _, err := f.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
+	text := strings.Join(lines, "\n") + "\n"
+	if info, err := f.Stat(); err == nil && info.Size() > 0 {
+		last := make([]byte, 1)
+		if _, err := f.ReadAt(last, info.Size()-1); err == nil && last[0] != '\n' {
+			text = "\n" + text
+		}
+	}
+	if _, err := f.WriteString(text); err != nil {
 		return fmt.Errorf("write /etc/hosts: %w", err)
 	}
 	return nil

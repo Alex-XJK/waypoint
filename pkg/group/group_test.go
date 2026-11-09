@@ -37,15 +37,19 @@ func TestPlanAssignsAddressesInServiceOrder(t *testing.T) {
 func TestPlanRejectsBadSpecs(t *testing.T) {
 	b := &waypoint.BuildSpec{Context: "/ctx"}
 	for want, spec := range map[string]Spec{
-		"invalid project": {Name: "-x", Services: []Service{svc("a")}},
-		"no services":     {Name: "p"},
-		"duplicate":       {Name: "p", Services: []Service{svc("a"), svc("a")}},
-		"longer than 63":  {Name: "p", Services: []Service{svc(strings.Repeat("a", 64))}},
-		"invalid service": {Name: "p", Services: []Service{svc("-a")}},
-		"exactly one":     {Name: "p", Services: []Service{{Name: "a"}}},
-		"exactly one of":  {Name: "p", Services: []Service{{Name: "a", Rootfs: "/r", Build: b}}},
-		"invalid subnet":  {Name: "p", Subnet: "fd00::/64", Services: []Service{svc("a")}},
-		"has room for":    {Name: "p", Subnet: "10.0.0.0/30", Services: []Service{svc("a"), svc("b")}},
+		"invalid project":        {Name: "-x", Services: []Service{svc("a")}},
+		"no services":            {Name: "p"},
+		"duplicate":              {Name: "p", Services: []Service{svc("a"), svc("a")}},
+		"longer than 63":         {Name: "p", Services: []Service{svc(strings.Repeat("a", 64))}},
+		"invalid service":        {Name: "p", Services: []Service{svc("-a")}},
+		"exactly one":            {Name: "p", Services: []Service{{Name: "a"}}},
+		"exactly one of":         {Name: "p", Services: []Service{{Name: "a", Rootfs: "/r", Build: b}}},
+		"invalid subnet":         {Name: "p", Subnet: "fd00::/64", Services: []Service{svc("a")}},
+		"has room for":           {Name: "p", Subnet: "10.0.0.0/30", Services: []Service{svc("a"), svc("b")}},
+		"room for 0":             {Name: "p", Subnet: "10.0.0.0/31", Services: []Service{svc("a")}},
+		"is reserved":            {Name: "p", Services: []Service{{Name: "a", Rootfs: "/r", Env: []string{"WAYPOINT_X=1"}}}},
+		"must be absolute":       {Name: "p", Services: []Service{{Name: "a", Rootfs: "/r", WorkDir: "app"}}},
+		"invalid guest hostname": {Name: "p", Services: []Service{svc("web-")}},
 	} {
 		if _, _, err := plan(spec); err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("plan(%+v) = %v, want error containing %q", spec, err, want)
@@ -160,5 +164,23 @@ func TestIsProjectFabric(t *testing.T) {
 		if got := IsProjectFabric(pin); got != want {
 			t.Fatalf("IsProjectFabric(%s) = %v, want %v", pin, got, want)
 		}
+	}
+}
+
+func TestClaimProjectIsAtomicAndExclusive(t *testing.T) {
+	t.Setenv("WAYPOINT_SESSION_INFO_DIR", t.TempDir())
+	rec := &Record{Name: "shop", Status: ProjectCreating}
+	if err := claimProject(rec); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := LoadRecord("shop"); err != nil || got.Status != ProjectCreating {
+		t.Fatalf("LoadRecord after claim = %+v, %v", got, err)
+	}
+	if err := claimProject(rec); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("second claim = %v, want already exists", err)
+	}
+	entries, err := os.ReadDir(groupsDir())
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("groups dir holds %d entries (%v), want only the project", len(entries), err)
 	}
 }

@@ -366,6 +366,9 @@ func plan(spec Spec) ([]ServiceRecord, string, error) {
 		if (svc.Rootfs == "") == (svc.Build == nil) {
 			return nil, "", fmt.Errorf("service %s needs exactly one of a rootfs directory or a build", svc.Name)
 		}
+		if err := guestOptions(svc, nil).Validate(); err != nil {
+			return nil, "", fmt.Errorf("service %s: %w", svc.Name, err)
+		}
 		ip := make(net.IP, 4)
 		copy(ip, base)
 		n := uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
@@ -386,6 +389,12 @@ func validServiceName(name string) error {
 		return fmt.Errorf("invalid service name %q: longer than 63 bytes", name)
 	}
 	return nil
+}
+
+// guestOptions are the guest settings of svc's session: the service's
+// environment and working directory, its name as hostname, and hosts.
+func guestOptions(svc Service, hosts []string) waypoint.GuestOptions {
+	return waypoint.GuestOptions{Env: svc.Env, WorkDir: svc.WorkDir, Hostname: svc.Name, Hosts: hosts}
 }
 
 // hostsLines maps every service name to its address, for /etc/hosts.

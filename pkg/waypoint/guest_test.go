@@ -82,6 +82,21 @@ func TestAppendGuestHostsStaysInsideRootfs(t *testing.T) {
 		t.Fatalf("hosts = %q", data)
 	}
 
+	// An unterminated last line must not swallow the first appended entry.
+	open := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(open, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(open, "etc", "hosts"), []byte("127.0.0.1 localhost"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendGuestHosts(open, []string{"10.89.0.2 db"}); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(open, "etc", "hosts")); string(data) != "127.0.0.1 localhost\n10.89.0.2 db\n" {
+		t.Fatalf("hosts after an unterminated line = %q", data)
+	}
+
 	// An image whose /etc/hosts points outside the rootfs must not be followed.
 	outside := filepath.Join(t.TempDir(), "host-file")
 	if err := os.WriteFile(outside, []byte("host\n"), 0o644); err != nil {

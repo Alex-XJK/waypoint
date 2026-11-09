@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -116,25 +117,15 @@ func Up(spec Spec, logf Logger) (*Record, error) {
 		}
 	}
 	name := spec.Name
-	if err := os.MkdirAll(groupsDir(), 0o755); err != nil {
-		return nil, err
-	}
-	if err := os.Mkdir(projectDir(name), 0o755); err != nil {
-		if os.IsExist(err) {
-			return nil, fmt.Errorf("project %s already exists", name)
-		}
-		return nil, err
-	}
 	rec := &Record{Name: name, Subnet: subnet, Services: services, Status: ProjectCreating, CreatedAt: time.Now().Unix()}
+	if err := claimProject(rec); err != nil {
+		return nil, err
+	}
 	var recMu sync.Mutex
 	saveRec := func() error {
 		recMu.Lock()
 		defer recMu.Unlock()
 		return writeJSON(recordPath(name), rec)
-	}
-	if err := saveRec(); err != nil {
-		os.RemoveAll(projectDir(name))
-		return nil, err
 	}
 
 	fail := func(err error) (*Record, error) {
@@ -205,6 +196,35 @@ func Up(spec Spec, logf Logger) (*Record, error) {
 	return rec, nil
 }
 
+// claimProject creates rec's project directory with rec already in it, or
+// fails if the project exists. The directory is prepared under a temporary
+// name and renamed into place, so a project never exists without its record
+// (which cleanup needs to find it); a rename cannot replace a project, whose
+// directory is never empty.
+func claimProject(rec *Record) error {
+	if err := os.MkdirAll(groupsDir(), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.MkdirTemp(groupsDir(), ".up-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp) // a no-op once renamed
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		return err
+	}
+	if err := writeJSON(filepath.Join(tmp, filepath.Base(recordPath(rec.Name))), rec); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, projectDir(rec.Name)); err != nil {
+		if errors.Is(err, fs.ErrExist) || errors.Is(err, syscall.ENOTEMPTY) {
+			return fmt.Errorf("project %s already exists", rec.Name)
+		}
+		return err
+	}
+	return nil
+}
+
 // startMember creates svc's session and brings its main fork's shell up,
 // attached to the project's main fabric. It calls created with the session ID
 // once the session exists, and returns the argv the service should run.
@@ -222,7 +242,7 @@ func startMember(project string, svc Service, attach waypoint.NetworkAttachment,
 	if err := m.AttachMain(attach); err != nil {
 		return nil, err
 	}
-	if err := m.SetGuestOptions(waypoint.GuestOptions{Env: svc.Env, WorkDir: svc.WorkDir, Hostname: svc.Name, Hosts: hosts}); err != nil {
+	if err := m.SetGuestOptions(guestOptions(svc, hosts)); err != nil {
 		return nil, err
 	}
 	if svc.Build != nil {
@@ -578,8 +598,13 @@ func Cleanup(name string, force bool) error {
 			return nil
 		}
 		m, err := waypoint.LoadManager(s.SessionID)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // already gone
+		}
 		if err != nil {
-			return nil // never registered, or already gone
+			// Unreadable is not gone: without force, keep the record that
+			// still names the session.
+			return fmt.Errorf("service %s: %w", s.Name, err)
 		}
 		if force {
 			err = m.CleanupForce()
