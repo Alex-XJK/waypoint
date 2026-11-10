@@ -11,14 +11,14 @@ import (
 	"strings"
 	"syscall"
 
-	"golang.org/x/sys/unix"
 	"github.com/aymanbagabas/go-udiff"
+	"golang.org/x/sys/unix"
 )
 
 type BlameResult struct {
-	TargetPath   string `json:"target_path"`
-	TargetCkptID string `json:"target_checkpoint_id"`
-	Records []BlameCkptRecord `json:"blamed_checkpoints"`
+	TargetPath   string            `json:"target_path"`
+	TargetCkptID string            `json:"target_checkpoint_id"`
+	Records      []BlameCkptRecord `json:"blamed_checkpoints"`
 }
 
 type BlameCkptRecord struct {
@@ -94,7 +94,6 @@ func constructSingleFileDiff(path, prevCkptID, newCkptID string, added bool) (st
 	}
 	return udiff.Unified(prevCkptID, newCkptID, string(content), ""), nil
 }
-
 
 func isOpaque(dir string) (bool, error) {
 	value := make([]byte, 10)
