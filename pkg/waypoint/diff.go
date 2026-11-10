@@ -564,8 +564,22 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 		return fmt.Errorf("invalid checkpoint ID %s: %w", ckptIDSecond, err)
 	}
 	if ckptIDFirst == ckptIDSecond {
-		// TODO: error or output empty diff?
-		return fmt.Errorf("cannot diff the same checkpoint %s", ckptIDFirst)
+		result := DiffResult{
+			From: ckptIDFirst,
+			To:   ckptIDSecond,
+			Filesystem: FilesystemDiff{
+				TargetDir: normalizedTargetDir,
+				Records:   []DiffFileRecord{},
+			},
+		}
+		data, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal diff result: %w", err)
+		}
+		if _, err := os.Stdout.Write(append(data, '\n')); err != nil {
+			return fmt.Errorf("write diff result to stdout: %w", err)
+		}
+		return nil
 	}
 
 	d, cachedData, err := m.setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir)
