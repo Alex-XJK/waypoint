@@ -19,6 +19,7 @@ terminal session management.
 - **Multi-Session Support**: Concurrent usage by multiple applications with isolated sessions
 - **Minimal Overhead**: Direct system calls without unnecessary container abstractions
 - **Minimal File IO**: Uses multiple lower-layer designs to achieve true inter-checkpoint deduplication
+- **Incremental Memory Checkpoints**: Snapshots of a restored fork write only the memory it changed, with a full dump taken when measured chain costs call for one (since v0.8.0)
 - **Simple CLI**: Straightforward command-line interface for checkpoint operations
 - **Bash Completion**: Completes commands, flags, host paths, sessions, checkpoints, and live fork IDs
 - **Session Management**: Automatic cleanup and resource management
@@ -104,7 +105,7 @@ commands, such as `./setup build`, `sudo ./setup install`, and
 
 - Linux system with root privileges
 - OverlayFS support (most modern Linux distributions)
-- CRIU installed and configured, including the `criu` and `crit` commands; CRIU 4.0 or newer is required on aarch64 by the default host check
+- CRIU, including the `criu` and `crit` commands: the `waypoint` branch of [our CRIU fork](https://github.com/Alex-XJK/criu/tree/waypoint), 4.2.1.20261101 or later (see [Install CRIU](#install-criu)); the stock CRIU package is not fully supported since v0.8.0
 - Host utilities used by Waypoint: `cp` and `uname` (coreutils); teardown and mount handling are pure syscalls
 - `/bin/bash` inside the workspace/rootfs when using `--shell`
 - Go 1.25 or the version listed in `go.mod` (for building from source)
@@ -132,14 +133,32 @@ go version
 
 #### Install CRIU
 
-```bash
-# Ubuntu/Debian
-sudo apt-get install criu
-# or go to https://launchpad.net/~criu/+archive/ubuntu/ppa
+Since v0.8.0, Waypoint runs on the `waypoint` branch of
+[our CRIU fork](https://github.com/Alex-XJK/criu/tree/waypoint) rather than on
+the distribution package. On top of CRIU 4.2 it restores each pid namespace's
+`ns_last_pid`, fixes a restore crash on socketpairs whose holders have inverted
+pids, and adds the incremental dumps that `incremental_dumps` uses. Keep the
+distribution package, which `sudo make deps-ubuntu` installs, for CRIU's runtime
+libraries and the `crit` command, and install our `criu` beside it; the build
+dependencies are listed at <https://criu.org/Installation>:
 
-# Verify installation
+```bash
+git clone -b waypoint https://github.com/Alex-XJK/criu.git
+cd criu
+make -j"$(nproc)"
+sudo make install-criu        # /usr/local/sbin/criu, ahead of /usr/sbin in root's PATH
+
+# Verify installation: Version 4.2.1.20261101 or later
+criu --version
 sudo criu check
 ```
+
+`sudo waypoint info` reports the `criu --version` Waypoint finds. With the stock
+CRIU package Waypoint still runs, with full dumps only: `incremental_dumps` fails
+at the first fork, and a restored tree hands out pids below the ones it already
+holds, so a tree that then holds a socketpair across such pids cannot be restored
+from its next snapshot. Earlier releases worked around this in a pre-resume hook,
+which v0.8.0 removes.
 
 #### Build from Source
 
@@ -159,7 +178,7 @@ sudo env BIN_DIR="$PWD" ./setup install
 
 ```bash
 sudo waypoint version
-# Output: waypoint version v0.7.1
+# Output: waypoint version v0.8.0
 ```
 
 You can also run the root-level host check from the setup script after manual
@@ -193,7 +212,11 @@ You can create a configuration file to set global options. Example content:
   "bash_init_src": "/custom/compiled/bash_init",
   "preserve_session_on_cleanup": false,
   "tmpfs_images": false,
+  "incremental_dumps": false,
+  "full_dump_ratio": 1,
+  "max_chain_sets": 128,
   "phase_stats": false,
+  "waypoint_log_level": 2,
   "network": "shared"
 }
 ```
@@ -214,6 +237,36 @@ The optional `tmpfs_images` setting (`WAYPOINT_TMPFS_IMAGES`) writes CRIU images
 tmpfs and flushes them to disk asynchronously; images are not durable until that
 flush completes. `phase_stats` (`WAYPOINT_PHASE_STATS`) adds checkpoint/fork timing
 breakdowns. Both options default to `false`.
+
+`incremental_dumps` (`WAYPOINT_INCREMENTAL_DUMPS`, default `false`; since v0.8.0)
+makes a checkpoint or snapshot of a restored fork write only the memory pages
+changed since that restore. The new image references the earlier ones as its
+parent chain, so a fork from such a checkpoint reads one image set per link of the
+chain. It needs [our CRIU build](#install-criu) and has no effect while
+`tmpfs_images` is on. Each restore of such a checkpoint leaves a small image set
+under `checkpoints/<ckpt>/next/`, removed together with the session.
+
+With `incremental_dumps` on, Waypoint also decides for every dump whether to extend
+the chain or to start a new one with a full dump. It measures from CRIU's own
+statistics how much each link of the chain adds to restores and dumps, and takes a
+full dump once another link would cost more than the chain's average per snapshot,
+so that the long-run time per snapshot stays lowest. `full_dump_ratio`
+(`WAYPOINT_FULL_DUMP_RATIO`, default `1`) weighs the estimated extra time of a
+full dump in that comparison: `0` makes every dump full, a larger value keeps
+chains longer. `max_chain_sets` (`WAYPOINT_MAX_CHAIN_SETS`, default `128`) caps
+the chain length regardless. Each checkpoint's metadata records the decision and
+its inputs as `chain`, and the `phases` line prints them with `phase_stats` on.
+The cost of a full dump is learned from the full dumps of restored trees and
+remembered per session and per sessions directory; until one has been measured,
+a session prices its first chain from its first dump, which is cheaper, and cuts
+that chain early.
+
+`waypoint_log_level` (`WAYPOINT_LOG_LEVEL`, default `2`; since v0.8.0) is the
+CRIU log level of every dump and restore, written to `dump.log` in the checkpoint
+and `restore.log` in the fork: `0` none, `1` errors, `2` warnings, `3` info, `4`
+debug. A failed dump or restore reports its log path and the end of that log.
+Levels `3` and `4` log every piece of memory read at every link of a chain, so
+raise the level to debug a failure rather than by default.
 
 `network` (`WAYPOINT_NETWORK`) is `shared` (default) or `private`. In `shared`
 mode every fork runs in the host network namespace. In `private` mode each fork,
@@ -531,13 +584,16 @@ sudo waypoint cleanup abc123def456
 
 ```
 /custom/path/waypoint-sessions/    # Configured sessions directory
+    ├── .full-dump-rate.json        # incremental_dumps: full dump time, all sessions
     └── abc123def456/               # A session
         ├── original/               # Session-owned rootfs, shared read-only
         ├── checkpoints/            # Immutable checkpoint DAG nodes
         │   └── before-run/
         │       ├── upper/          # Sealed, immutable filesystem delta
-        │       └── criu/           # CRIU memory image (+ dump.log)
-        │           └── *.img
+        │       ├── criu/           # CRIU memory image (+ dump.log)
+        │       │   └── *.img
+        │       ├── next/           # incremental_dumps: one image set per restore
+        │       └── restore-stats.jsonl  # incremental_dumps: criu restore times
         ├── forks/                  # Live, mutable fork instances
         │   ├── main/               # The main fork (from init --shell or build)
         │   │   ├── fork.json       # Live fork record
@@ -549,6 +605,7 @@ sudo waypoint cleanup abc123def456
         │   └── runB/
         ├── metadata/               # Checkpoint metadata
         │   └── before-run.json     # "Metadata" for the before-run checkpoint
+        ├── full-dump-rate.json     # incremental_dumps: measured full dump time
         ├── locks/                  # Session/fork flocks
         ├── temp/                   # Main shell startup/restore log
         └── work/                   # Canonical merged mountpoint (per-fork)
@@ -579,7 +636,7 @@ The [v0.6.0 diagram](./docs/waypoint-v060.drawio.png) is kept for reference.
 
 ### Snapshot (fork → checkpoint)
 
-- **CRIU Dump**: Dumps the fork's process memory, file descriptors, and execution state
+- **CRIU Dump**: Dumps the fork's process memory, file descriptors, and execution state; with `incremental_dumps`, only the memory pages changed since the fork's restore, as a new link of the checkpoint's image chain (since v0.8.0)
 - **Seal Upper**: Moves the fork's upper layer into the checkpoint as an immutable, shareable delta
 - **Rebase**: Gives the fork fresh upper/work layers stacked on the new checkpoint and resumes it; `--park` keeps only the checkpoint without resuming the fork
 - **Metadata Management**: Records the checkpoint's `ParentID` and resolved `LayerIDs` chain
@@ -588,7 +645,7 @@ The [v0.6.0 diagram](./docs/waypoint-v060.drawio.png) is kept for reference.
 
 - **Non-destructive**: The source checkpoint is immutable, so one checkpoint can be forked many times
 - **Private Overlay**: Each fork mounts its own overlay (checkpoint layers + a private upper) in its own mount namespace
-- **CRIU Restore**: Rebuilds the fork's process tree from the checkpoint's memory image; the command waits for readiness, and different forks can be restored concurrently
+- **CRIU Restore**: Rebuilds the fork's process tree from the checkpoint's memory image; the command waits for readiness, and different forks can be restored concurrently. With `incremental_dumps`, the restore also starts tracking the pages the fork changes, for its next dump
 
 ### Session Isolation
 Each session gets:
@@ -618,6 +675,7 @@ fork configured identically.
 ## Limitations
 
 - Requires root privileges (CRIU and OverlayFS requirement)
+- Requires [our CRIU build](#install-criu) since v0.8.0; the stock CRIU package runs with full dumps only and can hand out low pids after a restore
 - Linux-specific (depends on CRIU and OverlayFS)
 - In the default `shared` network mode, forks share host networking, so services using the same ports conflict; forking a checkpoint that already listens on a port gives no error, but the copies share that port and a fork's connections may reach another fork's server. `private` mode gives each fork its own port space. Network connections may not survive checkpoint/restore
 - Exec uses one persistent PTY: stdout/stderr are combined, and output is returned when the command finishes rather than streamed

@@ -1,7 +1,10 @@
 #!/bin/bash
-# Runtime test of the pid allocator after restore: criu puts every task back
-# under its old pid but leaves ns_last_pid low, so without Waypoint's pre-resume
-# hook a restored tree hands out pids below the ones it holds.
+# Runtime test of the pid allocator after restore. Stock criu puts every task
+# back under its old pid but leaves ns_last_pid low, so a restored tree hands
+# out pids below the ones it holds. The criu Waypoint runs with must restore
+# ns_last_pid itself (the waypoint branch of our criu fork, version
+# 4.2.1.20261101 or later, the build Waypoint requires); Waypoint no longer
+# corrects it.
 #
 # Raises main's pid counter, starts a daemon that keeps forking, then checks
 # after checkpoint, fork, and a second-generation fork that new processes and

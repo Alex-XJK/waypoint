@@ -3,6 +3,8 @@ package waypoint
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -13,6 +15,8 @@ type booleanConfigState struct {
 	tmpfsSource    string
 	phase          bool
 	phaseSource    string
+	incr           bool
+	incrSource     string
 }
 
 func currentBooleanConfigState() booleanConfigState {
@@ -23,6 +27,8 @@ func currentBooleanConfigState() booleanConfigState {
 		tmpfsSource:    TmpfsImagesConfig,
 		phase:          PhaseStats,
 		phaseSource:    PhaseStatsConfig,
+		incr:           IncrementalDumps,
+		incrSource:     IncrementalDumpsConfig,
 	}
 }
 
@@ -42,6 +48,8 @@ func applyBooleanConfigState(state booleanConfigState) {
 	TmpfsImagesConfig = state.tmpfsSource
 	PhaseStats = state.phase
 	PhaseStatsConfig = state.phaseSource
+	IncrementalDumps = state.incr
+	IncrementalDumpsConfig = state.incrSource
 }
 
 func loadBooleanConfigForTest(t *testing.T, contents string, env map[string]string) string {
@@ -59,6 +67,10 @@ func loadBooleanConfigForTest(t *testing.T, contents string, env map[string]stri
 		"WAYPOINT_TMPFS_IMAGES",
 		"WAYPOINT_TMPFS_DIR",
 		"WAYPOINT_PHASE_STATS",
+		"WAYPOINT_INCREMENTAL_DUMPS",
+		"WAYPOINT_FULL_DUMP_RATIO",
+		"WAYPOINT_MAX_CHAIN_SETS",
+		"WAYPOINT_LOG_LEVEL",
 		"WAYPOINT_NETWORK",
 	} {
 		t.Setenv(key, "")
@@ -80,17 +92,21 @@ func TestLoadConfigAppliesExplicitFalseBooleans(t *testing.T) {
 		tmpfsSource:    "previous",
 		phase:          true,
 		phaseSource:    "previous",
+		incr:           true,
+		incrSource:     "previous",
 	})
 	source := loadBooleanConfigForTest(t, `{
 		"preserve_session_on_cleanup": false,
 		"tmpfs_images": false,
-		"phase_stats": false
+		"phase_stats": false,
+		"incremental_dumps": false
 	}`, nil)
 
 	want := booleanConfigState{
 		preserveSource: source,
 		tmpfsSource:    source,
 		phaseSource:    source,
+		incrSource:     source,
 	}
 	if got := currentBooleanConfigState(); got != want {
 		t.Fatalf("boolean config state = %+v, want %+v", got, want)
@@ -102,6 +118,7 @@ func TestLoadConfigLeavesOmittedBooleansAndSourcesUntouched(t *testing.T) {
 		preserveSource: "default",
 		tmpfsSource:    "default",
 		phaseSource:    "default",
+		incrSource:     "default",
 	}
 	setBooleanConfigState(t, want)
 	loadBooleanConfigForTest(t, `{}`, nil)
@@ -116,17 +133,20 @@ func TestLoadConfigBooleanEnvironmentOverridesFile(t *testing.T) {
 	loadBooleanConfigForTest(t, `{
 		"preserve_session_on_cleanup": true,
 		"tmpfs_images": true,
-		"phase_stats": true
+		"phase_stats": true,
+		"incremental_dumps": true
 	}`, map[string]string{
 		"WAYPOINT_PRESERVE_SESSION_ON_CLEANUP": "false",
 		"WAYPOINT_TMPFS_IMAGES":                "false",
 		"WAYPOINT_PHASE_STATS":                 "false",
+		"WAYPOINT_INCREMENTAL_DUMPS":           "false",
 	})
 
 	want := booleanConfigState{
 		preserveSource: "env:WAYPOINT_PRESERVE_SESSION_ON_CLEANUP",
 		tmpfsSource:    "env:WAYPOINT_TMPFS_IMAGES",
 		phaseSource:    "env:WAYPOINT_PHASE_STATS",
+		incrSource:     "env:WAYPOINT_INCREMENTAL_DUMPS",
 	}
 	if got := currentBooleanConfigState(); got != want {
 		t.Fatalf("boolean config state = %+v, want %+v", got, want)
@@ -138,15 +158,18 @@ func TestLoadConfigInvalidBooleanEnvironmentFallsBackToFile(t *testing.T) {
 		preserveSource: "default",
 		tmpfsSource:    "default",
 		phaseSource:    "default",
+		incrSource:     "default",
 	})
 	source := loadBooleanConfigForTest(t, `{
 		"preserve_session_on_cleanup": true,
 		"tmpfs_images": true,
-		"phase_stats": true
+		"phase_stats": true,
+		"incremental_dumps": true
 	}`, map[string]string{
 		"WAYPOINT_PRESERVE_SESSION_ON_CLEANUP": "not-a-bool",
 		"WAYPOINT_TMPFS_IMAGES":                "not-a-bool",
 		"WAYPOINT_PHASE_STATS":                 "not-a-bool",
+		"WAYPOINT_INCREMENTAL_DUMPS":           "not-a-bool",
 	})
 
 	want := booleanConfigState{
@@ -156,6 +179,8 @@ func TestLoadConfigInvalidBooleanEnvironmentFallsBackToFile(t *testing.T) {
 		tmpfsSource:    source,
 		phase:          true,
 		phaseSource:    source,
+		incr:           true,
+		incrSource:     source,
 	}
 	if got := currentBooleanConfigState(); got != want {
 		t.Fatalf("boolean config state = %+v, want %+v", got, want)
@@ -169,11 +194,13 @@ func TestLoadConfigAppliesExplicitTrueBooleans(t *testing.T) {
 		preserveSource: "default",
 		tmpfsSource:    "default",
 		phaseSource:    "default",
+		incrSource:     "default",
 	})
 	source := loadBooleanConfigForTest(t, `{
 		"preserve_session_on_cleanup": true,
 		"tmpfs_images": true,
-		"phase_stats": true
+		"phase_stats": true,
+		"incremental_dumps": true
 	}`, nil)
 
 	want := booleanConfigState{
@@ -183,6 +210,8 @@ func TestLoadConfigAppliesExplicitTrueBooleans(t *testing.T) {
 		tmpfsSource:    source,
 		phase:          true,
 		phaseSource:    source,
+		incr:           true,
+		incrSource:     source,
 	}
 	if got := currentBooleanConfigState(); got != want {
 		t.Fatalf("boolean config state = %+v, want %+v", got, want)
@@ -232,5 +261,141 @@ func TestLoadConfigNetworkMode(t *testing.T) {
 				t.Fatalf("network mode = %q from %q, want %q from %q", NetworkMode, NetworkModeConfig, tc.wantMode, wantSource)
 			}
 		})
+	}
+}
+
+func TestLoadConfigLogLevel(t *testing.T) {
+	cases := []struct {
+		name       string
+		file       string
+		env        string
+		wantLevel  int
+		wantSource string // "file" stands for the config file's source label
+	}{
+		{"default", `{}`, "", 2, "default"},
+		{"file", `{"waypoint_log_level": 4}`, "", 4, "file"},
+		{"file zero is applied", `{"waypoint_log_level": 0}`, "", 0, "file"},
+		{"environment overrides file", `{"waypoint_log_level": 4}`, "1", 1, "env:WAYPOINT_LOG_LEVEL"},
+		{"invalid environment falls back to file", `{"waypoint_log_level": 3}`, "debug", 3, "file"},
+		{"out of range environment falls back to file", `{"waypoint_log_level": 3}`, "5", 3, "file"},
+		{"invalid file value is ignored", `{"waypoint_log_level": 9}`, "", 2, "default"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			previousLevel, previousSource := LogLevel, LogLevelConfig
+			t.Cleanup(func() { LogLevel, LogLevelConfig = previousLevel, previousSource })
+			LogLevel, LogLevelConfig = 2, "default"
+
+			source := loadBooleanConfigForTest(t, tc.file, map[string]string{"WAYPOINT_LOG_LEVEL": tc.env})
+			wantSource := tc.wantSource
+			if wantSource == "file" {
+				wantSource = source
+			}
+			if LogLevel != tc.wantLevel || LogLevelConfig != wantSource {
+				t.Fatalf("criu log level = %d from %q, want %d from %q", LogLevel, LogLevelConfig, tc.wantLevel, wantSource)
+			}
+			if got, want := criuLogLevelArg(), "-v"+strconv.Itoa(tc.wantLevel); got != want {
+				t.Fatalf("criuLogLevelArg() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestLoadConfigChainKnobs(t *testing.T) {
+	both := `{"full_dump_ratio": 2.5, "max_chain_sets": 16}`
+	cases := []struct {
+		name        string
+		file        string
+		env         map[string]string
+		wantRatio   float64
+		ratioSource string // "file" stands for the config file's source label
+		wantSets    int
+		setsSource  string
+	}{
+		{"defaults", `{}`, nil, 1, "default", 128, "default"},
+		{"file", both, nil, 2.5, "file", 16, "file"},
+		{"file zero ratio is applied", `{"full_dump_ratio": 0}`, nil, 0, "file", 128, "default"},
+		{"environment overrides file", both,
+			map[string]string{"WAYPOINT_FULL_DUMP_RATIO": "0.5", "WAYPOINT_MAX_CHAIN_SETS": "8"},
+			0.5, "env:WAYPOINT_FULL_DUMP_RATIO", 8, "env:WAYPOINT_MAX_CHAIN_SETS"},
+		{"invalid environment falls back to file", both,
+			map[string]string{"WAYPOINT_FULL_DUMP_RATIO": "-1", "WAYPOINT_MAX_CHAIN_SETS": "0"},
+			2.5, "file", 16, "file"},
+		{"non-finite environment is invalid", `{}`,
+			map[string]string{"WAYPOINT_FULL_DUMP_RATIO": "inf", "WAYPOINT_MAX_CHAIN_SETS": "many"},
+			1, "default", 128, "default"},
+		{"NaN environment is invalid", `{}`, map[string]string{"WAYPOINT_FULL_DUMP_RATIO": "NaN"}, 1, "default", 128, "default"},
+		{"invalid file values are ignored", `{"full_dump_ratio": -1, "max_chain_sets": 0}`, nil, 1, "default", 128, "default"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := []any{FullDumpRatio, FullDumpRatioConfig, MaxChainSets, MaxChainSetsConfig}
+			t.Cleanup(func() {
+				FullDumpRatio, FullDumpRatioConfig = prev[0].(float64), prev[1].(string)
+				MaxChainSets, MaxChainSetsConfig = prev[2].(int), prev[3].(string)
+			})
+			FullDumpRatio, FullDumpRatioConfig, MaxChainSets, MaxChainSetsConfig = 1, "default", 128, "default"
+
+			source := loadBooleanConfigForTest(t, tc.file, tc.env)
+			label := func(s string) string {
+				if s == "file" {
+					return source
+				}
+				return s
+			}
+			if FullDumpRatio != tc.wantRatio || FullDumpRatioConfig != label(tc.ratioSource) {
+				t.Errorf("full_dump_ratio = %g from %q, want %g from %q", FullDumpRatio, FullDumpRatioConfig, tc.wantRatio, label(tc.ratioSource))
+			}
+			if MaxChainSets != tc.wantSets || MaxChainSetsConfig != label(tc.setsSource) {
+				t.Errorf("max_chain_sets = %d from %q, want %d from %q", MaxChainSets, MaxChainSetsConfig, tc.wantSets, label(tc.setsSource))
+			}
+			info := LoadConfigInfo()
+			if info.FullDumpRatio.Value != FullDumpRatio || info.MaxChainSets.Value != MaxChainSets {
+				t.Errorf("LoadConfigInfo() = %v / %v, want %g / %d", info.FullDumpRatio.Value, info.MaxChainSets.Value, FullDumpRatio, MaxChainSets)
+			}
+		})
+	}
+}
+
+func TestCriuLogTail(t *testing.T) {
+	previous := LogLevel
+	t.Cleanup(func() { LogLevel = previous })
+	path := filepath.Join(t.TempDir(), "restore.log")
+	if err := os.WriteFile(path, []byte("Error (criu/cr-restore.c:1): boom\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	LogLevel = 2
+	tail := criuLogTail(path)
+	if !strings.Contains(tail, path) || !strings.Contains(tail, "boom") || !strings.Contains(tail, "WAYPOINT_LOG_LEVEL=4") {
+		t.Fatalf("criuLogTail at level 2 = %q, want the path, the error and the level hint", tail)
+	}
+	LogLevel = 4
+	if tail := criuLogTail(path); strings.Contains(tail, "WAYPOINT_LOG_LEVEL") {
+		t.Fatalf("criuLogTail at level 4 = %q, want no level hint", tail)
+	}
+}
+
+func TestIncrementalDumpsOffWithTmpfsImages(t *testing.T) {
+	cases := []struct {
+		incr, tmpfs bool
+		want        bool
+		wantSource  string
+	}{
+		{false, false, false, "file"},
+		{true, false, true, "file"},
+		{true, true, false, "file (off: tmpfs_images)"},
+		{false, true, false, "file"},
+	}
+	for _, tc := range cases {
+		setBooleanConfigState(t, booleanConfigState{incr: tc.incr, incrSource: "file", tmpfs: tc.tmpfs})
+		if got := incrementalDumps(); got != tc.want {
+			t.Errorf("incrementalDumps() with incremental=%v tmpfs=%v = %v, want %v", tc.incr, tc.tmpfs, got, tc.want)
+		}
+		info := incrementalDumpsInfo()
+		if info.Value != tc.want || info.Source != tc.wantSource {
+			t.Errorf("incrementalDumpsInfo() with incremental=%v tmpfs=%v = %v from %q, want %v from %q",
+				tc.incr, tc.tmpfs, info.Value, info.Source, tc.want, tc.wantSource)
+		}
 	}
 }

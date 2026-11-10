@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.8.0 — Incremental Memory Checkpoints
+**Checkpoints that write only the memory a fork changed, on Waypoint's own CRIU build**
+- Designed and added incremental memory dumps: a checkpoint or snapshot of a restored fork writes only the memory changed since that restore, chained to the earlier image, and a full dump is taken when the measured cost of the chain calls for one (`incremental_dumps`, off by default).
+- Added a configurable CRIU log level for every dump and restore (`waypoint_log_level`).
+- Waypoint now requires the `waypoint` branch of [our CRIU fork](https://github.com/Alex-XJK/criu/tree/waypoint). On the stock CRIU package not every capability is available: Waypoint runs with full dumps only and no longer works around CRIU's pid allocation after a restore, which v0.7.1 did in a pre-resume hook.
+
 ## v0.7.1 — Per-Fork Network Namespaces
 **Private networking for concurrent forks, with restore and copy fixes**
 - Added the `private` network mode (`WAYPOINT_NETWORK=private` or `network` in the config file): each fork, including `main`, gets its own network namespace and port space, with outbound traffic through a per-fork pasta process. `shared` remains the default.

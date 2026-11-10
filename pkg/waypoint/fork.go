@@ -50,7 +50,11 @@ type Fork struct {
 	LogPath          string   `json:"log_path"`
 	CriuPath         string   `json:"criu_path"`
 	PidFile          string   `json:"pid_file"`
-	PID              int      `json:"pid"`
+	// NextImagesDir is the image set the last restore wrote with
+	// --next-images-dir; the next dump uses it as --prev-images-dir. Empty
+	// means the next dump is a full one.
+	NextImagesDir string `json:"next_images_dir,omitempty"`
+	PID           int    `json:"pid"`
 	// StartTime is the PID's /proc stat starttime, recorded at spawn so
 	// kills can verify the identity (PID-reuse safety). 0 = unknown.
 	StartTime       uint64     `json:"start_time,omitempty"`
