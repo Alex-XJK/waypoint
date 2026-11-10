@@ -151,7 +151,10 @@ func insertBlameRecord(blamed *[]BlameCkptRecord, prevState, newState *state, ch
 	if err != nil {
 		return fmt.Errorf("construct diff for checkpoints %s, %s: %w", prevState.ckptID, newState.ckptID, err)
 	}
-	lines := strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
+	lines := []string{}
+	if diff != "" {
+		lines = strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
+	}
 
 	*blamed = append(*blamed, BlameCkptRecord{
 		CheckpointID: newState.ckptID,
