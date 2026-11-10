@@ -69,7 +69,6 @@ func constructFileDiff(prevState, newState *state, change ChangeType) (string, e
 	if err != nil {
 		return "", fmt.Errorf("read file %s: %w", newState.rootViewPath, err)
 	}
-
 	diff := udiff.Unified(prevState.ckptID, newState.ckptID, string(previousContent), string(newContent))
 
 	return diff, nil
@@ -83,12 +82,10 @@ func constructSingleFileDiff(path, prevCkptID, newCkptID string, added bool) (st
 	if !info.Mode().IsRegular() {
 		return "", nil
 	}
-
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read file %s: %w", path, err)
 	}
-
 	if added {
 		return udiff.Unified(prevCkptID, newCkptID, "", string(content)), nil
 	}
@@ -177,39 +174,25 @@ func checkDir(rootViewDir, containerViewDir, targetPath string, prevState *state
 			if err != nil {
 				return false, fmt.Errorf("check whiteout %s: %w", rootViewPath, err)
 			}
-			if whiteout {
-				if prevState.visible {
-					if containerViewPath == targetPath { // whiteout of target file
-						newState := &state{
-							visible:      false,
-							rootViewPath: "",
-							ckptID:       ckptID,
-						}
-						if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeDeleted); err != nil {
-							return false, err
-						}
-						*prevState = *newState
-						return true, nil
-					} else { // whiteout could represent directory, if so check if target is child
-						hide, err := isDescendant(containerViewPath, targetPath)
-						if err != nil {
-							return false, err
-						}
-						if hide {
-							newState := &state{
-								visible:      false,
-								rootViewPath: "",
-								ckptID:       ckptID,
-							}
-							if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeDeleted); err != nil {
-								return false, err
-							}
-							*prevState = *newState
-							return true, nil
-						}
-					}
+			targetDesc, err := isDescendant(containerViewPath, targetPath)
+			if err != nil {
+				return false, err
+			}
+			samePath := (containerViewPath == targetPath)
+
+			if (targetDesc || (whiteout && samePath)) && prevState.visible {
+				newState := &state{
+					visible:      false,
+					rootViewPath: "",
+					ckptID:       ckptID,
 				}
-			} else if containerViewPath == targetPath {
+				if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeDeleted); err != nil {
+					return false, err
+				}
+				*prevState = *newState
+				return true, nil
+			}
+			if !whiteout && samePath {
 				newState := &state{
 					visible:      true,
 					rootViewPath: rootViewPath,
@@ -228,18 +211,18 @@ func checkDir(rootViewDir, containerViewDir, targetPath string, prevState *state
 				return true, nil
 			}
 		} else {
-			relevantDir, err := isDescendant(containerViewPath, targetPath)
+			targetDescDir, err := isDescendant(containerViewPath, targetPath)
 			if err != nil {
 				return false, err
 			}
-			if !relevantDir {
+			if !targetDescDir {
 				continue
 			}
-			updated, err := checkDir(rootViewPath, containerViewPath, targetPath, prevState, blamed, ckptID)
+			foundAndUpdated, err := checkDir(rootViewPath, containerViewPath, targetPath, prevState, blamed, ckptID)
 			if err != nil {
 				return false, err
 			}
-			if updated {
+			if foundAndUpdated {
 				return true, nil
 			}
 			opaque, err := isOpaque(rootViewPath)
