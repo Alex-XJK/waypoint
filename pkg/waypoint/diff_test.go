@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
 func TestWalkFSReportsFileChanges(t *testing.T) {
 	left, right := t.TempDir(), t.TempDir()
 	for _, root := range []string{left, right} {
