@@ -1,7 +1,5 @@
 package waypoint
-// Need to update for updated WalkFS signature, for now comment out so doesn't cause compilation error on test
 
-/* 
 import (
 	"os"
 	"path/filepath"
@@ -37,14 +35,14 @@ func TestWalkFSReportsFileChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := walkDiff(t, left, right, "/data")
+	got := walkDiff(t, left, right, "/")
 	want := []DiffFileRecord{
-		{Path: "/data/chmod.txt", ChangeType: ChangeTypeModified, FileType: FileTypeRegular},
-		{Path: "/data/del.txt", ChangeType: ChangeTypeDeleted, FileType: FileTypeRegular},
-		{Path: "/data/link", ChangeType: ChangeTypeModified, FileType: FileTypeSymlink},
-		{Path: "/data/mod.txt", ChangeType: ChangeTypeModified, FileType: FileTypeRegular},
-		{Path: "/data/new.txt", ChangeType: ChangeTypeAdded, FileType: FileTypeRegular},
-		{Path: "/data/sub/new", ChangeType: ChangeTypeAdded, FileType: FileTypeRegular},
+		{Path: "/chmod.txt", ChangeType: ChangeTypeModified, FileType: FileTypeRegular},
+		{Path: "/del.txt", ChangeType: ChangeTypeDeleted, FileType: FileTypeRegular},
+		{Path: "/link", ChangeType: ChangeTypeModified, FileType: FileTypeSymlink},
+		{Path: "/mod.txt", ChangeType: ChangeTypeModified, FileType: FileTypeRegular},
+		{Path: "/new.txt", ChangeType: ChangeTypeAdded, FileType: FileTypeRegular},
+		{Path: "/sub/new", ChangeType: ChangeTypeAdded, FileType: FileTypeRegular},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("walkFS records:\n got %+v\nwant %+v", got, want)
@@ -132,10 +130,24 @@ func TestComputeCkptsDiffIDDistinguishesPairs(t *testing.T) {
 func walkDiff(t *testing.T, left, right, containerDir string) []DiffFileRecord {
 	t.Helper()
 	records := []DiffFileRecord{}
-	if err := walkFS(left, right, containerDir, &records); err != nil {
+	leftRoot, err := os.OpenRoot(left)
+	if err != nil {
+		t.Fatalf("os.OpenRoot(%q): %v", left, err)
+	}
+	defer leftRoot.Close()
+	rightRoot, err := os.OpenRoot(right)
+	if err != nil {
+		t.Fatalf("os.OpenRoot(%q): %v", right, err)
+	}
+	defer rightRoot.Close()
+	targetForRoot, err := cleanRootPath(containerDir) // dependency on copy.go
+	if err != nil {
+		t.Fatalf("cleanRootPath(%q): %v", targetForRoot, err)
+	}
+
+	if err := walkFS(leftRoot, rightRoot, targetForRoot, containerDir, &records); err != nil {
 		t.Fatalf("walkFS: %v", err)
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Path < records[j].Path })
 	return records
 }
-*/
