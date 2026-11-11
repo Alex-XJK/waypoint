@@ -33,16 +33,6 @@ type state struct {
 	ckptID       string
 }
 
-type DiffLine struct {
-	Prefix byte
-	Text   string
-}
-
-type diffHunk struct {
-	start int
-	end   int
-}
-
 // constructFileDiff compares two files and returns their unified diff.
 func constructFileDiff(prevState, newState *state, change ChangeType) (string, error) {
 	if change == ChangeTypeAdded {
