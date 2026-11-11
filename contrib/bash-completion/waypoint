@@ -257,7 +257,7 @@ _waypoint()
 
     if (( cword == 1 )); then
         _waypoint_complete_words "$cur" \
-            init build checkpoint fork exec cp snapshot create fork-exec \
+            init build checkpoint fork exec cp diff snapshot create fork-exec \
             destroy list suspend cleanup info version --version -v
         return
     fi
@@ -295,7 +295,7 @@ _waypoint()
             fi
             return
             ;;
-        checkpoint|create|fork|exec|fork-exec|cp|destroy|list|suspend|cleanup|info)
+        checkpoint|create|fork|exec|fork-exec|cp|diff|destroy|list|suspend|cleanup|info)
             if (( cword == 2 )); then
                 _waypoint_complete_sessions "$cur"
                 return
@@ -345,6 +345,13 @@ _waypoint()
                 _waypoint_complete_copy "$cur" "${words[2]}"
             elif (( cword == 4 )); then
                 _waypoint_complete_copy "$cur" "${words[2]}" "${words[3]}"
+            fi
+            ;;
+        diff)
+            if (( cword == 3 || cword == 4 )); then
+                _waypoint_complete_checkpoints "$cur" "${words[2]}"
+            elif (( cword == 5 )); then
+                _waypoint_complete_words "$cur" --dir
             fi
             ;;
         list)
