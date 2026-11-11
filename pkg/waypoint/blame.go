@@ -214,6 +214,21 @@ func checkDir(rootViewDir, containerViewDir, targetPath string, prevState *state
 				return true, nil
 			}
 		} else {
+			if containerViewPath == targetPath { // directory at the target path hides the file
+				if !prevState.visible {
+					continue
+				}
+				newState := &state{
+					visible:      false,
+					rootViewPath: "",
+					ckptID:       ckptID,
+				}
+				if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeDeleted); err != nil {
+					return false, err
+				}
+				*prevState = *newState
+				return true, nil
+			}
 			targetDescDir, err := isDescendant(containerViewPath, targetPath)
 			if err != nil {
 				return false, err

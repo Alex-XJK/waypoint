@@ -217,6 +217,44 @@ func TestCheckDir_ReplaceAncestorWithSymlink(t *testing.T) {
 	assertChangeType(t, records, ChangeTypeDeleted)
 }
 
+func TestCheckDir_ReplaceFileWithDirectory(t *testing.T) {
+	root := t.TempDir()
+	target := "/app/file.txt"
+
+	// Previous checkpoint: the target exists as a regular file.
+	oldRoot := t.TempDir()
+	oldFile := filepath.Join(oldRoot, "app", "file.txt")
+	writeTestFile(t, oldFile, "original content\n")
+
+	prev := &state{
+		visible:      true,
+		rootViewPath: oldFile,
+		ckptID:       "previous",
+	}
+
+	// Current checkpoint: /app/file.txt is replaced by a directory.
+	writeTestFile(t, filepath.Join(root, "app", "file.txt", "inner.txt"), "inner\n")
+
+	var records []BlameCkptRecord
+
+	found, err := checkDir(root, "/", target, prev, &records, "checkpoint-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !found {
+		t.Fatal("expected directory at the target path to hide target")
+	}
+	if prev.visible {
+		t.Fatal("expected target to become invisible")
+	}
+	if prev.ckptID != "checkpoint-1" {
+		t.Errorf("expected ckptID checkpoint-1, got %q", prev.ckptID)
+	}
+
+	assertChangeType(t, records, ChangeTypeDeleted)
+}
+
 func TestCheckDir_RecreatedDirectoryAddsFile(t *testing.T) {
 	target := "/app/repl/inner.txt"
 
