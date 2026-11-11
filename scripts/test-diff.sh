@@ -186,6 +186,8 @@ meta["status"] = "failed"
 json.dump(meta, open(path, "w"), indent=2)
 EOF
 check "a failed checkpoint is refused" fails diff_to failed A C
+check "diff C C on a failed checkpoint is refused" fails diff_to failedsame C C
+check "diff NOPE NOPE is refused" fails diff_to nope NOPE NOPE
 
 "$W" cleanup "$SESSION" >/dev/null
 SESSION=""
