@@ -5,13 +5,10 @@ package waypoint
 // sealing the fork's overlay upper into a new layer).
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -33,6 +30,8 @@ type Metadata struct {
 	// Snapshot is the phase breakdown of the snapshot that created this
 	// checkpoint (instrumentation, not part of the logical state).
 	Snapshot *SnapshotBreakdown `json:"snapshot_breakdown,omitempty"`
+	// Chain is the checkpoint's memory image chain (incremental_dumps only).
+	Chain *ChainInfo `json:"chain,omitempty"`
 }
 
 type CheckpointStatus string
@@ -218,6 +217,11 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 				return fmt.Errorf("mkdir %s failed: %w", dir, err)
 			}
 		}
+		if incrementalDumps() && m.chainsFrom(ckpt.ID) {
+			if f.NextImagesDir, err = m.newNextImagesDir(ckpt.ID, f.ID); err != nil {
+				return fmt.Errorf("next images dir for fork %s: %w", f.ID, err)
+			}
+		}
 		return m.saveFork(f)
 	}); err != nil {
 		return nil, err
@@ -263,6 +267,35 @@ func (c *CRIUMaterializer) Materialize(ckpt *Checkpoint, spec ForkSpec) (*Fork, 
 	return f, nil
 }
 
+// newNextImagesDir creates an empty directory for a restore's
+// --next-images-dir. It lives under the base checkpoint, not the fork's root
+// dir that destroy and park remove: the fork's next dump reads it as its
+// --prev-images-dir, and a CRIU that links the new images' parent to that
+// path keeps referencing it. Waypoint's CRIU links the parent past it to the
+// base checkpoint's images instead, which leaves it unreferenced after the
+// dump; nothing removes it. Each restore gets a fresh name, since a recreated
+// fork with the same ID must not reuse a dir an earlier chain may still
+// reference.
+func (m *Manager) newNextImagesDir(baseCheckpointID, forkID string) (string, error) {
+	parent, err := filepath.Abs(filepath.Join(m.checkpointDir(baseCheckpointID), "next"))
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(parent, forkID+"-")
+}
+
+// chainsFrom reports whether a restore from checkpointID can write next
+// images. CRIU links them to the real path of the restored images, and a
+// checkpoint dumped with tmpfs_images keeps them behind a symlink whose
+// tmpfs target the flush deletes; forks of those dump in full instead.
+func (m *Manager) chainsFrom(checkpointID string) bool {
+	fi, err := os.Lstat(m.checkpointCriuDir(checkpointID))
+	return err == nil && fi.IsDir()
+}
+
 // restoreForkAndWait runs the restore helper for f, waits for the fork's
 // shell socket, and assembles the phase breakdown from our own wall clocks,
 // the helper child's timing file, and criu's stats-restore image. The caller
@@ -279,10 +312,17 @@ func (m *Manager) restoreForkAndWait(f *Fork) (*RestoreBreakdown, error) {
 		if t, err := readChildRestoreTiming(f); err == nil {
 			bd.MountMs, bd.CriuWallMs = t.MountMs, t.CriuWallMs
 		}
+	}
+	if PhaseStats || incrementalDumps() {
 		if rs, err := readCriuRestoreStats(filepath.Join(f.RootDir, "stats-restore")); err == nil {
-			bd.CriuForkMs = rs.ForkingMs
-			bd.CriuRestoreMs = rs.RestoreMs
-			bd.PagesRestored = rs.PagesRestored
+			if PhaseStats {
+				bd.CriuForkMs = rs.ForkingMs
+				bd.CriuRestoreMs = rs.RestoreMs
+				bd.PagesRestored = rs.PagesRestored
+			}
+			if incrementalDumps() {
+				m.recordRestore(f.BaseCheckpointID, f.ID, rs)
+			}
 		}
 	}
 
@@ -297,63 +337,6 @@ func (m *Manager) restoreForkAndWait(f *Fork) (*RestoreBreakdown, error) {
 	}
 	bd.SockWaitMs = durMs(time.Since(sockStart))
 	return bd, nil
-}
-
-// criuActionSubcommand is the hidden subcommand criu's --action-script runs.
-const criuActionSubcommand = "__waypoint_criu_action"
-
-// RunCriuAction handles criu's pre-resume hook, when the tasks exist but are
-// still stopped. Failures are only warnings: a failing action script aborts
-// the restore.
-func RunCriuAction() error {
-	if os.Getenv("CRTOOLS_SCRIPT_ACTION") != "pre-resume" {
-		return nil
-	}
-	rootPid, err := strconv.Atoi(os.Getenv("CRTOOLS_INIT_PID"))
-	if err != nil {
-		return nil
-	}
-	advanceNsLastPid(rootPid)
-	return nil
-}
-
-// advanceNsLastPid sets ns_last_pid to the tree's highest pid. criu leaves it
-// unchanged, so new children get pids below their parents and a later
-// checkpoint of the tree fails to restore. The sysctl applies to the writer's
-// pid namespace, hence nsenter.
-func advanceNsLastPid(rootPid int) {
-	if rootPid <= 0 {
-		return
-	}
-	top, err := maxNamespacedPid(rootPid)
-	if err != nil || top <= 0 {
-		return
-	}
-	cmd := exec.Command("nsenter", "-t", strconv.Itoa(rootPid), "-p", "--",
-		"sh", "-c", fmt.Sprintf("echo %d > /proc/sys/kernel/ns_last_pid", top))
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr,
-			"warning: could not advance ns_last_pid of pid %d to %d: %v\n%s",
-			rootPid, top, err, out.String())
-	}
-}
-
-// maxNamespacedPid returns the highest pid in the tree's own /proc, or 0 if it
-// has none.
-func maxNamespacedPid(rootPid int) (int, error) {
-	ents, err := os.ReadDir(fmt.Sprintf("/proc/%d/root/proc", rootPid))
-	if err != nil {
-		return 0, err
-	}
-	top := 0
-	for _, e := range ents {
-		if n, err := strconv.Atoi(e.Name()); err == nil && n > top {
-			top = n
-		}
-	}
-	return top, nil
 }
 
 func (c *CRIUMaterializer) Snapshot(f *Fork, id string) (*Checkpoint, error) {
@@ -426,11 +409,15 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 		return fail(err)
 	}
 	snapStart := time.Now()
+	prevImagesDir, chain, decision := m.dumpParent(f)
 	dumpStart := time.Now()
-	if err := m.createMemoryCheckpoint(f.PID, ckptCriu); err != nil {
+	if err := m.createMemoryCheckpoint(f.PID, ckptCriu, prevImagesDir); err != nil {
 		return fail(fmt.Errorf("memory checkpoint failed: %w", err))
 	}
 	dumpMs := durMs(time.Since(dumpStart))
+	if incrementalDumps() {
+		metadata.Chain = m.newChainInfo(f, checkpointID, chain, prevImagesDir != "", dumpMs, decision)
+	}
 	if TmpfsImages {
 		// Persist the tmpfs images in the background; forks meanwhile read
 		// them straight from tmpfs through the criu symlink.
@@ -472,6 +459,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 		}
 		metadata.Status = CheckpointStatusReady
 		if err := m.withSessionLock(func() error {
+			m.recordFullDump(metadata.Chain)
 			return m.saveMetadata(checkpointID, metadata)
 		}); err != nil {
 			return nil, err
@@ -499,6 +487,18 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 	f.CriuPath = ckptCriu
 	f.PidFile = filepath.Join(f.RootDir, "restore.pid")
 	_ = os.Remove(f.PidFile)
+	// The checkpoint just dumped was taken against the old next dir; with
+	// Waypoint's CRIU its parent link points past that dir to the base
+	// checkpoint's images, and the dir stays on disk unreferenced. The
+	// re-restore starts a new one under the new checkpoint.
+	f.NextImagesDir = ""
+	if incrementalDumps() && m.chainsFrom(checkpointID) {
+		nextDir, err := m.newNextImagesDir(checkpointID, f.ID)
+		if err != nil {
+			return fail(fmt.Errorf("next images dir for fork %s: %w", f.ID, err))
+		}
+		f.NextImagesDir = nextDir
+	}
 	if err := m.saveFork(f); err != nil {
 		return fail(err)
 	}
@@ -532,6 +532,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 	metadata.PID = f.PID
 	metadata.Status = CheckpointStatusReady
 	if err := m.withSessionLock(func() error {
+		m.recordFullDump(metadata.Chain)
 		return m.saveMetadata(checkpointID, metadata)
 	}); err != nil {
 		return nil, err

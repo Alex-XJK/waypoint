@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +20,7 @@ func TestLoadCheckpointMetadataLoadsConfig(t *testing.T) {
 		"WAYPOINT_TMPFS_IMAGES",
 		"WAYPOINT_TMPFS_DIR",
 		"WAYPOINT_PHASE_STATS",
+		"WAYPOINT_INCREMENTAL_DUMPS",
 		"WAYPOINT_NETWORK",
 	} {
 		t.Setenv(key, "")
@@ -84,5 +86,46 @@ func TestLoadCheckpointMetadataLoadsConfig(t *testing.T) {
 				t.Fatalf("LoadCheckpointMetadata() = %+v, want %+v", got, &want)
 			}
 		})
+	}
+}
+
+func TestNextImagesDirs(t *testing.T) {
+	m := newManager(t.TempDir())
+	plain, tmpfs := m.checkpointCriuDir("plain"), m.checkpointCriuDir("tmpfs")
+	if err := os.MkdirAll(plain, 0o755); err != nil {
+		t.Fatalf("MkdirAll(plain): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tmpfs), 0o755); err != nil {
+		t.Fatalf("MkdirAll(tmpfs parent): %v", err)
+	}
+	if err := os.Symlink(t.TempDir(), tmpfs); err != nil {
+		t.Fatalf("Symlink(tmpfs): %v", err)
+	}
+	for id, want := range map[string]bool{"plain": true, "tmpfs": false, "missing": false} {
+		if got := m.chainsFrom(id); got != want {
+			t.Errorf("chainsFrom(%s) = %v, want %v", id, got, want)
+		}
+	}
+
+	// A fork recreated under the same ID gets a new dir next to the old one.
+	first, err := m.newNextImagesDir("plain", "f1")
+	if err != nil {
+		t.Fatalf("newNextImagesDir: %v", err)
+	}
+	second, err := m.newNextImagesDir("plain", "f1")
+	if err != nil {
+		t.Fatalf("newNextImagesDir: %v", err)
+	}
+	wantParent := filepath.Join(m.checkpointDir("plain"), "next")
+	for _, dir := range []string{first, second} {
+		if !filepath.IsAbs(dir) || filepath.Dir(dir) != wantParent || !strings.HasPrefix(filepath.Base(dir), "f1-") {
+			t.Errorf("next images dir %s, want an absolute %s/f1-*", dir, wantParent)
+		}
+		if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+			t.Errorf("next images dir %s: %d entries, err %v; want empty", dir, len(entries), err)
+		}
+	}
+	if first == second {
+		t.Errorf("newNextImagesDir returned %s twice", first)
 	}
 }

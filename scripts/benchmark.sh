@@ -5,36 +5,56 @@
 # every operation succeeds and that cleanup leaves no mounts or pasta behind.
 #
 # Requires root, criu, a static busybox, and Go unless WAYPOINT_BIN and
-# BASH_INIT_BIN are given; pasta for the private network mode. Sessions,
-# registry and rootfs live in a private temp dir. Other WAYPOINT_* settings in
-# the environment (e.g. WAYPOINT_TMPFS_IMAGES) apply. CPU frequency scaling
-# shows in the numbers, so the header names the cpufreq governor.
+# BASH_INIT_BIN are given; pasta for the private network mode; python3 to
+# read the effective config from `waypoint info`. Sessions, registry and
+# rootfs live in a private temp dir. lib/bench-env.sh pins tmpfs_images,
+# incremental_dumps and phase_stats off, the log level to 2, and
+# full_dump_ratio and max_chain_sets to their defaults unless the
+# environment sets them (WAYPOINT_TMPFS_IMAGES etc.); the host's config file
+# does not apply to them. CPU frequency scaling shows in the numbers, so the
+# header names the cpufreq governor.
 #
 #   RUNS=10                   runs per operation
 #   FORKS=8                   forks per `fork --n`
 #   NETWORK="shared private"  network modes to time; private needs pasta
 #   MEM_MB=0                  MiB a background process in main holds, so that
 #                             dumps and restores copy that much memory
+#   WPBENCH_DIR=/tmp          where the temp dir with rootfs, sessions and
+#                             images is made; a full dump writes MEM_MB there
 #   CSV=<file>                also append one row per operation to <file>
+#   LABEL=<text>              free text for the CSV's label column, e.g. the
+#                             change under test; commas become spaces
+#   WAYPOINT_BIN=<file>       binaries to time instead of building this checkout;
+#   BASH_INIT_BIN=<file>      set both or neither
+#
+# Every CSV row starts with the environment columns of lib/bench-env.sh
+# (utc, label, host, kernel, cpu, nproc, governor, images_fs, criu,
+# criu_gitid, waypoint, waypoint_commit, log_level), then the effective
+# incremental_dumps value. A CSV written by an older version of the script
+# has a different header and is refused.
 #
 # Usage:  sudo ./scripts/benchmark.sh
+#         sudo env LABEL=my-change CSV=runs.csv ./scripts/benchmark.sh
+#         sudo env WAYPOINT_BIN=... BASH_INIT_BIN=... ./scripts/benchmark.sh
 set -euo pipefail
 export LC_ALL=C
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-WORK="$(mktemp -d /tmp/wpbench.XXXXXX)"
+WORK="$(mktemp -d "${WPBENCH_DIR:-/tmp}/wpbench.XXXXXX")"
 ROOTFS="$WORK/rootfs"
+# shellcheck disable=SC2034  # read by lib/bench-env.sh
 BIN="$WORK/bin"
 RUNS="${RUNS:-10}"
 FORKS="${FORKS:-8}"
 NETWORK="${NETWORK:-shared private}"
 MEM_MB="${MEM_MB:-0}"
 CSV="${CSV:-}"
+LABEL="${LABEL:-}"
 SESSION=""
 SESSIONS=()
-
-export WAYPOINT_SESSIONS_DIR="$WORK/s" WAYPOINT_SESSION_INFO_DIR="$WORK/i"
-export WAYPOINT_PRESERVE_SESSION_ON_CLEANUP=false
+# shellcheck source=lib/bench-env.sh
+. "$REPO/scripts/lib/bench-env.sh"
+HEADER="$ENV_HEADER,incremental,mem_mb,network,operation,runs,median_ms,min_ms,max_ms"
 
 cleanup() {
   [ -n "$SESSION" ] && "$W" cleanup "$SESSION" --force >/dev/null 2>&1 || true
@@ -75,29 +95,9 @@ report() {
 # ---------------------------------------------------------------------------
 # Environment, build, rootfs
 # ---------------------------------------------------------------------------
-[ "$(id -u)" -eq 0 ] || { echo "must run as root"; exit 1; }
-for c in criu busybox; do
-  command -v "$c" >/dev/null || { echo "missing required command: $c"; exit 1; }
-done
-if ldd "$(command -v busybox)" >/dev/null 2>&1; then
-  echo "busybox must be statically linked (package busybox-static)"; exit 1
-fi
-
-if [ -n "${WAYPOINT_BIN:-}" ] && [ -n "${BASH_INIT_BIN:-}" ]; then
-  W="$WAYPOINT_BIN"; export WAYPOINT_BASH_INIT_SRC="$BASH_INIT_BIN"
-else
-  GO="$(command -v go || true)"
-  for cand in /usr/local/go/bin/go "$HOME/go/bin/go" "/home/${SUDO_USER:-}/go/bin/go"; do
-    [ -n "$GO" ] && break
-    [ -x "$cand" ] && GO="$cand"
-  done
-  [ -n "$GO" ] || { echo "go toolchain not found; set WAYPOINT_BIN and BASH_INIT_BIN"; exit 1; }
-  mkdir -p "$BIN"
-  ( cd "$REPO"
-    env GOCACHE="${GOCACHE:-/tmp/waypoint-go-cache}" "$GO" build -o "$BIN/waypoint" ./cmd/waypoint
-    env GOCACHE="${GOCACHE:-/tmp/waypoint-go-cache}" CGO_ENABLED=0 "$GO" build -o "$BIN/bash_init" ./cmd/bash-init )
-  W="$BIN/waypoint"; export WAYPOINT_BASH_INIT_SRC="$BIN/bash_init"
-fi
+bench_require
+bench_csv_header "$HEADER"
+bench_binaries
 
 mkdir -p "$ROOTFS"/{bin,tmp,proc,sys,root,etc}
 cp "$(command -v bash)" "$ROOTFS/bin/bash"
@@ -123,18 +123,10 @@ EOF
 chmod +x "$ROOTFS/bin/hold"
 head -c 1048576 /dev/urandom >"$WORK/1m"
 
-CPU="$(awk -F': ' '/^model name/ { print $2; exit }' /proc/cpuinfo)"
-[ -n "$CPU" ] || CPU="$(lscpu 2>/dev/null | awk -F': +' '/^Model name/ { print $2; exit }')"
-GOVERNOR="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
-CRIU_VERSION="$(criu --version | awk '/^Version/ { print $2; exit }')"
-WP_VERSION="$("$W" version | awk '{ print $NF }')"
-printf 'waypoint %s on %s: Linux %s, %s x %s (%s), criu %s, %s on %s\n' "$WP_VERSION" "$(hostname -s)" \
-  "$(uname -r)" "$(nproc)" "${CPU:-unknown cpu}" "$GOVERNOR" "$CRIU_VERSION" "$WORK" "$(stat -f -c %T "$WORK")"
-echo "RUNS=$RUNS FORKS=$FORKS MEM_MB=$MEM_MB"
-CSV_PREFIX="$(date -u +%FT%TZ),$(hostname -s),$(uname -r),$(echo "${CPU:-unknown}" | tr ',' ' '),$(nproc),$GOVERNOR,$CRIU_VERSION,$WP_VERSION,$MEM_MB"
-if [ -n "$CSV" ] && [ ! -s "$CSV" ]; then
-  echo "time,host,kernel,cpu,cpus,governor,criu,waypoint,mem_mb,network,operation,runs,median_ms,min_ms,max_ms" >"$CSV"
-fi
+bench_env
+INCREMENTAL="$(wpinfo incremental_dumps)"
+echo "RUNS=$RUNS FORKS=$FORKS MEM_MB=$MEM_MB incremental_dumps=$INCREMENTAL${LABEL:+ LABEL=$LABEL}"
+CSV_PREFIX="$ENV_PREFIX,$INCREMENTAL,$MEM_MB"
 
 # ---------------------------------------------------------------------------
 # Operations, per network mode

@@ -726,6 +726,13 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 		return fmt.Errorf("invalid checkpoint ID %s: %w", ckptIDSecond, err)
 	}
 	if ckptIDFirst == ckptIDSecond {
+		metadata, err := m.loadMetadata(ckptIDFirst)
+		if err != nil {
+			return fmt.Errorf("failed to read metadata for checkpoint %s: %w", ckptIDFirst, err)
+		}
+		if metadata.Status != CheckpointStatusReady {
+			return fmt.Errorf("checkpoint %s is not ready (status: %s)", ckptIDFirst, metadata.Status)
+		}
 		result := DiffResult{
 			From: ckptIDFirst,
 			To:   ckptIDSecond,

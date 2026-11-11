@@ -22,12 +22,30 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// criuLogLevelArg is the -v option for criu's log, from waypoint_log_level.
+func criuLogLevelArg() string { return "-v" + strconv.Itoa(LogLevel) }
+
+// criuLogTail ends a criu error message with the last 4 KiB of its log. Below
+// debug level that is little more than the error lines, so it also says how
+// to get the full log.
+func criuLogTail(path string) string {
+	tail := fmt.Sprintf("\ncriu log %s:\n%s", path, strings.TrimRight(readRecentFile(path, 4096), "\n"))
+	if LogLevel < 4 {
+		tail += fmt.Sprintf("\n(waypoint_log_level is %d; WAYPOINT_LOG_LEVEL=4 logs every step)", LogLevel)
+	}
+	return tail
+}
+
 // --- dump ---
 
 // createMemoryCheckpoint dumps a process tree with criu. The work overlay is
 // declared as an external mount so CRIU treats it as managed by us.
 // Notice: cannot use '--shell-job' because of the PTY issue during restore.
-func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
+// prevImagesDir is the image set the tree's last restore wrote with
+// --next-images-dir, or empty; with incremental dumps on, the dump writes
+// only the pages changed since then, and Waypoint's CRIU links the new
+// images' parent past that set to the images the restore read.
+func (m *Manager) createMemoryCheckpoint(pid int, criuPath, prevImagesDir string) error {
 	args := []string{"dump",
 		"-t", strconv.Itoa(pid),
 		"-D", criuPath,
@@ -43,7 +61,23 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 		"--link-remap",
 		"--file-locks",
 		"--ghost-limit", "8388608",
-		"-vv", "-o", "dump.log",
+		criuLogLevelArg(), "-o", "dump.log",
+	}
+	if incrementalDumps() {
+		args = append(args, "--track-mem")
+		if prevImagesDir != "" {
+			// CRIU opens this path relative to the images dir and, for an
+			// ordinary parent set, copies the string into the new images'
+			// parent link, which the restored tree follows from inside the
+			// fork's root, where host paths don't resolve; relative to the
+			// images dir, it does. For a next images set Waypoint's CRIU
+			// writes its own relative link past it.
+			rel, err := filepath.Rel(criuPath, prevImagesDir)
+			if err != nil {
+				return fmt.Errorf("failed to create memory checkpoint: parent images %s: %w", prevImagesDir, err)
+			}
+			args = append(args, "--prev-images-dir", rel)
+		}
 	}
 	if _, err := findMountID(pid, m.workOverlay); err == nil {
 		args = append(args, "--external", fmt.Sprintf("mnt[%s]:waypoint-work", m.workOverlay))
@@ -67,7 +101,8 @@ func (m *Manager) createMemoryCheckpoint(pid int, criuPath string) error {
 	}
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create memory checkpoint: %w\ncriu stderr: %s", err, stderr.String())
+		return fmt.Errorf("failed to create memory checkpoint: %w\ncriu stderr: %s%s", err, stderr.String(),
+			criuLogTail(filepath.Join(criuPath, "dump.log")))
 	}
 	return nil
 }
@@ -136,6 +171,10 @@ func RunForkRestoreChildFromArgs(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The fork record carries the restore's inputs; the criu log level is
+	// resolved here the same way the parent resolved it (same binary, same
+	// environment, same config file).
+	loadConfig()
 	return restoreForkChild(f)
 }
 
@@ -147,21 +186,6 @@ const restoreTimingFile = "restore-timing.json"
 type childRestoreTiming struct {
 	MountMs    float64 `json:"mount_ms"`
 	CriuWallMs float64 `json:"criu_wall_ms"`
-}
-
-// writeCriuActionScript writes the wrapper script; --action-script takes a
-// file, not a command line.
-func writeCriuActionScript(f *Fork) (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	path := filepath.Join(f.RootDir, "criu-action.sh")
-	body := "#!/bin/sh\nexec " + exe + " " + criuActionSubcommand + "\n"
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
-		return "", err
-	}
-	return path, nil
 }
 
 func restoreForkChild(f *Fork) error {
@@ -183,14 +207,10 @@ func restoreForkChild(f *Fork) error {
 		// criu writes by default must be redirected per fork: logs via an
 		// absolute -o path, stats-restore via --work-dir.
 		"--work-dir", f.RootDir,
-		"-vv", "-o", f.LogPath,
+		criuLogLevelArg(), "-o", f.LogPath,
 	}
-	// advanceNsLastPid runs before the tree resumes; once restore returns, the
-	// tree may already have forked.
-	if script, err := writeCriuActionScript(f); err == nil {
-		args = append(args, "--action-script", script)
-	} else {
-		fmt.Fprintf(os.Stderr, "warning: no criu action script for %s: %v\n", f.ID, err)
+	if f.NextImagesDir != "" {
+		args = append(args, "--track-mem", "--next-images-dir", f.NextImagesDir)
 	}
 	if f.MountPoint != "" {
 		args = append(args, "-r", f.MountPoint)
@@ -222,7 +242,7 @@ func restoreForkChild(f *Fork) error {
 
 	criuStart := time.Now()
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("criu restore failed: %w\n%s", err, stderr.String())
+		return fmt.Errorf("criu restore failed: %w\n%s%s", err, stderr.String(), criuLogTail(f.LogPath))
 	}
 	timing.CriuWallMs = durMs(time.Since(criuStart))
 
