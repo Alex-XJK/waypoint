@@ -125,6 +125,8 @@ func main() {
 		fmt.Println("  suspend <session>                            - End all live forks; keep checkpoints on disk")
 		fmt.Println("  cleanup <session> [--force]                  - Clean up session")
 		fmt.Println("  info [session [checkpoint-id]]               - Show system, session, or checkpoint info")
+		fmt.Println("  diff <session> <checkpoint-id> [<session>:]<checkpoint-id> [--fs-only | --proc-only] [--content | --word-diff] [--content-max=<bytes>] - Compare two checkpoints (JSON)")
+		fmt.Println("  state <session> <checkpoint-id>              - Show a checkpoint's process state (JSON)")
 		fmt.Println("  version                                      - Show version")
 		fmt.Println()
 		fmt.Printf("Version: %s, DAPLab\n", Version)
@@ -557,6 +559,18 @@ func main() {
 		}
 		if err := printInfo(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "Error collecting info: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "diff":
+		if err := runDiff(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error on diff: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "state":
+		if err := runState(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error on state: %v\n", err)
 			os.Exit(1)
 		}
 

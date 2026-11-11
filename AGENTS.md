@@ -48,6 +48,7 @@ sources disagree, especially namespace and platform assumptions.
 | `pkg/waypoint/checkpoint.go`, `fork.go` | Checkpoint DAG, live fork lifecycle, materialization, snapshotting, and exec client. |
 | `pkg/waypoint/build.go`, `overlay.go`, `criu.go` | Rootfs staging/Buildah builds, shell startup, OverlayFS, and CRIU orchestration. |
 | `pkg/waypoint/copy.go`, `inspect.go`, `cleanup.go` | Fork-aware file transfer, runtime inspection, and process/mount teardown. |
+| `pkg/waypoint/diff.go`, `fsdiff.go`, `textdiff.go`, `procstate.go`, `criuimage.go` | Read-only comparison of checkpoints: layer resolution, line diffs, CRIU image decoding. |
 | `pkg/waypoint/imagestore.go`, `criustats.go` | Optional tmpfs image storage/flush and phase timing. |
 | `cmd/bash-init/` | Namespace init and persistent shell supervisor; exec protocol server. |
 | `contrib/bash-completion/`, `scripts/` | Bash completion and executable validation workflows. |
@@ -104,6 +105,8 @@ waypoint destroy <session> <fork-id>
 waypoint list
 waypoint list <session> [--json]
 waypoint info [session [checkpoint-id]]
+waypoint diff <session> <checkpoint-id> [<session>:]<checkpoint-id> [--fs-only | --proc-only] [--content | --word-diff] [--content-max=<bytes>]
+waypoint state <session> <checkpoint-id>
 waypoint suspend <session>
 waypoint cleanup <session> [--force]
 waypoint version
@@ -208,6 +211,9 @@ Choose validation for the affected behavior:
 - For changes to restore, also run
   `sudo ./scripts/test-ns-last-pid.sh` (new pids after checkpoint, fork, and a
   second-generation fork stay above the restored tree's).
+- For changes to `diff` or `state`, also run `sudo ./scripts/test-diff.sh`
+  (filesystem and process changes between checkpoints, two branches, two
+  sessions, and incremental image chains).
 - `sudo ./scripts/test-search-workflow.sh` adds an offline Dockerfile build, file
   transfer, concurrent branching, recursive snapshots/backtracking, export, and
   cleanup workload. Its header documents prerequisites and scaling options.

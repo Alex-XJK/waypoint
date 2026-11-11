@@ -258,7 +258,7 @@ _waypoint()
     if (( cword == 1 )); then
         _waypoint_complete_words "$cur" \
             init build checkpoint fork exec cp snapshot create fork-exec \
-            destroy list suspend cleanup info version --version -v
+            destroy list suspend cleanup info diff state version --version -v
         return
     fi
 
@@ -295,7 +295,7 @@ _waypoint()
             fi
             return
             ;;
-        checkpoint|create|fork|exec|fork-exec|cp|destroy|list|suspend|cleanup|info)
+        checkpoint|create|fork|exec|fork-exec|cp|destroy|list|suspend|cleanup|info|diff|state)
             if (( cword == 2 )); then
                 _waypoint_complete_sessions "$cur"
                 return
@@ -345,6 +345,29 @@ _waypoint()
                 _waypoint_complete_copy "$cur" "${words[2]}"
             elif (( cword == 4 )); then
                 _waypoint_complete_copy "$cur" "${words[2]}" "${words[3]}"
+            fi
+            ;;
+        state)
+            (( cword != 3 )) || _waypoint_complete_checkpoints "$cur" "${words[2]}"
+            ;;
+        diff)
+            # The second checkpoint may also be <session>:<checkpoint> of
+            # another session, which is left free-form.
+            if (( cword == 3 || cword == 4 )); then
+                _waypoint_complete_checkpoints "$cur" "${words[2]}"
+            elif (( cword >= 5 )); then
+                local i only='' content='' content_max='' flags=()
+                for (( i=5; i<cword; i++ )); do
+                    case "${words[i]}" in
+                        --fs-only|--proc-only) only="${words[i]}" ;;
+                        --content|--word-diff) content=1 ;;
+                        --content-max=*) content_max=1 ;;
+                    esac
+                done
+                [[ -n "$only" ]] || flags+=(--fs-only --proc-only)
+                [[ -n "$content" || "$only" == --proc-only ]] || flags+=(--content --word-diff)
+                [[ -z "$content" || -n "$content_max" ]] || flags+=(--content-max=)
+                (( ${#flags[@]} )) && _waypoint_complete_words "$cur" "${flags[@]}"
             fi
             ;;
         list)

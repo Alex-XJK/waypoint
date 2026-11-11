@@ -155,6 +155,24 @@ Two binaries, one library:
   `SnapshotBreakdown` (persisted in fork.json / checkpoint metadata, printed
   as flat `key_ms=` tokens) and a minimal protobuf-varint parser for CRIU's
   `stats-dump` / `stats-restore` images.
+- `diff.go`, `fsdiff.go`, `textdiff.go`, `procstate.go`, `criuimage.go` —
+  `diff` and `state`, read-only over sealed checkpoints. `fsdiff.go` resolves paths
+  through a checkpoint's layers the way OverlayFS does (whiteouts, opaque
+  directories, non-directories hiding what is below) without mounting, and
+  compares only the paths the layers above the two stacks' shared part touch,
+  plus what those layers hide; across sessions, a manifest of each original
+  rootfs (`<session>/original.manifest`, computed once) supplies the paths
+  where the originals differ. `textdiff.go` adds unified line diffs of
+  changed UTF-8 text files for `--content` (Myers on the lines between the
+  common prefix and suffix, bounded at 1000 edits, past which the middle is
+  reported as replaced). `--word-diff` keeps the hunks and diffs each run
+  of changed lines again over tokens (runs of non-space and of space) to
+  mark the changed words inline. `procstate.go` decodes the process tree, argv,
+  environment, cwd, credentials and descriptors from the CRIU images and keys
+  processes by argv and tree position. `criuimage.go` is the protobuf and
+  page reader; it follows the image set's `parent` link for pages an
+  incremental dump left there, and reads zero and raw blocks of compressed
+  pagemaps but not LZ4-compressed ones.
 - `cleanup.go` — `Suspend` (end all live forks and sweep processes/mounts
   while keeping the checkpoint DAG on disk and the session registered;
   pending tmpfs images are flushed to durable disk first, as they are for

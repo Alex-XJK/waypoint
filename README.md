@@ -463,6 +463,45 @@ sudo waypoint info a1b2c3d4e5f6g7h8 checkpoint-name
 
 The `info` command prints JSON for system/configuration details, a specific session, or a specific checkpoint.
 
+### 6.1. Compare Checkpoints
+
+```bash
+sudo waypoint diff a1b2c3d4e5f6g7h8 before after
+sudo waypoint diff a1b2c3d4e5f6g7h8 before b9c8d7e6f5a4b3c2:other   # a checkpoint of another session
+sudo waypoint diff a1b2c3d4e5f6g7h8 before after --fs-only           # or --proc-only
+sudo waypoint diff a1b2c3d4e5f6g7h8 before after --content           # with line diffs of text files
+sudo waypoint diff a1b2c3d4e5f6g7h8 before after --word-diff         # the same, changed words marked inline
+sudo waypoint state a1b2c3d4e5f6g7h8 after
+```
+
+`diff` prints JSON with two parts. `filesystem` lists every path whose type,
+permission bits, owner, content, symlink target or device numbers differ, with
+the layer each version comes from. It reads the checkpoints' layers directly,
+without mounting them, and only the paths that layers above the two
+checkpoints' shared part wrote, so its cost follows the change rather than the
+rootfs. Two sessions share no layers; their original rootfses are compared
+through a manifest computed once per session. `processes` compares the
+process trees decoded from the CRIU images: processes added or removed (matched
+by their argv and position in the tree, not by PID), changes of executable,
+cwd, credentials, initial environment and open descriptors, and the sockets
+added, removed or held by other processes (`sockets.changed`, with
+`from_owners` and `to_owners`). A process that sets its title (nginx,
+postgres) has the title as its argv, as `/proc/<pid>/cmdline` shows it; when
+the title overwrote its environment, `unavailable` says so. Waypoint's own
+processes, files and descriptors are left out.
+With `--content`, each record of a regular file that was added, deleted or whose
+content changed also carries `patch`, a unified diff (`diff -u` format, paths
+`a/...` and `b/...`, `/dev/null` for a missing side) that `patch -p1` or
+`git apply` accepts. Files over `--content-max` bytes (1 MiB by default),
+binary files (a NUL byte) and files that are not UTF-8 carry `patch_omitted`
+(`too_large`, `binary`, `not_utf8`) instead. `--word-diff` gives the same
+records and hunks, but shows each run of changed lines once with the changed
+words marked `[-old-]{+new+}`, as `git diff --word-diff=plain` does; it reads
+better on prose and on long single-line files, but `patch` cannot apply it.
+`filesystem.patch_format` says which form the patches are in.
+Memory contents beyond argv and environment, shell variables and timestamps are
+not compared. `state` prints the decoded process state of one checkpoint.
+
 ### 7. Suspend Session
 
 ```bash
