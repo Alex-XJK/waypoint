@@ -15,8 +15,38 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/checkpoint-restore/go-criu/v8/crit"
+	criu_core "github.com/checkpoint-restore/go-criu/v8/crit/images/criu-core"
+	"github.com/checkpoint-restore/go-criu/v8/crit/images/pstree"
 	"golang.org/x/sys/unix"
 )
+
+type DiffResult struct {
+	From       string           `json:"from"`
+	To         string           `json:"to"`
+	Filesystem FilesystemDiff   `json:"filesystem"`
+	Processes  []DiffProcRecord `json:"processes"`
+}
+
+type FilesystemDiff struct {
+	TargetDir string           `json:"target_dir"`
+	Records   []DiffFileRecord `json:"records"`
+}
+
+type ChangeType string
+
+const (
+	ChangeTypeAdded    ChangeType = "added"
+	ChangeTypeDeleted  ChangeType = "deleted"
+	ChangeTypeModified ChangeType = "modified"
+)
+
+type DiffFileRecord struct {
+	Path       string     `json:"path"`
+	ChangeType ChangeType `json:"change_type"`
+	FileType   FileType   `json:"file_type"`
+	// TODO: show the actual line by line diff like blame
+}
 
 type FileType string
 
@@ -31,31 +61,25 @@ const (
 	FileTypeModified FileType = "modified" // TODO: use for files whose mode changed, OK?
 )
 
-type ChangeType string
-
-const (
-	ChangeTypeAdded    ChangeType = "added"
-	ChangeTypeDeleted  ChangeType = "deleted"
-	ChangeTypeModified ChangeType = "modified"
-)
-
-type DiffFileRecord struct {
-	Path       string     `json:"path"`
-	ChangeType ChangeType `json:"change_type"`
-	FileType   FileType   `json:"file_type"`
+type DiffProcRecord struct {
+	PID        uint32       `json:"pid"`
+	ChangeType ChangeType   `json:"change_type"`
+	Process    *ProcInfo    `json:"process,omitempty"`
+	Changes    []ProcChange `json:"changes,omitempty"`
 }
 
-// DiffResult is the JSON printed by `diff`. Other kinds of state go next to
-// Filesystem.
-type DiffResult struct {
-	From       string         `json:"from"`
-	To         string         `json:"to"`
-	Filesystem FilesystemDiff `json:"filesystem"`
+type ProcChange struct {
+	Field    string `json:"field"`
+	Previous any    `json:"previous"`
+	New      any    `json:"new"`
 }
 
-type FilesystemDiff struct {
-	TargetDir string           `json:"target_dir"`
-	Records   []DiffFileRecord `json:"records"`
+type ProcInfo struct {
+	PID  uint32 `json:"pid"`
+	PGID uint32 `json:"pgid"`
+	PPID uint32 `json:"ppid"`
+	SID  uint32 `json:"sid"`
+	Comm string `json:"comm"`
 }
 
 type DiffFS struct {
@@ -551,6 +575,144 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 	return d, nil, nil
 }
 
+func processProcMod(leftInfo, rightInfo *ProcInfo, detected *[]DiffProcRecord) error {
+	// confirm these are the same pid, else shoudln't be comparing
+	if leftInfo.PID != rightInfo.PID {
+		return fmt.Errorf("comparing procs with two different pids")
+	}
+	var changes []ProcChange
+	if leftInfo.PPID != rightInfo.PPID {
+		changes = append(changes, ProcChange{
+			Field:    "ppid",
+			Previous: leftInfo.PPID,
+			New:      rightInfo.PPID,
+		})
+	}
+	if leftInfo.PGID != rightInfo.PGID {
+		changes = append(changes, ProcChange{
+			Field:    "pgid",
+			Previous: leftInfo.PGID,
+			New:      rightInfo.PGID,
+		})
+	}
+	if leftInfo.SID != rightInfo.SID {
+		changes = append(changes, ProcChange{
+			Field:    "sid",
+			Previous: leftInfo.SID,
+			New:      rightInfo.SID,
+		})
+	}
+	if leftInfo.Comm != rightInfo.Comm {
+		changes = append(changes, ProcChange{
+			Field:    "comm",
+			Previous: leftInfo.Comm,
+			New:      rightInfo.Comm,
+		})
+	}
+	if len(changes) > 0 {
+		*detected = append(*detected, DiffProcRecord{
+			PID:        leftInfo.PID,
+			ChangeType: ChangeTypeModified,
+			Changes:    changes,
+		})
+	}
+	return nil
+}
+
+// modification of crit's ExplorePs()
+func explorePsFlat(inputDirPath string) (map[uint32]ProcInfo, error) {
+	processes := make(map[uint32]ProcInfo)
+
+	psTreeFile, err := os.Open(filepath.Join(inputDirPath, "pstree.img"))
+	if err != nil {
+		return nil, err
+	}
+	psTreeCrit := crit.New(psTreeFile, nil, "", false, false)
+	psTreeImg, err := psTreeCrit.Decode(&pstree.PstreeEntry{})
+	psTreeFile.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range psTreeImg.Entries {
+		process, ok := entry.Message.(*pstree.PstreeEntry)
+		if !ok {
+			return nil, fmt.Errorf("unexpected pstree entry type")
+		}
+		pid := process.GetPid()
+
+		coreFile, err := os.Open(filepath.Join(inputDirPath, fmt.Sprintf("core-%d.img", pid)))
+		if err != nil {
+			return nil, err
+		}
+		coreCrit := crit.New(coreFile, nil, "", false, false)
+		coreImg, err := coreCrit.Decode(&criu_core.CoreEntry{})
+		coreFile.Close()
+		if err != nil {
+			return nil, err
+		}
+		if len(coreImg.Entries) == 0 {
+			return nil, fmt.Errorf("no core entries for PID %d", pid)
+		}
+		coreData, ok := coreImg.Entries[0].Message.(*criu_core.CoreEntry)
+		if !ok {
+			return nil, fmt.Errorf("unexpected core entry type for PID %d", pid)
+		}
+
+		processes[pid] = ProcInfo{
+			PID:  pid,
+			PPID: process.GetPpid(),
+			PGID: process.GetPgid(),
+			SID:  process.GetSid(),
+			Comm: coreData.GetTc().GetComm(),
+		}
+	}
+	return processes, nil
+}
+
+func (m *Manager) getProcDiff(ckptIDLeft, ckptIDRight string, detected *[]DiffProcRecord) error {
+	// NOTE: treating pid as identity, so pid reuse will show up as modified
+	// so TODO: strengthen identity key
+
+	// to get process diff, need to get the criu directories for both checkpoints
+	criuDirLeft := m.checkpointCriuDir(ckptIDLeft)
+	criuDirRight := m.checkpointCriuDir(ckptIDRight)
+	expLeft, err := explorePsFlat(criuDirLeft)
+	if err != nil {
+		return err
+	}
+	expRight, err := explorePsFlat(criuDirRight)
+	if err != nil {
+		return err
+	}
+
+	for pidLeft, infoLeft := range expLeft {
+		infoRight, exists := expRight[pidLeft]
+		if !exists {
+			*detected = append(*detected, DiffProcRecord{
+				PID:        pidLeft,
+				ChangeType: ChangeTypeDeleted,
+				Process:    &infoLeft,
+			})
+			continue
+		}
+		if err := processProcMod(&infoLeft, &infoRight, detected); err != nil {
+			return err
+		}
+	}
+	for pid, info := range expRight {
+		if _, exists := expLeft[pid]; exists {
+			continue
+		}
+		*detected = append(*detected, DiffProcRecord{
+			PID:        pid,
+			ChangeType: ChangeTypeAdded,
+			Process:    &info,
+		})
+	}
+	return nil
+}
+
 // Entry point for diff
 func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 	normalizedTargetDir, err := normalizeTargetDir(targetDir)
@@ -571,6 +733,7 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 				TargetDir: normalizedTargetDir,
 				Records:   []DiffFileRecord{},
 			},
+			Processes: []DiffProcRecord{},
 		}
 		data, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
@@ -623,25 +786,33 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 	if err != nil {
 		return err
 	}
-	detected := make([]DiffFileRecord, 0)
+	detectedFS := make([]DiffFileRecord, 0)
 	switch {
 	case !leftExists && !rightExists:
 	case leftExists && !rightExists:
-		if err := recurseWithChangeType(leftRoot, targetForRoot, normalizedTargetDir, &detected, ChangeTypeDeleted); err != nil {
+		if err := recurseWithChangeType(leftRoot, targetForRoot, normalizedTargetDir, &detectedFS, ChangeTypeDeleted); err != nil {
 			return err
 		}
 	case !leftExists && rightExists:
-		if err := recurseWithChangeType(rightRoot, targetForRoot, normalizedTargetDir, &detected, ChangeTypeAdded); err != nil {
+		if err := recurseWithChangeType(rightRoot, targetForRoot, normalizedTargetDir, &detectedFS, ChangeTypeAdded); err != nil {
 			return err
 		}
 	default:
-		if err := walkFS(leftRoot, rightRoot, targetForRoot, normalizedTargetDir, &detected); err != nil {
+		if err := walkFS(leftRoot, rightRoot, targetForRoot, normalizedTargetDir, &detectedFS); err != nil {
 			return err
 		}
 	}
 
-	sort.Slice(detected, func(i, j int) bool {
-		return detected[i].Path < detected[j].Path
+	sort.Slice(detectedFS, func(i, j int) bool {
+		return detectedFS[i].Path < detectedFS[j].Path
+	})
+
+	detectedProc := make([]DiffProcRecord, 0)
+	if err := m.getProcDiff(ckptIDFirst, ckptIDSecond, &detectedProc); err != nil {
+		return err
+	}
+	sort.Slice(detectedProc, func(i, j int) bool {
+		return detectedProc[i].PID < detectedProc[j].PID
 	})
 
 	ckptsDiffID := computeCkptsDiffID(ckptIDFirst, ckptIDSecond)
@@ -656,8 +827,9 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 		To:   ckptIDSecond,
 		Filesystem: FilesystemDiff{
 			TargetDir: normalizedTargetDir,
-			Records:   detected,
+			Records:   detectedFS,
 		},
+		Processes: detectedProc,
 	}
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
