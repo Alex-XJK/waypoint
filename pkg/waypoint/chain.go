@@ -3,16 +3,17 @@ package waypoint
 // Full or incremental dumps. With incremental_dumps on, a dump of a fork
 // that has a parent image set either extends the image chain of the fork's
 // base checkpoint or is a full dump that starts a new chain. It is full once
-// one more level would cost more than the chain's average per snapshot,
-// counting full_dump_ratio times the estimated extra time of a full dump
-// into that average (see replacementStat), or once the chain would exceed
-// max_chain_sets. Both sides are measured on this host from criu's
-// stats-dump and stats-restore.
+// the restore time the chain has added (the rent) reaches full_dump_ratio
+// times the extra time of a full dump now (the price), or once the chain
+// would exceed max_chain_sets. The rent is measured from criu's
+// stats-restore; the price is the host's dump time per page written times
+// the pages only a full dump would write, counted in the fork's pagemap.
 
 import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -42,15 +43,18 @@ type ChainInfo struct {
 type DumpDecision struct {
 	Full   bool   `json:"full"`
 	Reason string `json:"reason"`
-	// OverheadMs is the replacement statistic of the base checkpoint's chain
-	// (replacementStat), compared with the ratio times PriceMs, the
-	// estimated extra time of a full dump. RentMs is the overhead the chain
-	// has added since its full dump and NextLevelMs the predicted overhead
-	// of one more level.
-	OverheadMs  float64 `json:"overhead_ms"`
-	PriceMs     float64 `json:"price_ms"`
-	RentMs      float64 `json:"rent_ms"`
-	NextLevelMs float64 `json:"next_level_ms"`
+	// RentMs is the restore time the base checkpoint's chain has added
+	// (chainRent), compared with the ratio times PriceMs, the estimated
+	// extra time of a full dump.
+	RentMs  float64 `json:"rent_ms"`
+	PriceMs float64 `json:"price_ms"`
+	// ResidentPages and DirtyPages are the pages a full and an incremental
+	// dump would write: counted in the fork's pagemap (Scanned, in ScanMs)
+	// or, without the scan, those of the base checkpoint's dump.
+	ResidentPages uint64  `json:"resident_pages"`
+	DirtyPages    uint64  `json:"dirty_pages"`
+	Scanned       bool    `json:"scanned"`
+	ScanMs        float64 `json:"scan_ms,omitempty"`
 }
 
 // DumpDecision reasons.
@@ -58,8 +62,8 @@ const (
 	dumpReasonRatioZero    = "ratio_zero"     // full_dump_ratio is 0
 	dumpReasonUnknownChain = "unknown_chain"  // the base checkpoint's chain is not recorded
 	dumpReasonMaxSets      = "max_chain_sets" // the chain would exceed max_chain_sets
-	dumpReasonOverhead     = "overhead"       // the replacement statistic reached the ratio times the price
-	dumpReasonNoPrice      = "no_price"       // no full dump measured yet; incremental
+	dumpReasonRent         = "rent"           // the rent reached the ratio times the price
+	dumpReasonNoPrice      = "no_price"       // no dump time per page measured yet; incremental
 	dumpReasonBelowPrice   = "below_price"    // incremental
 )
 
@@ -71,31 +75,34 @@ func (c *ChainInfo) String() string {
 	}
 	s := fmt.Sprintf("chain_sets=%d full_dump=%d", c.Sets, full)
 	if d := c.Decision; d != nil {
-		s += fmt.Sprintf(" dump_reason=%s chain_overhead_ms=%.1f full_dump_price_ms=%.1f chain_rent_ms=%.1f next_level_ms=%.1f",
-			d.Reason, d.OverheadMs, d.PriceMs, d.RentMs, d.NextLevelMs)
+		s += fmt.Sprintf(" dump_reason=%s chain_rent_ms=%.1f full_dump_price_ms=%.1f resident_pages=%d dirty_pages=%d",
+			d.Reason, d.RentMs, d.PriceMs, d.ResidentPages, d.DirtyPages)
 	}
 	return s
 }
 
 // chainState is what the full-dump decision knows about the chain of a
-// fork's base checkpoint.
+// fork's base checkpoint and about the fork's memory.
 type chainState struct {
 	Sets int    // image sets of the base checkpoint; 0 if unknown
 	Root string // the chain's full checkpoint
-	// OverheadMs is the replacement statistic, RentMs the summed overhead
-	// of the chain's levels and NextLevelMs the predicted overhead of one
-	// more level (replacementStat).
-	OverheadMs  float64
-	RentMs      float64
-	NextLevelMs float64
-	PriceMs     float64
-	PriceKnown  bool
+	// RentMs is the restore time the chain has added (chainRent) and
+	// PriceMs the estimated extra time of a full dump of the fork now.
+	RentMs     float64
+	PriceMs    float64
+	PriceKnown bool
+	// The pages behind the price, as in DumpDecision.
+	ResidentPages uint64
+	DirtyPages    uint64
+	Scanned       bool
+	ScanMs        float64
 }
 
 // decideFullDump decides whether a dump that would extend the chain s is
 // full instead.
 func decideFullDump(s chainState, ratio float64, maxSets int) DumpDecision {
-	d := DumpDecision{OverheadMs: s.OverheadMs, PriceMs: s.PriceMs, RentMs: s.RentMs, NextLevelMs: s.NextLevelMs}
+	d := DumpDecision{RentMs: s.RentMs, PriceMs: s.PriceMs, ResidentPages: s.ResidentPages, DirtyPages: s.DirtyPages,
+		Scanned: s.Scanned, ScanMs: s.ScanMs}
 	switch {
 	case ratio == 0:
 		d.Full, d.Reason = true, dumpReasonRatioZero
@@ -105,13 +112,17 @@ func decideFullDump(s chainState, ratio float64, maxSets int) DumpDecision {
 		d.Full, d.Reason = true, dumpReasonMaxSets
 	case !s.PriceKnown:
 		d.Reason = dumpReasonNoPrice
-	case s.OverheadMs >= ratio*s.PriceMs:
-		d.Full, d.Reason = true, dumpReasonOverhead
+	case s.RentMs >= ratio*s.PriceMs:
+		d.Full, d.Reason = true, dumpReasonRent
 	default:
 		d.Reason = dumpReasonBelowPrice
 	}
 	return d
 }
+
+// pageScan counts the pages a full dump of a fork would write (resident)
+// and those an incremental one would (dirty).
+type pageScan func() (resident, dirty uint64, err error)
 
 // dumpParent returns the --prev-images-dir for the next dump of f: the image
 // set its last restore wrote, or empty when the dump is to be full. It also
@@ -120,7 +131,7 @@ func (m *Manager) dumpParent(f *Fork) (string, chainState, *DumpDecision) {
 	if f.NextImagesDir == "" || !incrementalDumps() {
 		return f.NextImagesDir, chainState{}, nil
 	}
-	st := m.chainStateFrom(f.BaseCheckpointID)
+	st := m.chainStateFrom(f.BaseCheckpointID, func() (uint64, uint64, error) { return softDirtyPages(f.PID) })
 	d := decideFullDump(st, FullDumpRatio, MaxChainSets)
 	if d.Full {
 		return "", st, &d
@@ -129,21 +140,20 @@ func (m *Manager) dumpParent(f *Fork) (string, chainState, *DumpDecision) {
 }
 
 // chainStateFrom walks from the base checkpoint to its chain's full
-// checkpoint. Each checkpoint after the full one is a level of the chain;
-// its overhead is every restore's time above the full checkpoint's restore
-// time per page, plus its dump's memwrite time above the chain's first
-// incremental dump's per page written; restores by any fork count. The
-// overhead is then the replacement statistic over the levels. The price is
-// the full-dump time per page times the base's pages scanned, minus the
-// base's own dump time if that dump was incremental.
-func (m *Manager) chainStateFrom(baseID string) chainState {
+// checkpoint for the rent of the chain's restores (chainRent; restores by
+// any fork count) and prices a full dump of the fork: the host's dump time
+// per page written times the pages scan counts as resident and not dirty.
+// Without a scan the pages are those of the base checkpoint's dump; without
+// the host's time per page, the time is that of the chain's full dump if it
+// was of a tree never restored.
+func (m *Manager) chainStateFrom(baseID string, scan pageScan) chainState {
 	base, err := m.loadMetadata(baseID)
 	if err != nil || base.Chain == nil || base.Chain.Sets < 1 {
 		return chainState{}
 	}
 	st := chainState{Sets: base.Chain.Sets, Root: base.Chain.Root}
-	if st.Sets+1 > MaxChainSets {
-		return st // the cap decides; no need to walk
+	if FullDumpRatio == 0 || st.Sets+1 > MaxChainSets {
+		return st // decided without the rent and the price
 	}
 	path := []*Metadata{base} // base first, the full checkpoint last
 	for md := base; md.Chain.Sets > 1; {
@@ -157,139 +167,70 @@ func (m *Manager) chainStateFrom(baseID string) chainState {
 		path = append(path, parent)
 		md = parent
 	}
+	costs := readHostCosts(m.hostCostsPath())
 
-	var fullMs, fullPages float64
-	for _, s := range m.restoreSamples(path[len(path)-1].ID) {
-		fullMs += s.RestoreMs
-		fullPages += float64(s.Pages)
-	}
-	var first *ChainInfo // the chain's first incremental dump
-	if len(path) > 1 {
-		first = path[len(path)-2].Chain
-	}
-	levels := make([]levelCost, 0, len(path)-1) // oldest first
+	levels := make([][]restoreSample, 0, len(path)-1) // oldest first
+	var largest uint64
 	for i := len(path) - 2; i >= 0; i-- {
-		md := path[i]
-		var lc levelCost
-		if fullPages > 0 {
-			for _, s := range m.restoreSamples(md.ID) {
-				lc.RestoreMs += s.RestoreMs - fullMs/fullPages*float64(s.Pages)
-				lc.Restores++
-			}
+		samples := m.restoreSamples(path[i].ID)
+		for _, s := range samples {
+			largest = max(largest, s.Pages)
 		}
-		lc.DumpMs = dumpOverheadMs(md.Chain, first)
-		levels = append(levels, lc)
+		levels = append(levels, samples)
 	}
-	st.RentMs, st.NextLevelMs, st.OverheadMs = replacementStat(levels)
+	restoreMsPerPage, _ := costs.Restore.slope(float64(largest))
+	st.RentMs = chainRent(levels, restoreMsPerPage)
 
-	if msPerPage, ok := m.fullDumpMsPerPage(); ok && base.Chain.PagesScanned > 0 {
-		st.PriceKnown = true
-		st.PriceMs = msPerPage * float64(base.Chain.PagesScanned)
-		if base.Chain.Sets > 1 {
-			st.PriceMs -= base.Chain.DumpMs
+	if scan != nil {
+		start := time.Now()
+		if resident, dirty, err := scan(); err == nil && resident > 0 {
+			st.ResidentPages, st.DirtyPages, st.Scanned = resident, min(dirty, resident), true
+			st.ScanMs = durMs(time.Since(start))
 		}
+	}
+	if !st.Scanned {
+		st.ResidentPages = base.Chain.PagesScanned
+		if base.Chain.Sets > 1 {
+			st.DirtyPages = min(base.Chain.PagesWritten, st.ResidentPages)
+		}
+	}
+	if st.ResidentPages == 0 {
+		return st
+	}
+	extra := float64(st.ResidentPages - st.DirtyPages)
+	root := path[len(path)-1].Chain
+	if msPerPage, ok := costs.Dump.slope(extra); ok {
+		st.PriceMs, st.PriceKnown = msPerPage*extra, true
+	} else if !root.Restored && root.PagesWritten > 0 {
+		st.PriceMs, st.PriceKnown = root.DumpMs/float64(root.PagesWritten)*extra, true
 	}
 	return st
 }
 
-// levelCost is the overhead one level of a chain has added: the restores of
-// its checkpoint above restores of the chain's full checkpoint, and its dump
-// above the chain's first incremental dump.
-type levelCost struct {
-	RestoreMs float64 // summed over its restores
-	Restores  int
-	DumpMs    float64
-}
-
-// replacementStat returns, for the levels 1..k of a chain (oldest first),
-// their summed overhead, the predicted overhead of level k+1 and the
-// replacement statistic.
-//
-// A cycle of a full dump (level 0, no overhead) and the incremental levels
-// 1..n-1 costs (cC + c_1 + ... + c_{n-1}) / n per snapshot, C being the
-// extra time of the full dump and c the ratio. One more level lowers that
-// average exactly when its overhead c_n is below it. So level k+1 is better
-// a full dump once
-//
-//	sum_{j=0..k} (c_{k+1} - c_j) >= cC,    c_0 = 0.
-//
-// The overheads are modelled as a line c_j = A + Bj, j >= 1: the overhead
-// per restore fitted over the levels' restores (weighted by their number)
-// times the mean number of restores per level, plus the dump overhead
-// fitted over the levels, which keeps a level that has not been forked yet
-// from reading as a cheap one. With the line, the left side is
-// A + B(k+1)(k+2)/2: a constant overhead per level, such as criu's slower
-// restore from any chain, counts once, since a full dump does not remove it
-// from the next level, and only the growth B makes the chain worth cutting,
-// with the period sqrt(2(cC - A)/B). With a single level, A is its overhead
-// and B is 0.
-func replacementStat(levels []levelCost) (rentMs, nextMs, stat float64) {
-	k := len(levels)
-	if k == 0 {
-		return 0, 0, 0
-	}
-	var xs, perRestore, restores, dump, ones []float64
-	total := 0
-	for i, l := range levels {
-		j := float64(i + 1)
-		rentMs += l.RestoreMs + l.DumpMs
-		if l.Restores > 0 {
-			xs = append(xs, j)
-			perRestore = append(perRestore, l.RestoreMs/float64(l.Restores))
-			restores = append(restores, float64(l.Restores))
-			total += l.Restores
+// chainRent is the restore time the levels of a chain (the checkpoints
+// after its full one, oldest first, each with its restores) have added: the
+// time of every restore above the mean of the first restored level's, with
+// msPerPage for the difference in pages. A negative sum counts as 0.
+func chainRent(levels [][]restoreSample, msPerPage float64) float64 {
+	var ref, rent float64
+	found := false
+	for _, samples := range levels {
+		if len(samples) == 0 {
+			continue
 		}
-		dump = append(dump, l.DumpMs)
-		ones = append(ones, 1)
+		if !found {
+			for _, s := range samples {
+				ref += s.RestoreMs - msPerPage*float64(s.Pages)
+			}
+			ref /= float64(len(samples))
+			found = true
+			continue
+		}
+		for _, s := range samples {
+			rent += s.RestoreMs - msPerPage*float64(s.Pages) - ref
+		}
 	}
-	ra, rb := fitLine(xs, perRestore, restores)
-	levelXs := make([]float64, k)
-	for i := range levelXs {
-		levelXs[i] = float64(i + 1)
-	}
-	da, db := fitLine(levelXs, dump, ones)
-	meanRestores := float64(total) / float64(k)
-	a, b := meanRestores*ra+da, meanRestores*rb+db
-	fk := float64(k)
-	return rentMs, a + b*(fk+1), a + b*(fk+1)*(fk+2)/2
-}
-
-// fitLine returns the weighted least-squares line y = a + bx; with a single
-// distinct x, the weighted mean and slope 0; with no weight, 0 and 0.
-func fitLine(xs, ys, ws []float64) (a, b float64) {
-	var sw, sx, sy float64
-	for i := range xs {
-		sw += ws[i]
-		sx += ws[i] * xs[i]
-		sy += ws[i] * ys[i]
-	}
-	if sw == 0 {
-		return 0, 0
-	}
-	mx, my := sx/sw, sy/sw
-	var sxx, sxy float64
-	for i := range xs {
-		dx := xs[i] - mx
-		sxx += ws[i] * dx * dx
-		sxy += ws[i] * dx * (ys[i] - my)
-	}
-	if sxx == 0 {
-		return my, 0
-	}
-	b = sxy / sxx
-	return my - b*mx, b
-}
-
-// dumpOverheadMs is the memwrite time of dump c above that of the chain's
-// first incremental dump, scaled by pages written.
-func dumpOverheadMs(c, first *ChainInfo) float64 {
-	if first == nil || c == first || c.PagesScanned == 0 || first.PagesScanned == 0 {
-		return 0
-	}
-	if first.PagesWritten == 0 {
-		return c.MemwriteMs - first.MemwriteMs
-	}
-	return c.MemwriteMs - first.MemwriteMs*float64(c.PagesWritten)/float64(first.PagesWritten)
+	return math.Max(rent, 0)
 }
 
 // newChainInfo records the dump of fork f into checkpointID: an incremental
@@ -357,86 +298,115 @@ func (m *Manager) restoreSamples(checkpointID string) []restoreSample {
 	return out
 }
 
-// --- full-dump time ---
+// --- host costs ---
 
-// fullDumpRateFile holds the measured time per page of full dumps, in the
-// session dir for the session and, prefixed with a dot, in the sessions dir
-// for every session there.
-const fullDumpRateFile = "full-dump-rate.json"
+// hostCostsFile, prefixed with a dot in the sessions dir, holds the dump and
+// restore times measured by every session there.
+const hostCostsFile = "chain-costs.json"
 
-// fullDumpRateWeight is the weight of the newest full dump in MsPerPage.
-const fullDumpRateWeight = 0.3
-
-// fullDumpRate is the time per page scanned of full dumps.
-type fullDumpRate struct {
-	// MsPerPage is a moving average over full dumps of restored trees.
-	MsPerPage float64 `json:"ms_per_page"`
-	Samples   int     `json:"samples"`
-	// FreshMsPerPage is from the session's first full dump, of a tree that
-	// was never restored and dumps faster.
-	FreshMsPerPage float64 `json:"fresh_ms_per_page,omitempty"`
+// hostCosts are the times per page measured on this host.
+type hostCosts struct {
+	// Dump is the dump time over the pages written, from the dumps (full
+	// and incremental) of restored trees.
+	Dump costLine `json:"dump"`
+	// Restore is the restore time over the pages restored, from restores of
+	// full and first-level checkpoints.
+	Restore costLine `json:"restore"`
 }
 
-func (m *Manager) sessionDumpRatePath() string {
-	return filepath.Join(m.baseDir, fullDumpRateFile)
+// costLine holds the sums of samples (pages, ms) for the least-squares line
+// of ms over pages.
+type costLine struct {
+	N        float64 `json:"n"`
+	SumX     float64 `json:"sum_x"`
+	SumY     float64 `json:"sum_y"`
+	SumXX    float64 `json:"sum_xx"`
+	SumXY    float64 `json:"sum_xy"`
+	MinPages float64 `json:"min_pages"`
+	MaxPages float64 `json:"max_pages"`
 }
 
-func (m *Manager) hostDumpRatePath() string {
-	return filepath.Join(filepath.Dir(m.baseDir), "."+fullDumpRateFile)
-}
+const (
+	// costLineSamples is the weight a line holds: at it, the sums are
+	// halved before the next sample.
+	costLineSamples = 1024
+	// costLineReach is how many times the largest sample's pages a line's
+	// slope is used for.
+	costLineReach = 4
+)
 
-func readFullDumpRate(path string) fullDumpRate {
-	var r fullDumpRate
-	if data, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(data, &r)
-	}
-	return r
-}
-
-// fullDumpMsPerPage is the time per page of a full dump: the session's
-// measurement over restored trees, else the host's, else the session's first
-// dump.
-func (m *Manager) fullDumpMsPerPage() (float64, bool) {
-	session := readFullDumpRate(m.sessionDumpRatePath())
-	if session.Samples > 0 {
-		return session.MsPerPage, true
-	}
-	if host := readFullDumpRate(m.hostDumpRatePath()); host.Samples > 0 {
-		return host.MsPerPage, true
-	}
-	return session.FreshMsPerPage, session.FreshMsPerPage > 0
-}
-
-// recordFullDump adds the time per page of a full dump c to the session's
-// rate and, for a restored tree, to the host's. The caller holds the
-// session lock; sessions sharing the host file overwrite each other's
-// updates at worst.
-func (m *Manager) recordFullDump(c *ChainInfo) {
-	if c == nil || c.Sets != 1 || c.PagesScanned == 0 {
+func (l *costLine) add(pages, ms float64) {
+	if ms <= 0 || pages < 0 {
 		return
 	}
-	sample := c.DumpMs / float64(c.PagesScanned)
-	paths := []string{m.sessionDumpRatePath()}
-	if c.Restored {
-		paths = append(paths, m.hostDumpRatePath())
+	if l.N == 0 || pages < l.MinPages {
+		l.MinPages = pages
 	}
-	for _, path := range paths {
-		r := readFullDumpRate(path)
-		switch {
-		case !c.Restored:
-			r.FreshMsPerPage = sample
-		case r.Samples == 0:
-			r.MsPerPage, r.Samples = sample, 1
-		default:
-			r.MsPerPage += fullDumpRateWeight * (sample - r.MsPerPage)
-			r.Samples++
-		}
-		data, err := json.Marshal(r)
-		if err == nil {
-			err = atomicWriteFile(path, data, 0o644)
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: full dump time not recorded in %s: %v\n", path, err)
-		}
+	l.MaxPages = math.Max(l.MaxPages, pages)
+	if l.N >= costLineSamples {
+		l.N, l.SumX, l.SumY, l.SumXX, l.SumXY = l.N/2, l.SumX/2, l.SumY/2, l.SumXX/2, l.SumXY/2
+	}
+	l.N++
+	l.SumX += pages
+	l.SumY += ms
+	l.SumXX += pages * pages
+	l.SumXY += pages * ms
+}
+
+// slope is the line's ms per page, for an operation on pages pages. It is
+// unknown with fewer than two samples, when the smallest sample is above
+// half the largest, when pages is beyond costLineReach times the largest,
+// and when the slope is not positive.
+func (l costLine) slope(pages float64) (float64, bool) {
+	den := l.N*l.SumXX - l.SumX*l.SumX
+	if l.N < 2 || den <= 0 || l.MinPages > l.MaxPages/2 || pages > costLineReach*l.MaxPages {
+		return 0, false
+	}
+	b := (l.N*l.SumXY - l.SumX*l.SumY) / den
+	return b, b > 0
+}
+
+func (m *Manager) hostCostsPath() string {
+	return filepath.Join(filepath.Dir(m.baseDir), "."+hostCostsFile)
+}
+
+func readHostCosts(path string) hostCosts {
+	var c hostCosts
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &c)
+	}
+	return c
+}
+
+// recordChainCosts adds the dump of checkpointID, if of a restored tree,
+// and, for a full or first-level checkpoint, its restores so far to the
+// host's costs. The caller holds the session lock; sessions sharing the
+// file overwrite each other's updates at worst.
+func (m *Manager) recordChainCosts(checkpointID string, c *ChainInfo) {
+	if c == nil {
+		return
+	}
+	var samples []restoreSample
+	if c.Sets <= 2 {
+		samples = m.restoreSamples(checkpointID)
+	}
+	dump := c.Restored && c.PagesScanned > 0
+	if !dump && len(samples) == 0 {
+		return
+	}
+	path := m.hostCostsPath()
+	costs := readHostCosts(path)
+	if dump {
+		costs.Dump.add(float64(c.PagesWritten), c.DumpMs)
+	}
+	for _, s := range samples {
+		costs.Restore.add(float64(s.Pages), s.RestoreMs)
+	}
+	data, err := json.Marshal(costs)
+	if err == nil {
+		err = atomicWriteFile(path, data, 0o644)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: dump and restore times not recorded in %s: %v\n", path, err)
 	}
 }

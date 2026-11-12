@@ -246,3 +246,35 @@ Choose validation for the affected behavior:
   verify statements, examples, and links; runtime tests are unnecessary. For test
   changes, exercise the affected tests. Report commands, failures, skips, and coverage
   limits explicitly; do not describe a build or helper test as runtime validation.
+
+## Development notes
+
+Notes on changes since the last release, to fold into the public documents at the
+next one.
+
+- **Full-dump rule (`chain.go`, `pagemap.go`).** With `incremental_dumps` on, a dump
+  is full once the chain's rent reaches `full_dump_ratio` times the price of a full
+  dump, or at `max_chain_sets`.
+  - **Rent:** the time of every restore of the chain's checkpoints above the mean of
+    its first level's restores, with the host's restore time per page for the
+    difference in pages. Restores by any fork count.
+  - **Price:** the host's dump time per page written times the pages only a full dump
+    would write (resident minus dirty). `PAGEMAP_SCAN` (Linux 6.7) counts them in the
+    fork's process tree before the dump; without it they are the pages of the base
+    checkpoint's dump.
+  - **Host times:** least-squares slopes of dump time over pages written and of
+    restore time over pages restored, kept in `.chain-costs.json` of the sessions dir
+    and updated after every snapshot. `.full-dump-rate.json` and a session's
+    `full-dump-rate.json` are no longer written.
+  - **New host:** until the host has measured a dump of a restored tree as large as
+    the fork's, a chain whose full dump is the session's first one is priced from
+    that dump's time per page, about half the real one, so the first chain is cut
+    early. Until it has a restore time per page, a restore that is slower because
+    the tree has more pages counts as rent in full.
+  - **Not counted:** an incremental snapshot's own time also grows with the chain;
+    the rent holds only restores, so under uniform writes a chain is cut a little
+    after its best length. The scan runs before every snapshot of a restored fork
+    and its time (`scan_ms` in the decision) grows with the tree's resident pages.
+  - The README (the `full_dump_ratio` paragraphs and the sessions-dir tree) and
+    `docs/architecture.md` (the `chain.go` entry and the file list) still describe
+    the v0.8.0 rule.
