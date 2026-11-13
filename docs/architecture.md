@@ -188,6 +188,7 @@ Two binaries, one library:
 /tmp/waypoint-sessions-info/<session>.json   global registry (find a session)
 /tmp/waypoint-sessions-info/groups/<project>/  compose project: group.json,
                                                replicas/, checkpoints/, locks/
+/tmp/waypoint-sessions-info/groups/.locks/<project>.lock  project lock
 /dev/shm/waypoint/<session>/<ckpt>/          tmpfs images (tmpfs_images only)
 /run/waypoint/<session>/<fork>/netns         network namespace pin, and
 /run/waypoint/<session>/<fork>/pasta.pid       pasta's PID (private network mode)
@@ -479,6 +480,13 @@ the same address and the same peer in any replica forked from it.
   destroying only the member forks it created.
 - **destroy / suspend / cleanup** fan out to the members' `DestroyFork`,
   `Suspend`, `Cleanup`, and release the replicas' fabrics.
+
+Locks nest project → replica → group. Fork, snapshot, and destroy hold the
+project lock shared, so they run concurrently on different replicas; up,
+suspend, and cleanup hold it exclusively, so they wait for operations in
+flight instead of removing records and fabrics under them. The project lock
+lives outside the project directory because cleanup removes that directory.
+`exec` takes no project lock.
 
 Member sessions record their project and service (`SessionInfo.Group`,
 `.Service`). The session CLI commands that change forks, checkpoints, or the

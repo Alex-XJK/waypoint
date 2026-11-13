@@ -374,6 +374,12 @@ func (m *Manager) shellLogPath() string {
 // next to sessions' (see pkg/group).
 func WithFileLock(path string, fn func() error) error { return withFileLock(path, fn) }
 
+// WithSharedFileLock runs fn while holding a shared flock on path: any number
+// of shared holders run together, and none while WithFileLock holds path.
+func WithSharedFileLock(path string, fn func() error) error {
+	return flockFile(path, unix.LOCK_SH, fn)
+}
+
 // AtomicWriteFile is atomicWriteFile, for the same callers.
 func AtomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	return atomicWriteFile(path, data, mode)
@@ -382,6 +388,10 @@ func AtomicWriteFile(path string, data []byte, mode os.FileMode) error {
 // withFileLock runs fn while holding an exclusive flock on path. Locks are
 // file-based because each CLI invocation is a separate process.
 func withFileLock(path string, fn func() error) error {
+	return flockFile(path, unix.LOCK_EX, fn)
+}
+
+func flockFile(path string, how int, fn func() error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -391,7 +401,7 @@ func withFileLock(path string, fn func() error) error {
 	}
 	defer f.Close()
 
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+	if err := unix.Flock(int(f.Fd()), how); err != nil {
 		return fmt.Errorf("lock %s failed: %w", path, err)
 	}
 	defer unix.Flock(int(f.Fd()), unix.LOCK_UN)

@@ -14,8 +14,10 @@
 // snapshots one consistent cut of those connections.
 //
 // State lives under <session registry>/groups/<project>/: group.json, one
-// record per live replica and per group checkpoint, and the locks. Fabric
-// namespaces are pinned under <net runtime>/groups/<project>/<replica>/.
+// record per live replica and per group checkpoint, and the group and replica
+// locks. The project lock is <session registry>/groups/.locks/<project>.lock,
+// outside the directory cleanup removes. Fabric namespaces are pinned under
+// <net runtime>/groups/<project>/<replica>/.
 package group
 
 import (
@@ -148,6 +150,7 @@ func projectDir(name string) string      { return filepath.Join(groupsDir(), nam
 func recordPath(name string) string      { return filepath.Join(projectDir(name), "group.json") }
 func replicasDir(name string) string     { return filepath.Join(projectDir(name), "replicas") }
 func checkpointsDir(name string) string  { return filepath.Join(projectDir(name), "checkpoints") }
+func projectLockPath(name string) string { return filepath.Join(groupsDir(), ".locks", name+".lock") }
 func groupLockPath(name string) string   { return filepath.Join(projectDir(name), "locks", "group.lock") }
 func netRuntimeDir(name string) string   { return filepath.Join(waypoint.NetRuntimeDir, "groups", name) }
 func fabricPin(name, rep string) string  { return filepath.Join(netRuntimeDir(name), rep, "netns") }

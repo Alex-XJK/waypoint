@@ -4,11 +4,21 @@ package group
 // through the session API, so per-session locking, configuration, and
 // failure handling are the ones every other command uses.
 //
-// Locking: the project's group lock guards short metadata transitions
-// (creating and removing replica and checkpoint records); a replica lock is
-// held around the long work on one replica (restores, snapshots, teardown);
-// member sessions take their own session and fork locks inside. The group lock
-// is never held while a replica lock is taken.
+// Locking, outermost first:
+//
+//   - the project lock is held for a whole operation: shared by those that
+//     work on replicas (fork, snapshot, destroy), exclusive by those that
+//     create or end the project's forks as a whole (up, suspend, cleanup), so
+//     the latter never run under an operation in flight;
+//   - a replica lock is held around the long work on one replica (restores,
+//     snapshots, teardown);
+//   - the group lock guards short metadata transitions (creating and removing
+//     replica and checkpoint records) and is never held while a replica lock
+//     is taken;
+//   - member sessions take their own session and fork locks inside.
+//
+// Exec takes none of the project's locks; the member's fork lock serializes
+// it with whatever else happens to that fork.
 
 import (
 	"errors"
@@ -74,6 +84,31 @@ func load(name string) (*project, error) {
 	return p, nil
 }
 
+// withProjectLock runs fn holding project name's lock, shared or exclusive.
+// The project is looked up before the lock is taken, so an unknown name
+// leaves no lockfile behind; fn must load it again, since it can have been
+// removed while this call waited.
+func withProjectLock(name string, exclusive bool, fn func() error) error {
+	if _, err := LoadRecord(name); err != nil {
+		return err
+	}
+	if exclusive {
+		return waypoint.WithFileLock(projectLockPath(name), fn)
+	}
+	return waypoint.WithSharedFileLock(projectLockPath(name), fn)
+}
+
+// withProject runs fn on the loaded project under its shared lock.
+func withProject(name string, fn func(p *project) error) error {
+	return withProjectLock(name, false, func() error {
+		p, err := load(name)
+		if err != nil {
+			return err
+		}
+		return fn(p)
+	})
+}
+
 // each runs fn on every member in parallel and joins the errors, each named
 // by its service.
 func (p *project) each(fn func(i int, m *waypoint.Manager) error) error {
@@ -116,10 +151,21 @@ func Up(spec Spec, logf Logger) (*Record, error) {
 			return nil, fmt.Errorf("service %s: %w", s.Name, err)
 		}
 	}
-	name := spec.Name
-	rec := &Record{Name: name, Subnet: subnet, Services: services, Status: ProjectCreating, CreatedAt: time.Now().Unix()}
-	if err := claimProject(rec); err != nil {
+	rec := &Record{Name: spec.Name, Subnet: subnet, Services: services, Status: ProjectCreating, CreatedAt: time.Now().Unix()}
+	// Exclusive from the claim on, so a cleanup of the half-made project
+	// waits for this up to finish or fail.
+	err = waypoint.WithFileLock(projectLockPath(spec.Name), func() error { return up(spec, rec, logf) })
+	if err != nil {
 		return nil, err
+	}
+	return rec, nil
+}
+
+// up claims rec's project and brings it up, under the project lock.
+func up(spec Spec, rec *Record, logf Logger) error {
+	name, services := rec.Name, rec.Services
+	if err := claimProject(rec); err != nil {
+		return err
 	}
 	var recMu sync.Mutex
 	saveRec := func() error {
@@ -128,10 +174,10 @@ func Up(spec Spec, logf Logger) (*Record, error) {
 		return writeJSON(recordPath(name), rec)
 	}
 
-	fail := func(err error) (*Record, error) {
+	fail := func(err error) error {
 		logf.printf("up failed; removing project %s\n", name)
-		_ = Cleanup(name, true)
-		return nil, err
+		_ = cleanup(name, true)
+		return err
 	}
 
 	pin := fabricPin(name, MainReplica)
@@ -193,7 +239,7 @@ func Up(spec Spec, logf Logger) (*Record, error) {
 	if err := saveRec(); err != nil {
 		return fail(err)
 	}
-	return rec, nil
+	return nil
 }
 
 // claimProject creates rec's project directory with rec already in it, or
@@ -280,28 +326,26 @@ func Snapshot(name, replica, ckpt string, park bool) (*Checkpoint, error) {
 	if park && replica == MainReplica {
 		return nil, fmt.Errorf("cannot park %s: the project needs a live main replica", MainReplica)
 	}
-	p, err := load(name)
-	if err != nil {
-		return nil, err
-	}
 	var manifest *Checkpoint
-	err = p.withReplica(replica, func(rep *Replica) error {
-		if rep.Status != ReplicaRunning {
-			return fmt.Errorf("replica %s is %s", replica, rep.Status)
-		}
-		var err error
-		if manifest, err = p.claimCheckpoint(rep, ckpt); err != nil {
-			return err
-		}
-		// From here to the last record write, an interrupt would strand the
-		// replica behind its barrier with the manifest still "creating".
-		defer holdSignals()()
-		err = p.cut(rep, ckpt, park)
-		if errors.Is(err, errNotCut) {
-			_ = os.Remove(checkpointPath(name, ckpt)) // nothing was snapshotted; free the ID
-			return err
-		}
-		return p.commitSnapshot(rep, manifest, park, err)
+	err := withProject(name, func(p *project) error {
+		return p.withReplica(replica, func(rep *Replica) error {
+			if rep.Status != ReplicaRunning {
+				return fmt.Errorf("replica %s is %s", replica, rep.Status)
+			}
+			var err error
+			if manifest, err = p.claimCheckpoint(rep, ckpt); err != nil {
+				return err
+			}
+			// From here to the last record write, an interrupt would strand
+			// the replica behind its barrier with the manifest "creating".
+			defer holdSignals()()
+			err = p.cut(rep, ckpt, park)
+			if errors.Is(err, errNotCut) {
+				_ = os.Remove(checkpointPath(name, ckpt)) // nothing was snapshotted; free the ID
+				return err
+			}
+			return p.commitSnapshot(rep, manifest, park, err)
+		})
 	})
 	return manifest, err
 }
@@ -400,10 +444,16 @@ func holdSignals() (release func()) {
 // restored. ids names the replicas; with ids empty, n replicas get generated
 // IDs. A replica that fails is torn down; the others are kept.
 func Fork(name, ckpt string, ids []string, n int) ([]Replica, error) {
-	p, err := load(name)
-	if err != nil {
-		return nil, err
-	}
+	var replicas []Replica
+	err := withProject(name, func(p *project) (err error) {
+		replicas, err = p.fork(ckpt, ids, n)
+		return err
+	})
+	return replicas, err
+}
+
+func (p *project) fork(ckpt string, ids []string, n int) ([]Replica, error) {
+	name := p.rec.Name
 	manifest, err := loadCheckpoint(name, ckpt)
 	if err != nil {
 		return nil, err
@@ -514,15 +564,13 @@ func Destroy(name, replica string) error {
 	if replica == MainReplica {
 		return fmt.Errorf("cannot destroy %s; use suspend or cleanup to end the project's forks", MainReplica)
 	}
-	p, err := load(name)
-	if err != nil {
-		return err
-	}
-	return p.withReplica(replica, func(rep *Replica) error {
-		if err := p.teardownReplica(rep, nil); err != nil {
-			return err
-		}
-		return os.Remove(replicaPath(name, replica))
+	return withProject(name, func(p *project) error {
+		return p.withReplica(replica, func(rep *Replica) error {
+			if err := p.teardownReplica(rep, nil); err != nil {
+				return err
+			}
+			return os.Remove(replicaPath(name, replica))
+		})
 	})
 }
 
@@ -561,12 +609,14 @@ func Exec(name, replica, service, command string) (*waypoint.ExecResult, error) 
 // Suspend ends every live replica, keeping the project and its checkpoints;
 // fork a group checkpoint to continue.
 func Suspend(name string) error {
-	p, err := load(name)
-	if err != nil {
-		return err
-	}
-	err = p.each(func(_ int, m *waypoint.Manager) error { return m.Suspend() })
-	return errors.Join(err, releaseReplicas(name))
+	return withProjectLock(name, true, func() error {
+		p, err := load(name)
+		if err != nil {
+			return err
+		}
+		err = p.each(func(_ int, m *waypoint.Manager) error { return m.Suspend() })
+		return errors.Join(err, releaseReplicas(name))
+	})
 }
 
 // releaseReplicas releases every replica's fabric and record.
@@ -588,6 +638,11 @@ func releaseReplicas(name string) error {
 // including one a failed up left half-created. When the configuration
 // preserves sessions on cleanup, the project that names them is kept too.
 func Cleanup(name string, force bool) error {
+	return withProjectLock(name, true, func() error { return cleanup(name, force) })
+}
+
+// cleanup is Cleanup under the project lock.
+func cleanup(name string, force bool) error {
 	rec, err := LoadRecord(name)
 	if err != nil {
 		return err

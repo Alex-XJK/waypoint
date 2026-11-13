@@ -1,11 +1,13 @@
 package group
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Alex-XJK/waypoint/pkg/waypoint"
 )
@@ -182,5 +184,36 @@ func TestClaimProjectIsAtomicAndExclusive(t *testing.T) {
 	entries, err := os.ReadDir(groupsDir())
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("groups dir holds %d entries (%v), want only the project", len(entries), err)
+	}
+}
+
+func TestProjectLockKeepsExclusiveOutWhileSharedIsHeld(t *testing.T) {
+	t.Setenv("WAYPOINT_SESSION_INFO_DIR", t.TempDir())
+	if err := writeJSON(recordPath("shop"), Record{Name: "shop", Status: ProjectReady}); err != nil {
+		t.Fatal(err)
+	}
+	held, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go withProjectLock("shop", false, func() error { close(held); <-release; return nil })
+	<-held
+	if err := withProjectLock("shop", false, func() error { return nil }); err != nil {
+		t.Fatalf("a second shared holder: %v", err)
+	}
+	go func() {
+		_ = withProjectLock("shop", true, func() error { return nil })
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("the exclusive lock was granted while a shared one was held")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	<-done
+
+	if err := withProjectLock("nope", true, func() error { return nil }); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("locking an unknown project = %v, want not found", err)
+	}
+	if _, err := os.Stat(projectLockPath("nope")); !os.IsNotExist(err) {
+		t.Fatal("locking an unknown project left a lockfile")
 	}
 }
