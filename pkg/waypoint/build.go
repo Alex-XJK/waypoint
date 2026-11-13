@@ -37,7 +37,13 @@ func (m *Manager) BuildEnvironment(dockerfileDir string, quiet bool) (string, in
 
 	// Build from Dockerfile to create a virtual system environment
 	var imageConfig ImageConfig
-	if err := BuildFromDockerfile(dockerfileDir, originalDir, quiet, &imageConfig); err != nil {
+	cachedDir, cachedConfig, err := sharedHarborRootfs(dockerfileDir, quiet)
+	if err != nil {
+		return "", 0, err
+	}
+	if cachedDir != "" {
+		originalDir, imageConfig = cachedDir, cachedConfig
+	} else if err := BuildFromDockerfile(dockerfileDir, originalDir, quiet, &imageConfig); err != nil {
 		return "", 0, fmt.Errorf("failed to build from Dockerfile: %w", err)
 	}
 
