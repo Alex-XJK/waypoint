@@ -46,6 +46,7 @@ cleanup() {
   if [ "$COMPLETED" -ne 1 ]; then
     printf '\n\033[0;31m!! aborted during "%s"\033[0m\n' "$CURRENT_SECTION"
     "$W" compose cleanup "$P" --force >/dev/null 2>&1 || true
+    "$W" compose cleanup "${P}x" --force >/dev/null 2>&1 || true
   fi
   rm -rf "$WORK"
   printf '\n%d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
@@ -239,6 +240,15 @@ check "destroyed replica is gone with its fabric" bash -c "! grep -qw $R3 <<<'$(
 refuse "destroy main" wc_ destroy "$P" main
 refuse "park main" wc_ snapshot "$P" main G4 --park
 refuse "a second up of the project" bash -c "cd '$WORK/project' && '$W' compose up -p '$P'"
+mkdir -p "$WORK/broken"
+printf 'services:\n  app:\n    x-waypoint-rootfs: ../project/rootfs\n    command: ["no-such-program", "--serve"]\n' >"$WORK/broken/compose.yaml"
+if BROKEN_OUT="$( (cd "$WORK/broken" && "$W" compose up -p "${P}x") 2>&1)"; then
+  bad "up with a command that cannot run was accepted"
+else
+  ok "up with a command that cannot run is refused"
+fi
+check "the refusal names the command" grep -q "no-such-program: command not found" <<<"$BROKEN_OUT"
+check "the refused up left no project" bash -c "! '$W' compose list | grep -qx '${P}x'"
 refuse "fork of an unknown checkpoint" wc_ fork "$P" nope
 refuse "exec in an unknown service" wc_ exec "$P" main cache -- true
 refuse "a replica ID that exists" wc_ fork "$P" G --id s1

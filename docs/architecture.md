@@ -464,8 +464,9 @@ the same address and the same peer in any replica forked from it.
   hostname, and hosts), built or initialized as for `build`/`init`. Once every
   shell is up, each service's command (compose `entrypoint`/`command` over the
   image's `ENTRYPOINT`/`CMD`) is started in dependency order as a background
-  job of its shell, so it is part of every checkpoint. A failure removes
-  everything created.
+  job of its shell, so it is part of every checkpoint. A command the shell
+  cannot find or execute fails up; one that starts and later exits does not.
+  A failure removes everything created.
 - **snapshot/checkpoint**: under the replica lock, claim the checkpoint ID in
   the manifest and every member, raise the fabric barrier, snapshot (or park)
   every member in parallel, lower it (`claimCheckpoint`, `cut`,

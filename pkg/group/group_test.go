@@ -84,7 +84,8 @@ func TestStartCommandQuotesAndBackgrounds(t *testing.T) {
 		t.Fatal("an empty command should start nothing")
 	}
 	got := startCommand([]string{"sh", "-c", "echo 'hi' $HOME"})
-	want := `'sh' '-c' 'echo '\''hi'\'' $HOME' >` + serviceLog + " 2>&1 </dev/null &"
+	want := `if command -v -- 'sh' >/dev/null; then 'sh' '-c' 'echo '\''hi'\'' $HOME' >` + serviceLog +
+		` 2>&1 </dev/null & else echo 'sh: command not found or not executable'; false; fi`
 	if got != want {
 		t.Fatalf("startCommand = %s\nwant          %s", got, want)
 	}

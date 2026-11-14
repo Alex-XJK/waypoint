@@ -428,15 +428,25 @@ const serviceLog = "/.waypoint/service.log"
 // startCommand is the bash command line that runs argv as a background job of
 // the member's persistent shell, so the process tree (and the service) is part
 // of every checkpoint. "" when there is nothing to run.
+//
+// A background job reports nothing back, so the line first checks that the
+// shell can find and execute the program, and fails with a message when it
+// cannot. A service that starts and then exits is not a failure here.
 func startCommand(argv []string) string {
 	if len(argv) == 0 {
 		return ""
 	}
 	quoted := make([]string, len(argv))
 	for i, a := range argv {
-		quoted[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+		quoted[i] = shellQuote(a)
 	}
-	return strings.Join(quoted, " ") + " >" + serviceLog + " 2>&1 </dev/null &"
+	return "if command -v -- " + quoted[0] + " >/dev/null; then " +
+		strings.Join(quoted, " ") + " >" + serviceLog + " 2>&1 </dev/null & " +
+		"else echo " + shellQuote(argv[0]+": command not found or not executable") + "; false; fi"
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // newReplicaID returns a fresh generated replica ID.
