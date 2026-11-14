@@ -474,7 +474,9 @@ the same address and the same peer in any replica forked from it.
   `failed` and the replica `degraded`; the member checkpoints that succeeded
   remain (checkpoints are immutable). SIGINT, SIGTERM, and SIGHUP are held
   from the claim to the last record write, so an interrupt cannot leave the
-  replica behind its barrier; a barrier that cannot be raised frees the ID.
+  replica behind its barrier. A failure before any member began the
+  checkpoint (no member holds a record of it) changed nothing: the manifest
+  is removed and the replica stays `running`.
 - **fork**: claim the replica IDs under the group lock, then per replica in
   parallel: create its fabric with the barrier raised, fork every member
   attached to it, lower the barrier. A replica that fails is torn down,

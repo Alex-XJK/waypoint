@@ -316,9 +316,10 @@ func startMember(project string, svc Service, attach waypoint.NetworkAttachment,
 
 // Snapshot seals replica into group checkpoint ckpt: the replica's fabric is
 // held behind a barrier while every member fork is snapshotted in parallel.
-// Without park the replica resumes on ckpt; with park it is released. If any
-// member fails, the manifest is marked failed and the replica degraded; the
-// member checkpoints that succeeded are kept.
+// Without park the replica resumes on ckpt; with park it is released. If a
+// member fails after any member began the checkpoint, the manifest is marked
+// failed and the replica degraded, and the member checkpoints that succeeded
+// are kept; a failure before that leaves the replica running and ckpt free.
 func Snapshot(name, replica, ckpt string, park bool) (*Checkpoint, error) {
 	if err := waypoint.ValidateID("checkpoint", ckpt); err != nil {
 		return nil, err
@@ -340,8 +341,9 @@ func Snapshot(name, replica, ckpt string, park bool) (*Checkpoint, error) {
 			// the replica behind its barrier with the manifest "creating".
 			defer holdSignals()()
 			err = p.cut(rep, ckpt, park)
-			if errors.Is(err, errNotCut) {
-				_ = os.Remove(checkpointPath(name, ckpt)) // nothing was snapshotted; free the ID
+			if err != nil && p.untouched(ckpt) {
+				// The replica is as it was: free the ID and leave it running.
+				_ = os.Remove(checkpointPath(name, ckpt))
 				return err
 			}
 			return p.commitSnapshot(rep, manifest, park, err)
@@ -372,16 +374,13 @@ func (p *project) claimCheckpoint(rep *Replica, ckpt string) (*Checkpoint, error
 	return manifest, nil
 }
 
-// errNotCut marks a cut that failed before any member was touched.
-var errNotCut = errors.New("replica not snapshotted")
-
 // cut snapshots (or parks) every member fork of rep as ckpt behind the fabric
 // barrier, which makes the member snapshots one consistent cut. The barrier is
 // lowered again however the snapshots end, except after a successful park:
 // that replica is gone, and its fabric is released as it is.
 func (p *project) cut(rep *Replica, ckpt string, park bool) (err error) {
 	if err := waypoint.SetFabricBarrier(rep.Fabric, true); err != nil {
-		return fmt.Errorf("%w: raise barrier: %w", errNotCut, err)
+		return fmt.Errorf("raise barrier: %w", err)
 	}
 	defer func() {
 		if park && err == nil {
@@ -400,6 +399,19 @@ func (p *project) cut(rep *Replica, ckpt string, park bool) (err error) {
 		}
 		return err
 	})
+}
+
+// untouched reports whether no member began checkpoint ckpt. A member records
+// the checkpoint before it changes its fork, so a failed cut that left no
+// such record anywhere (the barrier could not be raised, or every member
+// refused up front) changed nothing.
+func (p *project) untouched(ckpt string) bool {
+	for _, s := range p.rec.Services {
+		if _, err := waypoint.LoadCheckpointMetadata(s.SessionID, ckpt); !errors.Is(err, fs.ErrNotExist) {
+			return false
+		}
+	}
+	return true
 }
 
 // commitSnapshot records how the cut ended: a failed manifest and a degraded
