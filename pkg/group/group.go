@@ -445,6 +445,21 @@ func startCommand(argv []string) string {
 		"else echo " + shellQuote(argv[0]+": command not found or not executable") + "; false; fi"
 }
 
+// displayArgv renders argv for a log line, quoting only the words a reader
+// could not otherwise tell apart (empty, or with spaces or shell syntax).
+func displayArgv(argv []string) string {
+	words := make([]string, len(argv))
+	for i, a := range argv {
+		words[i] = a
+		if a == "" || strings.ContainsFunc(a, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_./:=,@%+", r))
+		}) {
+			words[i] = shellQuote(a)
+		}
+	}
+	return strings.Join(words, " ")
+}
+
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

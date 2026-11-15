@@ -218,3 +218,11 @@ func TestProjectLockKeepsExclusiveOutWhileSharedIsHeld(t *testing.T) {
 		t.Fatal("locking an unknown project left a lockfile")
 	}
 }
+
+func TestDisplayArgvQuotesOnlyAmbiguousWords(t *testing.T) {
+	got := displayArgv([]string{"redis-server", "--save", "", "/app/api.py", "a b", "x'y"})
+	want := `redis-server --save '' /app/api.py 'a b' 'x'\''y'`
+	if got != want {
+		t.Fatalf("displayArgv = %s, want %s", got, want)
+	}
+}

@@ -27,7 +27,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -226,7 +225,7 @@ func up(spec Spec, rec *Record, logf Logger) error {
 		if err != nil {
 			return fail(err)
 		}
-		logf.printf("running %s: %s\n", s.Name, strings.Join(commands[i], " "))
+		logf.printf("running %s: %s\n", s.Name, displayArgv(commands[i]))
 		res, err := m.ExecuteForkCommand(waypoint.MainForkID, line)
 		if err != nil {
 			return fail(fmt.Errorf("start service %s: %w", s.Name, err))
