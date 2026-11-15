@@ -249,6 +249,7 @@ else
 fi
 check "the refusal names the command" grep -q "no-such-program: command not found" <<<"$BROKEN_OUT"
 check "the refused up left no project" bash -c "! '$W' compose list | grep -qx '${P}x'"
+check "the refused up left no fabric" [ ! -e "/run/waypoint/groups/${P}x" ]
 refuse "fork of an unknown checkpoint" wc_ fork "$P" nope
 refuse "exec in an unknown service" wc_ exec "$P" main cache -- true
 refuse "a replica ID that exists" wc_ fork "$P" G --id s1

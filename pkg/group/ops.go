@@ -180,7 +180,13 @@ func up(spec Spec, rec *Record, logf Logger) error {
 		return err
 	}
 
+	// Recorded before the fabric exists, as fork records its replicas, so
+	// the cleanup of a failed up finds the fabric and releases it.
 	pin := fabricPin(name, MainReplica)
+	mainRep := Replica{ID: MainReplica, Fabric: pin, Status: ReplicaCreating, CreatedAt: time.Now().Unix()}
+	if err := writeJSON(replicaPath(name, MainReplica), mainRep); err != nil {
+		return fail(err)
+	}
 	if err := waypoint.CreateFabric(pin, false); err != nil {
 		return fail(fmt.Errorf("create fabric: %w", err))
 	}
@@ -230,9 +236,8 @@ func up(spec Spec, rec *Record, logf Logger) error {
 		}
 	}
 
-	if err := writeJSON(replicaPath(name, MainReplica), Replica{
-		ID: MainReplica, Fabric: pin, Status: ReplicaRunning, CreatedAt: time.Now().Unix(),
-	}); err != nil {
+	mainRep.Status = ReplicaRunning
+	if err := writeJSON(replicaPath(name, MainReplica), mainRep); err != nil {
 		return fail(err)
 	}
 	rec.Status = ProjectReady
