@@ -4,8 +4,9 @@
 # Takes checkpoint A, changes files under /data in main, takes checkpoint B, and
 # checks the JSON from `diff`: its shape, the records for each change, changes
 # that leave the final content the same, argument errors, and refusal to diff a
-# checkpoint that is not ready. TODO lines print changes `diff` does not report
-# yet; they do not count as failures.
+# checkpoint that is not ready. Section 5 checks that `processes` reports the
+# pids of jobs killed and started between two checkpoints. TODO lines print
+# changes `diff` does not report yet; they do not count as failures.
 #
 # Requires root, criu, a static busybox, python3, and Go unless WAYPOINT_BIN and
 # BASH_INIT_BIN are given. Sessions, registry and rootfs live in a private temp
@@ -67,6 +68,24 @@ no_record() { [ -z "$(record "$1" "$2")" ]; }
 any_record() { [ -n "$(record "$1" "$2")" ]; }
 records_contain() { grep -q "$2" "$OUT/$1.json"; }
 not_only_added() { local r; r="$(record "$1" "$2")"; [ -n "$r" ] && [ "$r" != "added regular" ]; }
+# proc <name> <pid>: prints the change_type of the process record for pid.
+proc() {
+  python3 - "$OUT/$1.json" "$2" <<'EOF' 2>/dev/null
+import json, sys
+for r in json.load(open(sys.argv[1]))["processes"]:
+    if str(r["pid"]) == sys.argv[2]:
+        print(r["change_type"])
+EOF
+}
+has_proc() { [ -n "$2" ] && [ "$(proc "$1" "$2")" = "$3" ]; }
+any_proc() { [ -n "$2" ] && [ -n "$(proc "$1" "$2")" ]; }
+not_added_or_deleted() { local c; c="$(proc "$1" "$2")"; [ -n "$2" ] && [ "$c" != added ] && [ "$c" != deleted ]; }
+# start_job <tag>: starts a sh loop in main's background and prints its pid.
+# The loops differ only by tag; busybox sleep itself exits after a checkpoint.
+start_job() {
+  wx "sh -c 'while :; do sleep 1000; done # $1' >/dev/null 2>&1 & echo \"pid=\$!\"" |
+    sed -n 's/^pid=//p'
+}
 fails() { ! "$@"; }
 
 # ---------------------------------------------------------------------------
@@ -164,6 +183,7 @@ check "reverse: /data/new.txt deleted" has_record ba /data/new.txt "deleted regu
 check "reverse: /data/del.txt added" has_record ba /data/del.txt "added regular"
 check "diff A A exits 0" diff_to aa A A
 check "diff A A has no records" [ "$(field aa 'len(j["filesystem"]["records"])')" = 0 ]
+check "diff A A has no process records" [ "$(field aa 'len(j["processes"])')" = 0 ]
 
 # ---------------------------------------------------------------------------
 say "4. arguments and checkpoint status"
@@ -188,6 +208,39 @@ EOF
 check "a failed checkpoint is refused" fails diff_to failed A C
 check "diff C C on a failed checkpoint is refused" fails diff_to failedsame C C
 check "diff NOPE NOPE is refused" fails diff_to nope NOPE NOPE
+
+# ---------------------------------------------------------------------------
+say "5. processes: checkpoint P, kill one job and start another, checkpoint Q"
+# ---------------------------------------------------------------------------
+# Pids are the identity for now. A CRIU without the ns_last_pid fix reuses
+# pids after a checkpoint, so a reused pid shows up as modified: the checks
+# only need each pid to be reported, and the expected change type is a TODO.
+KEEP="$(start_job keep)"; GONE="$(start_job gone)"
+"$W" checkpoint "$SESSION" P >/dev/null
+NEW="$(start_job new)"
+wx "kill $GONE; wait $GONE" >/dev/null 2>&1 || true
+echo "jobs: keep=$KEEP gone=$GONE new=$NEW"
+"$W" checkpoint "$SESSION" Q >/dev/null
+check "diff P Q exits 0" diff_to pq P Q
+check "processes is a list" [ "$(field pq 'type(j["processes"]).__name__')" = list ]
+check "killed job: pid $GONE reported" any_proc pq "$GONE"
+check "new job: pid $NEW reported" any_proc pq "$NEW"
+check "running job: pid $KEEP not reported as added or deleted" not_added_or_deleted pq "$KEEP"
+later "killed job: pid $GONE reported as deleted" has_proc pq "$GONE" deleted
+later "new job: pid $NEW reported as added" has_proc pq "$NEW" added
+check "diff Q P exits 0" diff_to qp Q P
+check "reverse: pid $GONE reported" any_proc qp "$GONE"
+check "reverse: pid $NEW reported" any_proc qp "$NEW"
+check "diff P P exits 0" diff_to pp P P
+check "diff P P has no process records" [ "$(field pp 'len(j["processes"])')" = 0 ]
+
+SHELL_PID="$(wx 'echo "pid=$$"' | sed -n 's/^pid=//p')"
+"$W" checkpoint "$SESSION" R >/dev/null
+wx 'WAYPOINT_DIFF_TEST_VAR=changed' >/dev/null
+"$W" checkpoint "$SESSION" S >/dev/null
+check "diff R S exits 0" diff_to rs R S
+later "memory-only change (a variable in main's shell, pid $SHELL_PID) reported" \
+  any_proc rs "$SHELL_PID"
 
 "$W" cleanup "$SESSION" >/dev/null
 SESSION=""

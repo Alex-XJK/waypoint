@@ -1,12 +1,16 @@
 package waypoint
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
 
+	"github.com/checkpoint-restore/go-criu/v8/crit"
+	criu_core "github.com/checkpoint-restore/go-criu/v8/crit/images/criu-core"
+	"github.com/checkpoint-restore/go-criu/v8/crit/images/pstree"
 	"golang.org/x/sys/unix"
 )
 
@@ -151,4 +155,142 @@ func walkDiff(t *testing.T, left, right, containerDir string) []DiffFileRecord {
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Path < records[j].Path })
 	return records
+}
+
+func TestExplorePsFlatReadsEveryProcess(t *testing.T) {
+	dir := t.TempDir()
+	writeProcImages(t, dir, []ProcInfo{
+		{PID: 1, PPID: 0, PGID: 1, SID: 1, Comm: "bash_init"},
+		{PID: 11, PPID: 1, PGID: 11, SID: 11, Comm: "bash"},
+		{PID: 12, PPID: 11, PGID: 12, SID: 11, Comm: "sleep"},
+	})
+
+	got, err := explorePsFlat(dir)
+	if err != nil {
+		t.Fatalf("explorePsFlat: %v", err)
+	}
+	if pids := sortedPIDs(got); !reflect.DeepEqual(pids, []uint32{1, 11, 12}) {
+		t.Fatalf("explorePsFlat pids = %v, want [1 11 12]", pids)
+	}
+	if got[12].Comm != "sleep" || got[12].PPID != 11 {
+		t.Fatalf("explorePsFlat[12] = %+v, want comm sleep and ppid 11", got[12])
+	}
+}
+
+func TestExplorePsFlatFailsWithoutCoreImage(t *testing.T) {
+	dir := t.TempDir()
+	writeProcImages(t, dir, []ProcInfo{{PID: 1, Comm: "bash_init"}, {PID: 12, PPID: 1, Comm: "sleep"}})
+	if err := os.Remove(filepath.Join(dir, "core-12.img")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := explorePsFlat(dir); err == nil {
+		t.Fatal("explorePsFlat succeeded without core-12.img")
+	}
+}
+
+func TestGetProcDiffReportsChangedPIDs(t *testing.T) {
+	m := &Manager{baseDir: t.TempDir()}
+	writeProcImages(t, m.checkpointCriuDir("A"), []ProcInfo{
+		{PID: 1, PPID: 0, PGID: 1, SID: 1, Comm: "bash_init"},
+		{PID: 11, PPID: 1, PGID: 11, SID: 11, Comm: "bash"},
+		{PID: 12, PPID: 11, PGID: 12, SID: 11, Comm: "sleep"},
+		{PID: 13, PPID: 11, PGID: 13, SID: 11, Comm: "sh"},
+	})
+	writeProcImages(t, m.checkpointCriuDir("B"), []ProcInfo{
+		{PID: 1, PPID: 0, PGID: 1, SID: 1, Comm: "bash_init"},
+		{PID: 11, PPID: 1, PGID: 11, SID: 11, Comm: "bash"},
+		{PID: 13, PPID: 11, PGID: 13, SID: 11, Comm: "python3"},
+		{PID: 14, PPID: 11, PGID: 14, SID: 11, Comm: "sleep"},
+	})
+
+	want := map[uint32]ChangeType{12: ChangeTypeDeleted, 13: ChangeTypeModified, 14: ChangeTypeAdded}
+	if got := procDiffByPID(t, m, "A", "B"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("getProcDiff(A, B) = %v, want %v", got, want)
+	}
+	want = map[uint32]ChangeType{12: ChangeTypeAdded, 13: ChangeTypeModified, 14: ChangeTypeDeleted}
+	if got := procDiffByPID(t, m, "B", "A"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("getProcDiff(B, A) = %v, want %v", got, want)
+	}
+}
+
+func TestGetProcDiffSameProcessesIsEmpty(t *testing.T) {
+	m := &Manager{baseDir: t.TempDir()}
+	procs := []ProcInfo{
+		{PID: 1, PPID: 0, PGID: 1, SID: 1, Comm: "bash_init"},
+		{PID: 11, PPID: 1, PGID: 11, SID: 11, Comm: "bash"},
+	}
+	writeProcImages(t, m.checkpointCriuDir("A"), procs)
+	writeProcImages(t, m.checkpointCriuDir("B"), procs)
+	if got := procDiffByPID(t, m, "A", "B"); len(got) != 0 {
+		t.Fatalf("getProcDiff(A, B) = %v, want no records", got)
+	}
+}
+
+// procDiffByPID runs getProcDiff and returns the change type reported for
+// each pid.
+func procDiffByPID(t *testing.T, m *Manager, left, right string) map[uint32]ChangeType {
+	t.Helper()
+	var records []DiffProcRecord
+	if err := m.getProcDiff(left, right, &records); err != nil {
+		t.Fatalf("getProcDiff(%s, %s): %v", left, right, err)
+	}
+	got := map[uint32]ChangeType{}
+	for _, r := range records {
+		if _, dup := got[r.PID]; dup {
+			t.Fatalf("getProcDiff(%s, %s) reports pid %d twice", left, right, r.PID)
+		}
+		got[r.PID] = r.ChangeType
+	}
+	return got
+}
+
+func sortedPIDs(procs map[uint32]ProcInfo) []uint32 {
+	pids := make([]uint32, 0, len(procs))
+	for pid := range procs {
+		pids = append(pids, pid)
+	}
+	sort.Slice(pids, func(i, j int) bool { return pids[i] < pids[j] })
+	return pids
+}
+
+// writeProcImages writes pstree.img and one core-<pid>.img per process into
+// dir, with the fields explorePsFlat reads.
+func writeProcImages(t *testing.T, dir string, procs []ProcInfo) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tree := &crit.CriuImage{Magic: "PSTREE"}
+	for _, p := range procs {
+		pid, ppid, pgid, sid := p.PID, p.PPID, p.PGID, p.SID
+		tree.Entries = append(tree.Entries, &crit.CriuEntry{Message: &pstree.PstreeEntry{
+			Pid: &pid, Ppid: &ppid, Pgid: &pgid, Sid: &sid,
+		}})
+
+		march := criu_core.CoreEntry_X86_64
+		var zero32 uint32
+		var zero64 uint64
+		comm := p.Comm
+		core := &crit.CriuImage{Magic: "CORE", Entries: []*crit.CriuEntry{{Message: &criu_core.CoreEntry{
+			Mtype: &march,
+			Tc: &criu_core.TaskCoreEntry{
+				TaskState: &zero32, ExitCode: &zero32, Personality: &zero32,
+				Flags: &zero32, BlkSigset: &zero64, Comm: &comm,
+			},
+		}}}}
+		writeCritImage(t, filepath.Join(dir, fmt.Sprintf("core-%d.img", p.PID)), core)
+	}
+	writeCritImage(t, filepath.Join(dir, "pstree.img"), tree)
+}
+
+func writeCritImage(t *testing.T, path string, img *crit.CriuImage) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := crit.New(nil, f, "", false, false).Encode(img); err != nil {
+		t.Fatalf("encode %s: %v", path, err)
+	}
 }
