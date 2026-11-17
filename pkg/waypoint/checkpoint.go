@@ -459,7 +459,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 		}
 		metadata.Status = CheckpointStatusReady
 		if err := m.withSessionLock(func() error {
-			m.recordFullDump(metadata.Chain)
+			m.recordChainCosts(checkpointID, metadata.Chain)
 			return m.saveMetadata(checkpointID, metadata)
 		}); err != nil {
 			return nil, err
@@ -532,7 +532,7 @@ func (m *Manager) snapshotFork(f *Fork, checkpointID string, park bool) (*Checkp
 	metadata.PID = f.PID
 	metadata.Status = CheckpointStatusReady
 	if err := m.withSessionLock(func() error {
-		m.recordFullDump(metadata.Chain)
+		m.recordChainCosts(checkpointID, metadata.Chain)
 		return m.saveMetadata(checkpointID, metadata)
 	}); err != nil {
 		return nil, err
