@@ -282,6 +282,9 @@ func validateCheckpointID(id string) error {
 }
 
 // --- on-disk layout ---
+func (m *Manager) checkpointsDir() string {
+	return filepath.Join(m.baseDir, "checkpoints")
+}
 
 func (m *Manager) checkpointDir(checkpointID string) string {
 	return filepath.Join(m.baseDir, "checkpoints", checkpointID)
@@ -301,6 +304,14 @@ func (m *Manager) forksDir() string {
 
 func (m *Manager) forkDir(forkID string) string {
 	return filepath.Join(m.forksDir(), forkID)
+}
+
+func (m *Manager) diffsDir() string {
+	return filepath.Join(m.baseDir, "diffs")
+}
+
+func (m *Manager) diffDir(diffID string) string {
+	return filepath.Join(m.diffsDir(), diffID)
 }
 
 func (m *Manager) sessionLockPath() string {

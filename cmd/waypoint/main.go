@@ -117,6 +117,8 @@ func main() {
 		fmt.Println("  fork <session> <checkpoint-id> [--id ID] [--n K] - Materialize live fork(s)")
 		fmt.Println("  exec <session> <fork-id> -- '<command>'      - Run one bash command line in a fork")
 		fmt.Println("  cp <session> <source> <destination>          - Copy host path <-> fork-id:/path")
+		fmt.Println("  diff <session> <checkpoint-id> <checkpoint-id> [--dir D] - Show diff between two checkpoints (--dir: restrict to directory D)")
+		fmt.Println("  blame <session> <checkpoint-id> <path> 		- Blame a path from a checkpoint through its ancestors")
 		fmt.Println("  snapshot <session> <fork-id> <checkpoint-id> [--park] - Snapshot a live fork (--park: don't resume it)")
 		fmt.Println("  create <session> <checkpoint-id>             - Legacy alias for checkpoint")
 		fmt.Println("  fork-exec <session> <fork-id> <command>      - Legacy alias for exec")
@@ -563,6 +565,60 @@ func main() {
 	case "cp":
 		if err := runCopy(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "Error copying: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "diff":
+		if len(os.Args) < 5 {
+			fmt.Println("Usage: diff <session> <checkpoint-id> <checkpoint-id> [--dir D]")
+			os.Exit(1)
+		}
+		sessionID := os.Args[2]
+		ckptIDFirst := os.Args[3]
+		ckptIDSecond := os.Args[4]
+		targetDir := ""
+
+		// TODO: prevent duplicate of same flag? eg. --dir app --dir home (list/fork don't handle this either)
+		for i := 5; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--dir":
+				if i+1 >= len(os.Args) {
+					fmt.Println("Error: --dir requires a value")
+					os.Exit(1)
+				}
+				targetDir = os.Args[i+1]
+				i++
+			default:
+				fmt.Printf("Error: unknown flag: %s\n", os.Args[i])
+				os.Exit(1)
+			}
+		}
+
+		manager, err := waypoint.LoadManager(sessionID)
+		if err != nil {
+			fmt.Printf("Error loading session: %v\n", err)
+			os.Exit(1)
+		}
+		if err := manager.PrintDiff(ckptIDFirst, ckptIDSecond, targetDir); err != nil {
+			fmt.Printf("Error on diff: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "blame":
+		if len(os.Args) < 5 {
+			fmt.Println("Usage: blame <session> <checkpoint-id> <path>")
+			os.Exit(1)
+		}
+		sessionID := os.Args[2]
+		ckptID := os.Args[3]
+		path := os.Args[4]
+		manager, err := waypoint.LoadManager(sessionID)
+		if err != nil {
+			fmt.Printf("Error loading session: %v\n", err)
+			os.Exit(1)
+		}
+		if err := manager.PrintBlame(ckptID, path); err != nil {
+			fmt.Printf("Error on blame: %v\n", err)
 			os.Exit(1)
 		}
 

@@ -232,6 +232,8 @@ Choose validation for the affected behavior:
   snapshots, and forks against a memory-heavy holder, with incremental dumps off
   and on, and asserts the holder's state after every chain. `MEM_MB=128 DEPTH=4
   FORKS=2 PATTERNS=random` is a quick check.
+- For changes to `diff`, also run `sudo ./scripts/test-diff.sh` (records between
+  two checkpoints, argument errors, and refusal of checkpoints that are not ready).
 - `sudo ./scripts/test-search-workflow.sh` adds an offline Dockerfile build, file
   transfer, concurrent branching, recursive snapshots/backtracking, export, and
   cleanup workload. Its header documents prerequisites and scaling options.
