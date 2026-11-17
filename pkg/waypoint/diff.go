@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -46,6 +47,8 @@ type DiffFileRecord struct {
 	ChangeType ChangeType `json:"change_type"`
 	FileType   FileType   `json:"file_type"`
 	// TODO: show the actual line by line diff like blame
+	FromFileType FileType `json:"from_file_type,omitempty"`
+	ToFileType   FileType `json:"to_file_type,omitempty"`
 }
 
 type FileType string
@@ -57,8 +60,9 @@ const (
 	FileTypeDevice   FileType = "device" // modified = major/minor number change
 	FileTypeFIFO     FileType = "fifo"   // currently only add/delete tracked
 	FileTypeSocket   FileType = "socket" // currently only add/delete tracked
+	FileTypeDir      FileType = "directory"
 	FileTypeOther    FileType = "other"
-	FileTypeModified FileType = "modified" // TODO: use for files whose mode changed, OK?
+	FileTypeModified FileType = "modified"
 )
 
 type DiffProcRecord struct {
@@ -99,6 +103,8 @@ type fsView struct {
 	leftRoot               *os.Root
 	rightRoot              *os.Root
 	containerViewTargetDir string
+	candidates             map[string]struct{} // non directories in unshared layers
+	dirsWithCandidates     map[string]struct{} // directories that are opaque or contain candidates in unshared layers
 }
 
 type side string
@@ -224,9 +230,11 @@ func processNonDirMod(view *fsView, containerViewPath string, detected *[]DiffFi
 			})
 		} else {
 			*detected = append(*detected, DiffFileRecord{
-				Path:       containerViewPath,
-				ChangeType: ChangeTypeModified,
-				FileType:   FileTypeModified,
+				Path:         containerViewPath,
+				ChangeType:   ChangeTypeModified,
+				FileType:     FileTypeModified,
+				FromFileType: leftFileType,
+				ToFileType:   rightFileType,
 			})
 		}
 		return nil
@@ -288,10 +296,7 @@ func recurseSideChangeType(view *fsView, s side, containerViewPath string, detec
 		return fmt.Errorf("lstat %s: %w", rootViewPath, err)
 	}
 	if !info.IsDir() {
-		fileType, err := getFileType(info.Mode())
-		if err != nil {
-			return err
-		}
+		fileType := getFileType(info.Mode())
 		*detected = append(*detected, DiffFileRecord{
 			Path:       containerViewPath,
 			ChangeType: changeType,
@@ -323,7 +328,6 @@ func recurseSideChangeType(view *fsView, s side, containerViewPath string, detec
 
 func walkFS(view *fsView, containerViewDir string, detected *[]DiffFileRecord) error {
 	// note: won't follow symlink dirs
-	// TODO make this faster
 	rootViewDir, err := cleanRootPath(containerViewDir)
 	if err != nil {
 		return err
@@ -373,27 +377,51 @@ func walkFS(view *fsView, containerViewDir string, detected *[]DiffFileRecord) e
 			}
 			continue
 		}
-		// Left and right entry
-		// both directories, so recurse
 		if leftDentry.IsDir() && rightDentry.IsDir() {
-			if err := walkFS(view, containerViewSubpath, detected); err != nil {
-				return err
+			_, exists := view.dirsWithCandidates[containerViewSubpath]
+			if exists {
+				// both directories and contain candidate paths -> recurse
+				if err := walkFS(view, containerViewSubpath, detected); err != nil {
+					return err
+				}
 			}
 			continue
 		}
-		// Just one side is directory -> left is deleted, right is added
-		if (leftDentry.IsDir() && !rightDentry.IsDir()) || (!leftDentry.IsDir() && rightDentry.IsDir()) {
-			if err := recurseSideChangeType(view, LeftSide, containerViewSubpath, detected, ChangeTypeDeleted); err != nil {
-				return err
+		// Just one side is directory
+		if leftDentry.IsDir() != rightDentry.IsDir() {
+			var fromFileType, toFileType FileType
+			if leftDentry.IsDir() {
+				fromFileType = FileTypeDir
+				toFileType = getFileType(rightDentry.Type())
+			} else {
+				fromFileType = getFileType(leftDentry.Type())
+				toFileType = FileTypeDir
 			}
-			if err := recurseSideChangeType(view, RightSide, containerViewSubpath, detected, ChangeTypeAdded); err != nil {
-				return err
+			*detected = append(*detected, DiffFileRecord{
+				Path:         containerViewSubpath,
+				ChangeType:   ChangeTypeModified,
+				FileType:     FileTypeModified,
+				FromFileType: fromFileType,
+				ToFileType:   toFileType,
+			})
+			// collect directory side descendents
+			if leftDentry.IsDir() {
+				if err := recurseSideChangeType(view, LeftSide, containerViewSubpath, detected, ChangeTypeDeleted); err != nil {
+					return err
+				}
+			} else {
+				if err := recurseSideChangeType(view, RightSide, containerViewSubpath, detected, ChangeTypeAdded); err != nil {
+					return err
+				}
 			}
 			continue
 		}
-		// Neither are directories -> check for modification
-		if err := processNonDirMod(view, containerViewSubpath, detected); err != nil {
-			return err
+		_, exists = view.candidates[containerViewSubpath]
+		if exists {
+			// Both non-directories and candidates -> check for modification
+			if err = processNonDirMod(view, containerViewSubpath, detected); err != nil {
+				return err
+			}
 		}
 	}
 	// Right-only entries -> added
@@ -406,6 +434,78 @@ func walkFS(view *fsView, containerViewDir string, detected *[]DiffFileRecord) e
 			return err
 		}
 		continue
+	}
+	return nil
+}
+
+func (view *fsView) addSelfAncestorDirs(path string) {
+	view.dirsWithCandidates[path] = struct{}{}
+	for dir := filepath.Dir(path); dir != "." && dir != "/"; dir = filepath.Dir(dir) {
+		view.dirsWithCandidates[dir] = struct{}{}
+	}
+}
+
+func (view *fsView) collectCandidateDir(hostDirPath, containerDirPath string) error {
+	dentries, err := os.ReadDir(hostDirPath)
+	if err != nil {
+		return fmt.Errorf("read directory %s: %w", hostDirPath, err)
+	}
+	for _, dentry := range dentries {
+		hostDentryPath := filepath.Join(hostDirPath, dentry.Name())
+		containerDentryPath := filepath.Join(containerDirPath, dentry.Name())
+		if dentry.IsDir() {
+			opaque, err := isOpaque(hostDentryPath)
+			if err != nil {
+				return err
+			}
+			if opaque {
+				view.addSelfAncestorDirs(containerDentryPath)
+			}
+			if err := view.collectCandidateDir(hostDentryPath, containerDentryPath); err != nil {
+				return err
+			}
+		} else {
+			view.candidates[containerDentryPath] = struct{}{}
+			view.addSelfAncestorDirs(containerDentryPath)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) getAllCandidates(d *DiffFS, view *fsView) error {
+	// candidates contains non-directory paths from the unshared layer.
+	// dirsWithCandidates are possible directories that need traversal: candidate paths,
+	// their ancestors, and opaque directories.
+	view.candidates = make(map[string]struct{})
+	view.dirsWithCandidates = make(map[string]struct{})
+	lastCommonIdx := -1
+	leftLayers := d.leftLayerIDs
+	rightLayers := d.rightLayerIDs
+	if filepath.Clean(d.leftOriginalDir) != filepath.Clean(d.rightOriginalDir) {
+		// collect candidates from original dirs and all ckpts
+		if err := view.collectCandidateDir(d.leftOriginalDir, "/"); err != nil {
+			return err
+		}
+		if err := view.collectCandidateDir(d.rightOriginalDir, "/"); err != nil {
+			return err
+		}
+	} else {
+		// only look at upper layers from unshared ckpts
+		for i := 0; i < len(leftLayers) && i < len(rightLayers); i++ {
+			if leftLayers[i] != rightLayers[i] {
+				break
+			}
+			lastCommonIdx = i
+		}
+	}
+
+	unsharedCkpts := append([]string{}, leftLayers[lastCommonIdx+1:]...)
+	unsharedCkpts = append(unsharedCkpts, rightLayers[lastCommonIdx+1:]...)
+	for _, ckptID := range unsharedCkpts {
+		upperDirPath := m.checkpointUpperDir(ckptID)
+		if err := view.collectCandidateDir(upperDirPath, "/"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -835,6 +935,7 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 	detectedFS := make([]DiffFileRecord, 0)
 	switch {
 	case !leftExists && !rightExists:
+		// target dne so no diff
 	case leftExists && !rightExists:
 		if err := recurseSideChangeType(&view, LeftSide, normalizedTargetDir, &detectedFS, ChangeTypeDeleted); err != nil {
 			return err
@@ -844,6 +945,9 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 			return err
 		}
 	default:
+		if err := m.getAllCandidates(d, &view); err != nil {
+			return err
+		}
 		if err := walkFS(&view, normalizedTargetDir, &detectedFS); err != nil {
 			return err
 		}
