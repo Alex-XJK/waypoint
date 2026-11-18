@@ -1,33 +1,33 @@
 package waypoint
 
 import (
-	"fmt"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
-	//"sort"
+	"sort"
 	"strings"
 	"testing"
 
-	//"github.com/checkpoint-restore/go-criu/v8/crit"
-	//criu_core "github.com/checkpoint-restore/go-criu/v8/crit/images/criu-core"
-	//"github.com/checkpoint-restore/go-criu/v8/crit/images/pstree"
+	"github.com/checkpoint-restore/go-criu/v8/crit"
+	criu_core "github.com/checkpoint-restore/go-criu/v8/crit/images/criu-core"
+	"github.com/checkpoint-restore/go-criu/v8/crit/images/pstree"
 	"golang.org/x/sys/unix"
 )
 
 // Test collectCandidatesDir
 func skipIfUnsupported(t *testing.T, err error) {
-    t.Helper()
+	t.Helper()
 
-    if errors.Is(err, unix.EPERM) ||
-        errors.Is(err, unix.EACCES) ||
-        errors.Is(err, unix.EOPNOTSUPP) ||
-        errors.Is(err, unix.ENOTSUP) {
-        t.Skipf("requires privileged operation or support: %v", err)
-    }
+	if errors.Is(err, unix.EPERM) ||
+		errors.Is(err, unix.EACCES) ||
+		errors.Is(err, unix.EOPNOTSUPP) ||
+		errors.Is(err, unix.ENOTSUP) {
+		t.Skipf("requires privileged operation or support: %v", err)
+	}
 
-    t.Fatalf("unexpected error: %v", err)
+	t.Fatalf("unexpected error: %v", err)
 }
 
 func TestCollectCandidateDir(t *testing.T) {
@@ -69,7 +69,7 @@ func TestCollectCandidateDir(t *testing.T) {
 				"/app/whiteout": {},
 			},
 			expectedDirectories: map[string]struct{}{
-				"/app":         {},
+				"/app":          {},
 				"/app/whiteout": {},
 			},
 		},
@@ -86,7 +86,7 @@ func TestCollectCandidateDir(t *testing.T) {
 				"/app/whiteout": {},
 			},
 			expectedDirectories: map[string]struct{}{
-				"/app":         {},
+				"/app":          {},
 				"/app/whiteout": {},
 			},
 		},
@@ -138,9 +138,9 @@ func TestCollectCandidateDir(t *testing.T) {
 			},
 			expectedCandidates: map[string]struct{}{},
 			expectedDirectories: map[string]struct{}{
-				"/app":              {},
-				"/app/data":         {},
-				"/app/data/nested":  {},
+				"/app":             {},
+				"/app/data":        {},
+				"/app/data/nested": {},
 			},
 		},
 		{
@@ -849,15 +849,15 @@ func requireOverlayFS(t *testing.T, w *e2eWorkspace) {
 }
 
 type e2eLayer struct {
-	name string
+	name        string
 	lowerLayers []int
-	actions []func(t *testing.T, root string)
+	actions     []func(t *testing.T, root string)
 }
 
 type e2eDiffTest struct {
-	name string
+	name        string
 	baseActions []func(t *testing.T, root string)
-	layers []e2eLayer
+	layers      []e2eLayer
 	leftLayers  []int
 	rightLayers []int
 
@@ -1193,8 +1193,6 @@ func TestComputeCkptsDiffIDDistinguishesPairs(t *testing.T) {
 	}
 }
 
-/*
-
 func TestExplorePsFlatReadsEveryProcess(t *testing.T) {
 	dir := t.TempDir()
 	writeProcImages(t, dir, []ProcInfo{
@@ -1332,4 +1330,3 @@ func writeCritImage(t *testing.T, path string, img *crit.CriuImage) {
 		t.Fatalf("encode %s: %v", path, err)
 	}
 }
-*/

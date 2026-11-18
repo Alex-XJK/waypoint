@@ -57,10 +57,10 @@ type FileType string
 const (
 	FileTypeSymlink  FileType = "symlink"
 	FileTypeRegular  FileType = "regular"
-	FileTypeDevice   FileType = "device" // modified = major/minor number change
-	FileTypeFIFO     FileType = "fifo"   // currently only add/delete tracked
-	FileTypeSocket   FileType = "socket" // currently only add/delete tracked
-	FileTypeDir      FileType = "directory"
+	FileTypeDevice   FileType = "device"    // modified = major/minor number change
+	FileTypeFIFO     FileType = "fifo"      // currently only add/delete tracked
+	FileTypeSocket   FileType = "socket"    // currently only add/delete tracked
+	FileTypeDir      FileType = "directory" // only tracked if type change
 	FileTypeOther    FileType = "other"
 	FileTypeModified FileType = "modified"
 )
@@ -533,43 +533,6 @@ func existsTargetDir(view *fsView, s side) (bool, error) {
 	return true, nil
 }
 
-func newDiffFS(m *Manager, overlayDir, leftCkptID, rightCkptID string) (*DiffFS, error) {
-	leftMetadata, err := m.loadMetadata(leftCkptID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata for checkpoint %s: %w", leftCkptID, err)
-	}
-	rightMetadata, err := m.loadMetadata(rightCkptID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata for checkpoint %s: %w", rightCkptID, err)
-	}
-	if leftMetadata.Status != CheckpointStatusReady {
-		return nil, fmt.Errorf("checkpoint %s is not ready (status: %s)", leftCkptID, leftMetadata.Status)
-	}
-	if rightMetadata.Status != CheckpointStatusReady {
-		return nil, fmt.Errorf("checkpoint %s is not ready (status: %s)", rightCkptID, rightMetadata.Status)
-	}
-	leftLowerIDs := append([]string(nil), leftMetadata.LayerIDs...)
-	rightLowerIDs := append([]string(nil), rightMetadata.LayerIDs...)
-
-	leftOriginalDir := leftMetadata.OriginalDir
-	if leftOriginalDir == "" {
-		leftOriginalDir = m.originalDir
-	}
-	rightOriginalDir := rightMetadata.OriginalDir
-	if rightOriginalDir == "" {
-		rightOriginalDir = m.originalDir
-	}
-	return &DiffFS{
-		overlayDir:       overlayDir,
-		leftLayerIDs:     leftLowerIDs,
-		rightLayerIDs:    rightLowerIDs,
-		leftOriginalDir:  leftOriginalDir,
-		rightOriginalDir: rightOriginalDir,
-		leftMountPoint:   filepath.Join(overlayDir, "left_mount"),
-		rightMountPoint:  filepath.Join(overlayDir, "right_mount"),
-	}, nil
-}
-
 func normalizeTargetDir(targetDir string) (string, error) {
 	targetDir = strings.TrimLeft(targetDir, "/")
 	clean := filepath.Clean(targetDir)
@@ -623,6 +586,43 @@ func computeCkptsDiffID(leftCkptID, rightCkptID string) string {
 	return fmt.Sprintf("%.5s-%.5s-%s", leftCkptID, rightCkptID, hash) // add a bit of ckpt names for readability
 }
 
+func newDiffFS(m *Manager, overlayDir, leftCkptID, rightCkptID string) (*DiffFS, error) {
+	leftMetadata, err := m.loadMetadata(leftCkptID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read metadata for checkpoint %s: %w", leftCkptID, err)
+	}
+	rightMetadata, err := m.loadMetadata(rightCkptID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read metadata for checkpoint %s: %w", rightCkptID, err)
+	}
+	if leftMetadata.Status != CheckpointStatusReady {
+		return nil, fmt.Errorf("checkpoint %s is not ready (status: %s)", leftCkptID, leftMetadata.Status)
+	}
+	if rightMetadata.Status != CheckpointStatusReady {
+		return nil, fmt.Errorf("checkpoint %s is not ready (status: %s)", rightCkptID, rightMetadata.Status)
+	}
+	leftLowerIDs := append([]string(nil), leftMetadata.LayerIDs...)
+	rightLowerIDs := append([]string(nil), rightMetadata.LayerIDs...)
+
+	leftOriginalDir := leftMetadata.OriginalDir
+	if leftOriginalDir == "" {
+		leftOriginalDir = m.originalDir
+	}
+	rightOriginalDir := rightMetadata.OriginalDir
+	if rightOriginalDir == "" {
+		rightOriginalDir = m.originalDir
+	}
+	return &DiffFS{
+		overlayDir:       overlayDir,
+		leftLayerIDs:     leftLowerIDs,
+		rightLayerIDs:    rightLowerIDs,
+		leftOriginalDir:  leftOriginalDir,
+		rightOriginalDir: rightOriginalDir,
+		leftMountPoint:   filepath.Join(overlayDir, "left_mount"),
+		rightMountPoint:  filepath.Join(overlayDir, "right_mount"),
+	}, nil
+}
+
 func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir string) (*DiffFS, []byte, error) {
 	ckptsDiffID := computeCkptsDiffID(ckptIDFirst, ckptIDSecond)
 	ckptsDiffDir := m.diffDir(ckptsDiffID)
@@ -654,7 +654,8 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 			return errRes
 		}
 		if errTemp == nil {
-			// case 2: have temp dir for this target but no result yet -> computation already in progress, fail
+			// case 2: have temp dir for this target but no result yet -> computation may already in progress, fail
+			// TODO how to handle when computation interrupted, so don't have diff, but target temp dir not cleaned up
 			return fmt.Errorf("diff workspace %s on target %s already exists but results json not found", targetTempDir, normalizedTargetDir)
 		} else if !os.IsNotExist(errTemp) {
 			return errTemp
@@ -714,7 +715,6 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 }
 
 func processProcMod(leftInfo, rightInfo *ProcInfo, detected *[]DiffProcRecord) error {
-	// confirm these are the same pid, else shoudln't be comparing
 	if leftInfo.PID != rightInfo.PID {
 		return fmt.Errorf("comparing procs with two different pids")
 	}
@@ -815,6 +815,14 @@ func (m *Manager) getProcDiff(ckptIDLeft, ckptIDRight string, detected *[]DiffPr
 	// to get process diff, need to get the criu directories for both checkpoints
 	criuDirLeft := m.checkpointCriuDir(ckptIDLeft)
 	criuDirRight := m.checkpointCriuDir(ckptIDRight)
+	// Hold the images lock shared, as a restore does, so a tmpfs flush
+	// cannot repoint the images while they are read.
+	if unlock, err := lockImages(criuDirLeft, false); err == nil {
+		defer unlock()
+	}
+	if unlock, err := lockImages(criuDirRight, false); err == nil {
+		defer unlock()
+	}
 	expLeft, err := explorePsFlat(criuDirLeft)
 	if err != nil {
 		return err
@@ -890,6 +898,7 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 		return nil
 	}
 
+	// FS
 	d, cachedData, err := m.setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir)
 	if err != nil {
 		return err
@@ -932,6 +941,7 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 	if err != nil {
 		return err
 	}
+
 	detectedFS := make([]DiffFileRecord, 0)
 	switch {
 	case !leftExists && !rightExists:
@@ -952,11 +962,11 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 			return err
 		}
 	}
-
 	sort.Slice(detectedFS, func(i, j int) bool {
 		return detectedFS[i].Path < detectedFS[j].Path
 	})
 
+	// Memory
 	detectedProc := make([]DiffProcRecord, 0)
 	if err := m.getProcDiff(ckptIDFirst, ckptIDSecond, &detectedProc); err != nil {
 		return err
@@ -965,13 +975,13 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 		return detectedProc[i].PID < detectedProc[j].PID
 	})
 
+	// Result all
 	ckptsDiffID := computeCkptsDiffID(ckptIDFirst, ckptIDSecond)
 	ckptsDiffDir := m.diffDir(ckptsDiffID)
 	resultPath, err := computeResultPath(ckptsDiffDir, normalizedTargetDir)
 	if err != nil {
 		return err
 	}
-
 	result := DiffResult{
 		From: ckptIDFirst,
 		To:   ckptIDSecond,
@@ -985,6 +995,7 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 	if err != nil {
 		return fmt.Errorf("marshal diff result: %w", err)
 	}
+
 	if err := m.withSessionLock(func() error {
 		return atomicWriteFile(resultPath, data, 0o644)
 	}); err != nil {
