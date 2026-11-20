@@ -141,6 +141,7 @@ for a in sh cat true chmod ln mkdir rm rmdir touch; do ln -s busybox "$ROOTFS/bi
 D="$ROOTFS/data"
 mkdir -p "$D"/{sub,dirperm,todir}
 echo same >"$D/same.txt"; echo v1 >"$D/mod.txt"; echo d >"$D/del.txt"; echo c >"$D/chmod.txt"
+echo b >"$D/both.txt"
 echo s >"$D/sub/keep"; ln -s same.txt "$D/link"
 ln -s /data "$ROOTFS/abslink"
 
@@ -152,6 +153,7 @@ SESSION="${OUTPUT%%,*}"
 echo "session: $SESSION"
 "$W" checkpoint "$SESSION" A >/dev/null
 wx 'cd /data && echo v2 >mod.txt && rm del.txt && echo n >new.txt && chmod 600 chmod.txt &&
+    echo b2 >both.txt && chmod 600 both.txt &&
     ln -sf mod.txt link && echo same >same.txt && echo t >gone.txt && rm gone.txt &&
     touch sub/keep && echo s2 >sub/new2 && chmod 700 dirperm && mkdir emptydir &&
     rmdir todir && echo x >todir' >/dev/null
@@ -167,7 +169,8 @@ check "filesystem.target_dir is /data" [ "$(field ab 'j["filesystem"]["target_di
 check "content change: /data/mod.txt modified" has_record ab /data/mod.txt "modified regular"
 check "delete: /data/del.txt deleted" has_record ab /data/del.txt "deleted regular"
 check "new file: /data/new.txt added" has_record ab /data/new.txt "added regular"
-check "chmod: /data/chmod.txt modified" has_record ab /data/chmod.txt "modified regular"
+check "chmod only: /data/chmod.txt metadata" has_record ab /data/chmod.txt "metadata regular"
+check "chmod and content change: /data/both.txt modified" has_record ab /data/both.txt "modified regular"
 check "symlink retarget: /data/link modified" has_record ab /data/link "modified symlink"
 check "new file in a subdirectory: /data/sub/new2 added" has_record ab /data/sub/new2 "added regular"
 check "same-content rewrite: no record for /data/same.txt" no_record ab /data/same.txt
@@ -184,6 +187,7 @@ say "3. diff B A and diff A A"
 check "diff B A exits 0" diff_to ba B A --dir /data
 check "reverse: /data/new.txt deleted" has_record ba /data/new.txt "deleted regular"
 check "reverse: /data/del.txt added" has_record ba /data/del.txt "added regular"
+check "reverse: /data/chmod.txt metadata" has_record ba /data/chmod.txt "metadata regular"
 check "diff A A exits 0" diff_to aa A A
 check "diff A A has no records" [ "$(field aa 'len(j["filesystem"]["records"])')" = 0 ]
 check "diff A A has no process records" [ "$(field aa 'len(j["processes"])')" = 0 ]

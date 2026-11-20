@@ -44,6 +44,7 @@ const (
 	ChangeTypeAdded    ChangeType = "added"
 	ChangeTypeDeleted  ChangeType = "deleted"
 	ChangeTypeModified ChangeType = "modified"
+	ChangeTypeMetadata ChangeType = "metadata" // same content, different mode bits
 )
 
 type DiffFileRecord struct {
@@ -233,26 +234,17 @@ func processNonDirMod(view *fsView, containerViewPath string, bufs *compareBufs,
 	}
 	leftFileType := getFileType(leftInfo.Mode())
 	rightFileType := getFileType(rightInfo.Mode())
-	// Mode change
-	if leftInfo.Mode() != rightInfo.Mode() {
-		if leftFileType == rightFileType {
-			*detected = append(*detected, DiffFileRecord{
-				Path:       containerViewPath,
-				ChangeType: ChangeTypeModified,
-				FileType:   leftFileType,
-			})
-		} else {
-			*detected = append(*detected, DiffFileRecord{
-				Path:         containerViewPath,
-				ChangeType:   ChangeTypeModified,
-				FileType:     FileTypeModified,
-				FromFileType: leftFileType,
-				ToFileType:   rightFileType,
-			})
-		}
+	if leftFileType != rightFileType {
+		*detected = append(*detected, DiffFileRecord{
+			Path:         containerViewPath,
+			ChangeType:   ChangeTypeModified,
+			FileType:     FileTypeModified,
+			FromFileType: leftFileType,
+			ToFileType:   rightFileType,
+		})
 		return nil
 	}
-	// Other changes currently tracked: cmp on regular, symlink target, dev major/minor. TODO support other changes/types
+	// Content changes currently tracked: cmp on regular, symlink target, dev major/minor. TODO support other changes/types
 	mod := false
 	if leftFileType == FileTypeRegular {
 		res, err := areRegFilesDiff(leftRoot, rightRoot, rootViewPath, bufs)
@@ -284,13 +276,18 @@ func processNonDirMod(view *fsView, containerViewPath string, bufs *compareBufs,
 		mod = (unix.Major(leftDev) != unix.Major(rightDev) ||
 			unix.Minor(leftDev) != unix.Minor(rightDev))
 	}
-	if mod {
-		*detected = append(*detected, DiffFileRecord{
-			Path:       containerViewPath,
-			ChangeType: ChangeTypeModified,
-			FileType:   leftFileType,
-		})
+	changeType := ChangeTypeModified
+	if !mod {
+		if leftInfo.Mode() == rightInfo.Mode() {
+			return nil
+		}
+		changeType = ChangeTypeMetadata
 	}
+	*detected = append(*detected, DiffFileRecord{
+		Path:       containerViewPath,
+		ChangeType: changeType,
+		FileType:   leftFileType,
+	})
 	return nil
 }
 
@@ -654,7 +651,7 @@ func computeTargetTempDir(ckptsDiffDir string, targetDir string) (string, error)
 
 // diffResultVersion is part of a cached result's file name, so results written
 // in an older format are not reused. Bump it when the output format changes.
-const diffResultVersion = 2
+const diffResultVersion = 3
 
 func computeResultPath(ckptsDiffDir string, targetDir string) (string, error) {
 	targetCacheKey, err := computeTargetHash(targetDir)

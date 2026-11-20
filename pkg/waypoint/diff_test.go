@@ -261,11 +261,39 @@ func TestWalkFS(t *testing.T) {
 		leftDirs  []string
 		rightDirs []string
 
+		rightModes map[string]os.FileMode // applied after the right tree is created
+
 		candidates         map[string]struct{}
 		dirsWithCandidates map[string]struct{}
 
 		want []expectedDiff
 	}{
+		{
+			name:       "mode_only_change_is_metadata",
+			leftFiles:  map[string]string{"/app/run.sh": "echo hi"},
+			rightFiles: map[string]string{"/app/run.sh": "echo hi"},
+			rightModes: map[string]os.FileMode{"/app/run.sh": 0755},
+			candidates: map[string]struct{}{"/app/run.sh": {}},
+			dirsWithCandidates: map[string]struct{}{
+				"/app": {},
+			},
+			want: []expectedDiff{
+				{path: "/app/run.sh", changeType: ChangeTypeMetadata, fileType: FileTypeRegular, checkTypes: true},
+			},
+		},
+		{
+			name:       "mode_and_content_change_is_modified",
+			leftFiles:  map[string]string{"/app/run.sh": "echo hi"},
+			rightFiles: map[string]string{"/app/run.sh": "echo yo"},
+			rightModes: map[string]os.FileMode{"/app/run.sh": 0755},
+			candidates: map[string]struct{}{"/app/run.sh": {}},
+			dirsWithCandidates: map[string]struct{}{
+				"/app": {},
+			},
+			want: []expectedDiff{
+				{path: "/app/run.sh", changeType: ChangeTypeModified, fileType: FileTypeRegular, checkTypes: true},
+			},
+		},
 		{
 			name: "identical_candidate_files",
 			leftFiles: map[string]string{
@@ -416,6 +444,11 @@ func TestWalkFS(t *testing.T) {
 
 			createTestTree(t, leftPath, tt.leftDirs, tt.leftFiles)
 			createTestTree(t, rightPath, tt.rightDirs, tt.rightFiles)
+			for path, mode := range tt.rightModes {
+				if err := os.Chmod(e2ePath(rightPath, path), mode); err != nil {
+					t.Fatalf("chmod %s: %v", path, err)
+				}
+			}
 
 			leftRoot, err := os.OpenRoot(leftPath)
 			if err != nil {
@@ -1115,6 +1148,55 @@ func TestDiffFSOverlayE2E(t *testing.T) {
 			},
 		},
 		{
+			name: "chmod_only",
+			baseActions: []func(*testing.T, string){
+				func(t *testing.T, root string) {
+					e2eWriteFile(t, root, "/app/run.sh", "echo hi")
+				},
+			},
+			layers: []e2eLayer{
+				{name: "left"},
+				{
+					name: "right",
+					actions: []func(*testing.T, string){
+						func(t *testing.T, root string) {
+							e2eChmod(t, root, "/app/run.sh", 0755)
+						},
+					},
+				},
+			},
+			leftLayers:  []int{0},
+			rightLayers: []int{1},
+			want: []expectedDiff{
+				{path: "/app/run.sh", changeType: ChangeTypeMetadata, fileType: FileTypeRegular, checkTypes: true},
+			},
+		},
+		{
+			name: "chmod_and_write",
+			baseActions: []func(*testing.T, string){
+				func(t *testing.T, root string) {
+					e2eWriteFile(t, root, "/app/run.sh", "echo hi")
+				},
+			},
+			layers: []e2eLayer{
+				{name: "left"},
+				{
+					name: "right",
+					actions: []func(*testing.T, string){
+						func(t *testing.T, root string) {
+							e2eWriteFile(t, root, "/app/run.sh", "echo yo")
+							e2eChmod(t, root, "/app/run.sh", 0755)
+						},
+					},
+				},
+			},
+			leftLayers:  []int{0},
+			rightLayers: []int{1},
+			want: []expectedDiff{
+				{path: "/app/run.sh", changeType: ChangeTypeModified, fileType: FileTypeRegular, checkTypes: true},
+			},
+		},
+		{
 			name: "later_layer_sees_earlier_delete",
 			baseActions: []func(*testing.T, string){
 				func(t *testing.T, root string) {
@@ -1312,6 +1394,14 @@ func e2eWriteFile(t *testing.T, root, path, content string) {
 
 	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func e2eChmod(t *testing.T, root, path string, mode os.FileMode) {
+	t.Helper()
+
+	if err := os.Chmod(e2ePath(root, path), mode); err != nil {
+		t.Fatalf("chmod %s: %v", path, err)
 	}
 }
 
