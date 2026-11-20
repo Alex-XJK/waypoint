@@ -249,6 +249,26 @@ Choose validation for the affected behavior:
   changes, exercise the affected tests. Report commands, failures, skips, and coverage
   limits explicitly; do not describe a build or helper test as runtime validation.
 
+## Performance
+
+Waypoint's operations run on every agent step, so a change must not make them
+noticeably slower by accident.
+
+- Before committing a change to runtime code, compare the build before the change
+  with the build after it, on the same machine: `sudo ./scripts/bench-basic.sh` for
+  the basic operations, `sudo ./scripts/bench-memory.sh` for dumps and restores, and
+  `sudo env BASELINE_BIN=<waypoint before the change> ./scripts/bench-diff-blame.sh`
+  for `diff` and `blame`.
+- Run the two builds in turn (before, after, before, after, ...), several times each,
+  and compare medians. Timing one build after the other in blocks has given false
+  regressions.
+- A difference within the spread between runs of the same build, or a slight cost
+  that comes with the feature, is fine. Report the comparison in relative terms;
+  absolute numbers depend on the host and stay out of commits and pull requests.
+- If an operation gets clearly slower, stop and ask the human developer. Do not
+  decide on your own that the cost is acceptable. If the developer accepts it, the
+  commit has a body that says what got slower and why the change is worth it.
+
 ## Development notes
 
 Notes on changes since the last release, to fold into the public documents at the
