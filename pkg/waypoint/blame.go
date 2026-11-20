@@ -95,11 +95,9 @@ func isOpaque(dir string) (bool, error) {
 	return string(value[:n]) == "y", nil
 }
 
-func isWhiteout(path string) (bool, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return false, err
-	}
+// isWhiteoutInfo reports whether path, with the given Lstat result, is an
+// OverlayFS whiteout.
+func isWhiteoutInfo(path string, info os.FileInfo) (bool, error) {
 	// Whiteout represented as a character device with major/minor 0/0.
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 		if info.Mode()&os.ModeCharDevice != 0 &&
@@ -122,17 +120,6 @@ func isWhiteout(path string) (bool, error) {
 	return false, nil
 }
 
-func isDescendant(dirPath string, targetPath string) (bool, error) {
-	childPath, err := filepath.Rel(dirPath, targetPath)
-	if err != nil {
-		return false, err
-	}
-	if childPath == "." || childPath == ".." || strings.HasPrefix(childPath, ".."+string(filepath.Separator)) {
-		return false, nil
-	}
-	return true, nil
-}
-
 func areRegularFiles(paths ...string) (bool, error) {
 	for _, path := range paths {
 		info, err := os.Lstat(path)
@@ -146,134 +133,123 @@ func areRegularFiles(paths ...string) (bool, error) {
 	return true, nil
 }
 
-func insertBlameRecord(blamed *[]BlameCkptRecord, prevState, newState *state, changeType ChangeType) error {
-	if blamed == nil {
-		return nil
-	}
-	diff, err := constructFileDiff(prevState, newState, changeType)
+// buildBlameRecord turns an event into its record, with the change as
+// unified-diff lines.
+func buildBlameRecord(event *blameEvent) (BlameCkptRecord, error) {
+	changeType := event.change
+	diff, err := constructFileDiff(&event.prev, &event.next, changeType)
 	if err != nil {
-		return fmt.Errorf("construct diff for checkpoints %s, %s: %w", prevState.ckptID, newState.ckptID, err)
+		return BlameCkptRecord{}, fmt.Errorf("construct diff for checkpoints %s, %s: %w", event.prev.ckptID, event.next.ckptID, err)
 	}
 	lines := []string{}
 	if diff != "" {
 		lines = strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
 	} else if changeType == ChangeTypeModified {
 		// A layer that holds a regular file with unchanged content changed only its metadata.
-		regular, err := areRegularFiles(prevState.rootViewPath, newState.rootViewPath)
+		regular, err := areRegularFiles(event.prev.rootViewPath, event.next.rootViewPath)
 		if err != nil {
-			return err
+			return BlameCkptRecord{}, err
 		}
 		if regular {
 			changeType = ChangeTypeMetadata
 		}
 	}
 
-	*blamed = append(*blamed, BlameCkptRecord{
-		CheckpointID: newState.ckptID,
+	return BlameCkptRecord{
+		CheckpointID: event.next.ckptID,
 		ChangeType:   changeType,
 		LineByLine:   lines,
-	})
-	return nil
+	}, nil
 }
 
-func checkDir(rootViewDir, containerViewDir, targetPath string, prevState *state, blamed *[]BlameCkptRecord, ckptID string) (bool, error) {
-	dentries, err := os.ReadDir(rootViewDir)
-	if err != nil {
-		return false, fmt.Errorf("read directory %s: %w", rootViewDir, err)
-	}
-	for _, dentry := range dentries {
-		rootViewPath := filepath.Join(rootViewDir, dentry.Name())
-		containerViewPath := filepath.Join(containerViewDir, dentry.Name())
-		if !dentry.IsDir() { //TODO won't follow symlinks, change?
-			whiteout, err := isWhiteout(rootViewPath)
-			if err != nil {
-				return false, fmt.Errorf("check whiteout %s: %w", rootViewPath, err)
-			}
-			targetDesc, err := isDescendant(containerViewPath, targetPath)
-			if err != nil {
-				return false, err
-			}
-			samePath := (containerViewPath == targetPath)
+// layerEntry is what one layer holds at the target path.
+type layerEntry int
 
-			if (targetDesc || (whiteout && samePath)) && prevState.visible {
-				newState := &state{
-					visible:      false,
-					rootViewPath: "",
-					ckptID:       ckptID,
+const (
+	layerUntouched layerEntry = iota // nothing at the target path
+	layerHidden                      // a whiteout, an opaque directory or a non-directory on the path, or a directory at it
+	layerPresent                     // a file, symlink or other non-directory at the target path
+)
+
+// lookupLayer reports what the layer rooted at layerRoot holds at targetPath,
+// and the entry's host path for layerPresent. It walks the path one component
+// at a time and stops at the first that is not a directory, so it follows no
+// symlink.
+func lookupLayer(layerRoot, targetPath string) (layerEntry, string, error) {
+	components := strings.Split(strings.TrimPrefix(targetPath, "/"), "/")
+	path := layerRoot
+	var ancestors []string // the layer's directories above the target, outermost first
+	for i, name := range components {
+		path = filepath.Join(path, name)
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			// An opaque directory above the missing entry hides the lower layers.
+			for j := len(ancestors) - 1; j >= 0; j-- {
+				opaque, err := isOpaque(ancestors[j])
+				if err != nil {
+					return layerUntouched, "", fmt.Errorf("check opacity %s: %w", ancestors[j], err)
 				}
-				if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeDeleted); err != nil {
-					return false, err
+				if opaque {
+					return layerHidden, "", nil
 				}
-				*prevState = *newState
-				return true, nil
 			}
-			if !whiteout && samePath {
-				newState := &state{
-					visible:      true,
-					rootViewPath: rootViewPath,
-					ckptID:       ckptID,
-				}
-				if !prevState.visible {
-					if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeAdded); err != nil {
-						return false, err
-					}
-				} else {
-					if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeModified); err != nil {
-						return false, err
-					}
-				}
-				*prevState = *newState
-				return true, nil
-			}
-		} else {
-			if containerViewPath == targetPath { // directory at the target path hides the file
-				if !prevState.visible {
-					continue
-				}
-				newState := &state{
-					visible:      false,
-					rootViewPath: "",
-					ckptID:       ckptID,
-				}
-				if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeDeleted); err != nil {
-					return false, err
-				}
-				*prevState = *newState
-				return true, nil
-			}
-			targetDescDir, err := isDescendant(containerViewPath, targetPath)
-			if err != nil {
-				return false, err
-			}
-			if !targetDescDir {
-				continue
-			}
-			foundAndUpdated, err := checkDir(rootViewPath, containerViewPath, targetPath, prevState, blamed, ckptID)
-			if err != nil {
-				return false, err
-			}
-			if foundAndUpdated {
-				return true, nil
-			}
-			opaque, err := isOpaque(rootViewPath)
-			if err != nil {
-				return false, fmt.Errorf("check opacity %s: %w", rootViewPath, err)
-			}
-			if opaque && prevState.visible {
-				newState := &state{
-					visible:      false,
-					rootViewPath: "",
-					ckptID:       ckptID,
-				}
-				if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeDeleted); err != nil {
-					return false, err
-				}
-				*prevState = *newState
-				return true, nil
-			}
+			return layerUntouched, "", nil
 		}
+		if err != nil {
+			return layerUntouched, "", fmt.Errorf("lstat %s: %w", path, err)
+		}
+
+		last := i == len(components)-1
+		if info.IsDir() {
+			if last {
+				return layerHidden, "", nil
+			}
+			ancestors = append(ancestors, path)
+			continue
+		}
+		if !last {
+			return layerHidden, "", nil
+		}
+		whiteout, err := isWhiteoutInfo(path, info)
+		if err != nil {
+			return layerUntouched, "", fmt.Errorf("check whiteout %s: %w", path, err)
+		}
+		if whiteout {
+			return layerHidden, "", nil
+		}
+		return layerPresent, path, nil
 	}
-	return false, nil
+	return layerUntouched, "", nil
+}
+
+// blameEvent is a change that one layer makes to the target path.
+type blameEvent struct {
+	prev, next state
+	change     ChangeType
+}
+
+// advance applies the layer rooted at layerRoot to st, the target's state
+// below that layer, and returns the change the layer makes, or nil.
+func advance(st *state, layerRoot, ckptID, targetPath string) (*blameEvent, error) {
+	entry, hostPath, err := lookupLayer(layerRoot, targetPath)
+	if err != nil {
+		return nil, err
+	}
+	var next state
+	var change ChangeType
+	switch {
+	case entry == layerPresent && st.visible:
+		next, change = state{visible: true, rootViewPath: hostPath, ckptID: ckptID}, ChangeTypeModified
+	case entry == layerPresent:
+		next, change = state{visible: true, rootViewPath: hostPath, ckptID: ckptID}, ChangeTypeAdded
+	case entry == layerHidden && st.visible:
+		next, change = state{ckptID: ckptID}, ChangeTypeDeleted
+	default:
+		return nil, nil
+	}
+	event := &blameEvent{prev: *st, next: next, change: change}
+	*st = next
+	return event, nil
 }
 
 // very similar to diff.go normalizeTargetDir, refactor?
@@ -318,17 +294,23 @@ func (m *Manager) PrintBlame(ckptID, path string) error {
 		rootViewPath: "",
 		ckptID:       "original",
 	}
-	_, err = checkDir(originalDir, "/", normalizedTargetPath, state, nil, "original")
-	if err != nil {
+	if _, err := advance(state, originalDir, "original", normalizedTargetPath); err != nil {
 		return err
 	}
 	// then advance through checkpoint layers, blaming
 	for _, ckptID := range ckptIDs {
-		upperDirPath := m.checkpointUpperDir(ckptID)
-		_, err := checkDir(upperDirPath, "/", normalizedTargetPath, state, &blamedCkpts, ckptID)
+		event, err := advance(state, m.checkpointUpperDir(ckptID), ckptID, normalizedTargetPath)
 		if err != nil {
 			return err
 		}
+		if event == nil {
+			continue
+		}
+		record, err := buildBlameRecord(event)
+		if err != nil {
+			return err
+		}
+		blamedCkpts = append(blamedCkpts, record)
 	}
 
 	result := BlameResult{
