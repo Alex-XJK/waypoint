@@ -805,10 +805,10 @@ func (m *Manager) getProcDiff(ckptIDLeft, ckptIDRight string, detected *[]DiffPr
 	criuDirRight := m.checkpointCriuDir(ckptIDRight)
 	// Hold the images lock shared, as a restore does, so a tmpfs flush
 	// cannot repoint the images while they are read.
-	if unlock, err := lockImages(criuDirLeft, false); err == nil {
+	if unlock, err := lockImages(m.checkpointDir(ckptIDLeft), false); err == nil {
 		defer unlock()
 	}
-	if unlock, err := lockImages(criuDirRight, false); err == nil {
+	if unlock, err := lockImages(m.checkpointDir(ckptIDRight), false); err == nil {
 		defer unlock()
 	}
 	expLeft, err := explorePsFlat(criuDirLeft)

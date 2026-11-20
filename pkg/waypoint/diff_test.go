@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/checkpoint-restore/go-criu/v8/crit"
 	criu_core "github.com/checkpoint-restore/go-criu/v8/crit/images/criu-core"
@@ -1385,6 +1386,45 @@ func TestGetProcDiffSameProcessesIsEmpty(t *testing.T) {
 	writeProcImages(t, m.checkpointCriuDir("B"), procs)
 	if got := procDiffByPID(t, m, "A", "B"); len(got) != 0 {
 		t.Fatalf("getProcDiff(A, B) = %v, want no records", got)
+	}
+}
+
+func TestGetProcDiffWaitsForImagesLock(t *testing.T) {
+	m := &Manager{baseDir: t.TempDir()}
+	procs := []ProcInfo{{PID: 1, PPID: 0, PGID: 1, SID: 1, Comm: "bash_init"}}
+	writeProcImages(t, m.checkpointCriuDir("A"), procs)
+	writeProcImages(t, m.checkpointCriuDir("B"), procs)
+
+	// A tmpfs flush holds this lock exclusively while it repoints the images.
+	unlock, err := lockImages(m.checkpointDir("B"), true)
+	if err != nil {
+		t.Fatalf("lockImages: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		var records []DiffProcRecord
+		done <- m.getProcDiff("A", "B", &records)
+	}()
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("getProcDiff returned (err=%v) while a flush held the images lock", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("getProcDiff: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("getProcDiff still blocked after the images lock was released")
+	}
+
+	for _, id := range []string{"A", "B"} {
+		if _, err := os.Stat(imagesLockPath(m.checkpointCriuDir(id))); !os.IsNotExist(err) {
+			t.Errorf("lock file created inside the images dir of %s: err=%v", id, err)
+		}
 	}
 }
 
