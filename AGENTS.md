@@ -218,7 +218,7 @@ Choose validation for the affected behavior:
   related logic. `./setup test` also runs the Bash completion tests. These do not
   replace real CRIU/namespace lifecycle checks.
 - For changes to CRIU, mounts, namespaces, lifecycle, `bash_init`, or the exec
-  protocol, run `sudo ./scripts/demo.sh` as the baseline runtime check, plus focused
+  protocol, run `sudo ./scripts/test-basic.sh` as the baseline runtime check, plus focused
   coverage for the change. It rebuilds binaries and asserts CLI behavior and cleanup;
   its Dockerfile section requires Buildah and reports a skip if unavailable.
 - For changes to private network mode, also run `sudo ./scripts/test-private-network.sh`
@@ -300,6 +300,7 @@ next one.
   - The README (the `full_dump_ratio` paragraphs and the sessions-dir tree) and
     `docs/architecture.md` (the `chain.go` entry and the file list) still describe
     the v0.8.0 rule.
-- **Benchmark scripts.** They are named `bench-*.sh`: `scripts/benchmark.sh` is now
+- **Script names.** Tests are named `test-*.sh` and benchmarks `bench-*.sh`:
+  `scripts/demo.sh` is now `scripts/test-basic.sh`, `scripts/benchmark.sh` is
   `scripts/bench-basic.sh` and `scripts/membench.sh` is `scripts/bench-memory.sh`.
-  The README still names `scripts/benchmark.sh`.
+  The README still names `scripts/demo.sh` and `scripts/benchmark.sh`.
