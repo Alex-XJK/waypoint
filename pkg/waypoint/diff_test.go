@@ -796,6 +796,38 @@ func TestDiffFSOverlayE2E(t *testing.T) {
 			rightLayers: []int{0, 2},
 			want:        nil,
 		},
+		{
+			name: "later_layer_sees_earlier_delete",
+			baseActions: []func(*testing.T, string){
+				func(t *testing.T, root string) {
+					e2eWriteFile(t, root, "/app/gone.txt", "original")
+				},
+			},
+			layers: []e2eLayer{
+				{
+					name: "delete",
+					actions: []func(*testing.T, string){
+						func(t *testing.T, root string) {
+							e2eRemove(t, root, "/app/gone.txt")
+						},
+					},
+				},
+				{
+					name:        "check",
+					lowerLayers: []int{0},
+					actions: []func(*testing.T, string){
+						func(t *testing.T, root string) {
+							if _, err := os.Lstat(e2ePath(root, "/app/gone.txt")); !os.IsNotExist(err) {
+								t.Errorf("file deleted in layer 0 is visible while building layer 1: err=%v", err)
+							}
+						},
+					},
+				},
+			},
+			leftLayers:  []int{0},
+			rightLayers: []int{0, 1},
+			want:        nil,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1017,7 +1049,7 @@ func (w *e2eWorkspace) buildLayer(
 	}
 
 	// OverlayFS requires upperdir and workdir to be on the same filesystem.
-	lowerDirs := []string{w.baseDir}
+	lowerDirs := make([]string, 0, len(layer.lowerLayers)+1)
 
 	for _, lowerLayerIdx := range layer.lowerLayers {
 		if lowerLayerIdx < 0 || lowerLayerIdx >= index {
@@ -1031,10 +1063,11 @@ func (w *e2eWorkspace) buildLayer(
 	}
 
 	// OverlayFS prioritizes the first lower directory.
-	// The layer specification is oldest -> newest, so reverse it.
-	for i, j := 1, len(lowerDirs)-1; i < j; i, j = i+1, j-1 {
+	// The layer specification is oldest -> newest, so reverse it; the base goes last.
+	for i, j := 0, len(lowerDirs)-1; i < j; i, j = i+1, j-1 {
 		lowerDirs[i], lowerDirs[j] = lowerDirs[j], lowerDirs[i]
 	}
+	lowerDirs = append(lowerDirs, w.baseDir)
 
 	w.mountOverlay(t, mount, lowerDirs, upper, work, false)
 
