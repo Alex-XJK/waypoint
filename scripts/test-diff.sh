@@ -6,7 +6,8 @@
 # that leave the final content the same, argument errors, and refusal to diff a
 # checkpoint that is not ready. Section 5 checks that `processes` reports the
 # pids of jobs killed and started between two checkpoints. Section 6 checks the
-# result cache. TODO lines print changes `diff` does not report yet; they do not
+# `shell` records for cd, umask and stty. Section 7 checks the result cache.
+# TODO lines print changes `diff` does not report yet; they do not
 # count as failures.
 #
 # Requires root, criu, a static busybox, python3, and Go unless WAYPOINT_BIN and
@@ -79,6 +80,16 @@ EOF
 }
 has_proc() { [ -n "$2" ] && [ "$(proc "$1" "$2")" = "$3" ]; }
 any_proc() { [ -n "$2" ] && [ -n "$(proc "$1" "$2")" ]; }
+# shell_change <name> <kind> [<tty name>]: prints the from and to value of
+# that shell record as JSON, or nothing.
+shell_change() {
+  python3 - "$OUT/$1.json" "$2" "${3:-}" <<'EOF' 2>/dev/null
+import json, sys
+for r in json.load(open(sys.argv[1]))["shell"]["records"]:
+    if r["kind"] == sys.argv[2] and r.get("name", "") == sys.argv[3]:
+        print(json.dumps(r["from"]), json.dumps(r["to"]))
+EOF
+}
 not_added_or_deleted() { local c; c="$(proc "$1" "$2")"; [ -n "$2" ] && [ "$c" != added ] && [ "$c" != deleted ]; }
 # start_job <tag>: starts a sh loop in main's background and prints its pid.
 # The loops differ only by tag; busybox sleep itself exits after a checkpoint.
@@ -135,7 +146,7 @@ for l in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-aarch64.so.1; do
   [ -f "$l" ] && [ ! -e "$ROOTFS$l" ] && { mkdir -p "$ROOTFS$(dirname "$l")"; cp "$l" "$ROOTFS$l"; }
 done
 cp "$(command -v busybox)" "$ROOTFS/bin/busybox"
-for a in sh cat true chmod ln mkdir rm rmdir touch; do ln -s busybox "$ROOTFS/bin/$a"; done
+for a in sh cat true chmod ln mkdir rm rmdir stty touch; do ln -s busybox "$ROOTFS/bin/$a"; done
 
 D="$ROOTFS/data"
 mkdir -p "$D"/{sub,dirperm,todir}
@@ -252,7 +263,30 @@ later "memory-only change (a variable in main's shell, pid $SHELL_PID) reported"
   any_proc rs "$SHELL_PID"
 
 # ---------------------------------------------------------------------------
-say "6. cached results"
+say "6. shell: checkpoint T, cd / umask / stty in main, checkpoint U"
+# ---------------------------------------------------------------------------
+# Read from the CRIU images: the shell's working directory, umask and terminal.
+wx 'cd /data; umask 022' >/dev/null
+"$W" checkpoint "$SESSION" T >/dev/null
+wx 'cd /data/sub; umask 027; stty rows 50 cols 200 echo' >/dev/null
+"$W" checkpoint "$SESSION" U >/dev/null
+check "diff T U exits 0" diff_to tu T U
+check "shell.records is a list" [ "$(field tu 'type(j["shell"]["records"]).__name__')" = list ]
+check "cd: cwd /data -> /data/sub" [ "$(shell_change tu cwd)" = '"/data" "/data/sub"' ]
+check "umask: 0022 -> 0027" [ "$(shell_change tu umask)" = '"0022" "0027"' ]
+check "stty rows cols: tty size 40x120 -> 50x200" \
+  [ "$(shell_change tu tty size)" = '{"rows": 40, "cols": 120} {"rows": 50, "cols": 200}' ]
+check "stty echo: tty echo false -> true" [ "$(shell_change tu tty echo)" = 'false true' ]
+check "idle shell: no foreground record" [ -z "$(shell_change tu foreground)" ]
+check "diff U T exits 0" diff_to ut U T
+check "reverse: cwd /data/sub -> /data" [ "$(shell_change ut cwd)" = '"/data/sub" "/data"' ]
+check "reverse: umask 0027 -> 0022" [ "$(shell_change ut umask)" = '"0027" "0022"' ]
+check "diff T T exits 0" diff_to tt T T
+check "diff T T has no shell records" [ "$(field tt 'len(j["shell"]["records"])')" = 0 ]
+check "a variable set in the shell (R to S): no shell records" [ "$(field rs 'len(j["shell"]["records"])')" = 0 ]
+
+# ---------------------------------------------------------------------------
+say "7. cached results"
 # ---------------------------------------------------------------------------
 # Results live in diffs/<pair>/result-v<N>-<key>.json, key = hash of the target dir.
 DDIR="$(echo "$WORK/s/$SESSION"/diffs/A-B-*)"

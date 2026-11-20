@@ -1,6 +1,7 @@
 package waypoint
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -299,5 +300,60 @@ func TestDiffShell(t *testing.T) {
 				t.Fatalf("diffShell = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestGetProcDiffReportsShellChanges(t *testing.T) {
+	m := &Manager{baseDir: t.TempDir()}
+	writeShellCheckpoint(t, m.checkpointCriuDir("A"), testProcs, defaultPty(11), fsFixture{cwd: "/app", umask: 0o22})
+	resized := defaultPty(11)
+	resized.rows, resized.cols = 50, 200
+	writeShellCheckpoint(t, m.checkpointCriuDir("B"), testProcs, resized, fsFixture{cwd: "/tmp", umask: 0o22})
+
+	small, large := TTYSize{Rows: 40, Cols: 120}, TTYSize{Rows: 50, Cols: 200}
+	for _, tc := range []struct {
+		left, right string
+		want        []ShellChange
+	}{
+		{"A", "B", []ShellChange{
+			{Kind: ShellKindCwd, From: "/app", To: "/tmp"},
+			{Kind: ShellKindTTY, Name: TTYNameSize, From: small, To: large},
+		}},
+		{"B", "A", []ShellChange{
+			{Kind: ShellKindCwd, From: "/tmp", To: "/app"},
+			{Kind: ShellKindTTY, Name: TTYNameSize, From: large, To: small},
+		}},
+		{"A", "A", []ShellChange{}},
+	} {
+		var procs []DiffProcRecord
+		var shell []ShellChange
+		if err := m.getProcDiff(tc.left, tc.right, &procs, &shell); err != nil {
+			t.Fatalf("getProcDiff(%s, %s): %v", tc.left, tc.right, err)
+		}
+		if !reflect.DeepEqual(shell, tc.want) {
+			t.Fatalf("getProcDiff(%s, %s) shell = %+v, want %+v", tc.left, tc.right, shell, tc.want)
+		}
+		if len(procs) != 0 {
+			t.Fatalf("getProcDiff(%s, %s) processes = %+v, want none", tc.left, tc.right, procs)
+		}
+	}
+}
+
+func TestShellDiffJSON(t *testing.T) {
+	left := &shellState{pid: 11, cwd: "/app", umask: "0022", foreground: []ShellProc{}, termios: testTermios(testIflag, testLflag, nil)}
+	right := &shellState{pid: 11, cwd: "/tmp", umask: "0022", foreground: []ShellProc{{PID: 15, Comm: "sleep"}}, termios: testTermios(testIflag, testLflag|unix.ECHO, nil)}
+	got, err := json.Marshal(ShellDiff{Records: diffShell(left, right)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"records":[` +
+		`{"kind":"cwd","from":"/app","to":"/tmp"},` +
+		`{"kind":"foreground","from":[],"to":[{"pid":15,"comm":"sleep"}]},` +
+		`{"kind":"tty","name":"echo","from":false,"to":true}]}`
+	if string(got) != want {
+		t.Fatalf("shell JSON = %s\nwant %s", got, want)
+	}
+	if got, _ := json.Marshal(ShellDiff{Records: diffShell(nil, nil)}); string(got) != `{"records":[]}` {
+		t.Fatalf("empty shell JSON = %s, want {\"records\":[]}", got)
 	}
 }

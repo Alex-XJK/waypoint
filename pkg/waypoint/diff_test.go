@@ -1995,7 +1995,7 @@ func TestGetProcDiffWaitsForImagesLock(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		var records []DiffProcRecord
-		done <- m.getProcDiff("A", "B", &records)
+		done <- m.getProcDiff("A", "B", &records, &[]ShellChange{})
 	}()
 	select {
 	case err := <-done:
@@ -2025,7 +2025,7 @@ func TestGetProcDiffWaitsForImagesLock(t *testing.T) {
 func procDiffByPID(t *testing.T, m *Manager, left, right string) map[uint32]ChangeType {
 	t.Helper()
 	var records []DiffProcRecord
-	if err := m.getProcDiff(left, right, &records); err != nil {
+	if err := m.getProcDiff(left, right, &records, &[]ShellChange{}); err != nil {
 		t.Fatalf("getProcDiff(%s, %s): %v", left, right, err)
 	}
 	got := map[uint32]ChangeType{}

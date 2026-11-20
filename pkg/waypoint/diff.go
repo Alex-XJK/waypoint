@@ -31,6 +31,7 @@ type DiffResult struct {
 	To         string           `json:"to"`
 	Filesystem FilesystemDiff   `json:"filesystem"`
 	Processes  []DiffProcRecord `json:"processes"`
+	Shell      ShellDiff        `json:"shell"`
 }
 
 type FilesystemDiff struct {
@@ -673,7 +674,7 @@ func computeTargetTempDir(ckptsDiffDir string, targetDir string) (string, error)
 
 // diffResultVersion is part of a cached result's file name, so results written
 // in an older format are not reused. Bump it when the output format changes.
-const diffResultVersion = 4
+const diffResultVersion = 5
 
 func computeResultPath(ckptsDiffDir string, targetDir string) (string, error) {
 	targetCacheKey, err := computeTargetHash(targetDir)
@@ -994,7 +995,9 @@ func explorePsFlat(inputDirPath string) (map[uint32]ProcInfo, error) {
 	return processes, nil
 }
 
-func (m *Manager) getProcDiff(ckptIDLeft, ckptIDRight string, detected *[]DiffProcRecord) error {
+// getProcDiff compares the CRIU images of two checkpoints: the processes go
+// to detected, the session shell's changes to shellChanges.
+func (m *Manager) getProcDiff(ckptIDLeft, ckptIDRight string, detected *[]DiffProcRecord, shellChanges *[]ShellChange) error {
 	// NOTE: treating pid as identity, so pid reuse will show up as modified
 	// so TODO: strengthen identity key
 
@@ -1017,6 +1020,15 @@ func (m *Manager) getProcDiff(ckptIDLeft, ckptIDRight string, detected *[]DiffPr
 	if err != nil {
 		return err
 	}
+	shellLeft, err := exploreShell(criuDirLeft, expLeft)
+	if err != nil {
+		return err
+	}
+	shellRight, err := exploreShell(criuDirRight, expRight)
+	if err != nil {
+		return err
+	}
+	*shellChanges = diffShell(shellLeft, shellRight)
 
 	for pidLeft, infoLeft := range expLeft {
 		infoRight, exists := expRight[pidLeft]
@@ -1124,6 +1136,7 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 				Records:   []DiffFileRecord{},
 			},
 			Processes: []DiffProcRecord{},
+			Shell:     ShellDiff{Records: []ShellChange{}},
 		}
 		data, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
@@ -1151,9 +1164,10 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 
 	// The filesystem and process diffs share nothing and run concurrently.
 	detectedProc := make([]DiffProcRecord, 0)
+	detectedShell := []ShellChange{}
 	procDone := make(chan error, 1)
 	go func() {
-		procDone <- m.getProcDiff(ckptIDFirst, ckptIDSecond, &detectedProc)
+		procDone <- m.getProcDiff(ckptIDFirst, ckptIDSecond, &detectedProc, &detectedShell)
 	}()
 	detectedFS, fsErr := m.getFSDiff(d, normalizedTargetDir)
 	procErr := <-procDone
@@ -1185,6 +1199,7 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 			Records:   detectedFS,
 		},
 		Processes: detectedProc,
+		Shell:     ShellDiff{Records: detectedShell},
 	}
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
