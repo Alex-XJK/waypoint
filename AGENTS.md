@@ -228,7 +228,7 @@ Choose validation for the affected behavior:
   `sudo ./scripts/test-ns-last-pid.sh` (new pids after checkpoint, fork, and a
   second-generation fork stay above the restored tree's).
 - For changes to dumps, restores, or `chain.go`, also run
-  `sudo ./scripts/membench.sh` with `INCREMENTAL="0 1"`: it times checkpoints,
+  `sudo ./scripts/bench-memory.sh` with `INCREMENTAL="0 1"`: it times checkpoints,
   snapshots, and forks against a memory-heavy holder, with incremental dumps off
   and on, and asserts the holder's state after every chain. `MEM_MB=128 DEPTH=4
   FORKS=2 PATTERNS=random` is a quick check.
@@ -237,7 +237,7 @@ Choose validation for the affected behavior:
 - `sudo ./scripts/test-search-workflow.sh` adds an offline Dockerfile build, file
   transfer, concurrent branching, recursive snapshots/backtracking, export, and
   cleanup workload. Its header documents prerequisites and scaling options.
-- `sudo ./scripts/benchmark.sh` times each basic operation (median/min/max ms) for
+- `sudo ./scripts/bench-basic.sh` times each basic operation (median/min/max ms) for
   comparing hosts or spotting performance regressions; it asserts no behavior
   beyond success and cleanup.
 - Run Waypoint runtime operations as root through `sudo` or a root test harness.
@@ -280,3 +280,6 @@ next one.
   - The README (the `full_dump_ratio` paragraphs and the sessions-dir tree) and
     `docs/architecture.md` (the `chain.go` entry and the file list) still describe
     the v0.8.0 rule.
+- **Benchmark scripts.** They are named `bench-*.sh`: `scripts/benchmark.sh` is now
+  `scripts/bench-basic.sh` and `scripts/membench.sh` is `scripts/bench-memory.sh`.
+  The README still names `scripts/benchmark.sh`.
