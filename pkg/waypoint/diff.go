@@ -294,7 +294,18 @@ func processNonDirMod(view *fsView, containerViewPath string, bufs *compareBufs,
 	return nil
 }
 
-func recurseSideChangeType(view *fsView, s side, containerViewPath string, detected *[]DiffFileRecord, changeType ChangeType) error {
+// recurseSideChangeType reports the entry at containerViewPath, and everything
+// below it, as changeType. mode is the entry's type from its directory listing.
+func recurseSideChangeType(view *fsView, s side, containerViewPath string, mode fs.FileMode, detected *[]DiffFileRecord, changeType ChangeType) error {
+	if !mode.IsDir() {
+		*detected = append(*detected, DiffFileRecord{
+			Path:       containerViewPath,
+			ChangeType: changeType,
+			FileType:   getFileType(mode),
+		})
+		return nil
+	}
+
 	rootViewPath, err := cleanRootPath(containerViewPath)
 	if err != nil {
 		return err
@@ -303,21 +314,6 @@ func recurseSideChangeType(view *fsView, s side, containerViewPath string, detec
 	if err != nil {
 		return err
 	}
-
-	info, err := root.Lstat(rootViewPath)
-	if err != nil {
-		return fmt.Errorf("lstat %s: %w", rootViewPath, err)
-	}
-	if !info.IsDir() {
-		fileType := getFileType(info.Mode())
-		*detected = append(*detected, DiffFileRecord{
-			Path:       containerViewPath,
-			ChangeType: changeType,
-			FileType:   fileType,
-		})
-		return nil
-	}
-
 	dir, err := root.Open(rootViewPath)
 	if err != nil {
 		return fmt.Errorf("open directory %s: %w", rootViewPath, err)
@@ -332,7 +328,7 @@ func recurseSideChangeType(view *fsView, s side, containerViewPath string, detec
 	}
 	for _, dentry := range dentries {
 		containerViewSubpath := filepath.Join(containerViewPath, dentry.Name())
-		if err := recurseSideChangeType(view, s, containerViewSubpath, detected, changeType); err != nil {
+		if err := recurseSideChangeType(view, s, containerViewSubpath, dentry.Type(), detected, changeType); err != nil {
 			return err
 		}
 	}
@@ -478,7 +474,7 @@ func walkDir(view *fsView, pool *comparePool, containerViewDir string, detected 
 		rightDentry, exists := rightNameMap[name]
 		if !exists {
 			// Left-only entry -> deleted
-			if err := recurseSideChangeType(view, LeftSide, containerViewSubpath, detected, ChangeTypeDeleted); err != nil {
+			if err := recurseSideChangeType(view, LeftSide, containerViewSubpath, leftDentry.Type(), detected, ChangeTypeDeleted); err != nil {
 				return err
 			}
 			continue
@@ -512,11 +508,11 @@ func walkDir(view *fsView, pool *comparePool, containerViewDir string, detected 
 			})
 			// collect directory side descendents
 			if leftDentry.IsDir() {
-				if err := recurseSideChangeType(view, LeftSide, containerViewSubpath, detected, ChangeTypeDeleted); err != nil {
+				if err := recurseSideChangeType(view, LeftSide, containerViewSubpath, fs.ModeDir, detected, ChangeTypeDeleted); err != nil {
 					return err
 				}
 			} else {
-				if err := recurseSideChangeType(view, RightSide, containerViewSubpath, detected, ChangeTypeAdded); err != nil {
+				if err := recurseSideChangeType(view, RightSide, containerViewSubpath, fs.ModeDir, detected, ChangeTypeAdded); err != nil {
 					return err
 				}
 			}
@@ -531,12 +527,12 @@ func walkDir(view *fsView, pool *comparePool, containerViewDir string, detected 
 		}
 	}
 	// Right-only entries -> added
-	for name := range rightNameMap {
+	for name, rightDentry := range rightNameMap {
 		if _, exists := leftNameMap[name]; exists {
 			continue
 		}
 		containerViewSubpath := filepath.Join(containerViewDir, name)
-		if err := recurseSideChangeType(view, RightSide, containerViewSubpath, detected, ChangeTypeAdded); err != nil {
+		if err := recurseSideChangeType(view, RightSide, containerViewSubpath, rightDentry.Type(), detected, ChangeTypeAdded); err != nil {
 			return err
 		}
 		continue
@@ -1057,11 +1053,11 @@ func (m *Manager) getFSDiff(d *DiffFS, normalizedTargetDir string) ([]DiffFileRe
 	case !leftExists && !rightExists:
 		// target dne so no diff
 	case leftExists && !rightExists:
-		if err := recurseSideChangeType(&view, LeftSide, normalizedTargetDir, &detectedFS, ChangeTypeDeleted); err != nil {
+		if err := recurseSideChangeType(&view, LeftSide, normalizedTargetDir, fs.ModeDir, &detectedFS, ChangeTypeDeleted); err != nil {
 			return nil, err
 		}
 	case !leftExists && rightExists:
-		if err := recurseSideChangeType(&view, RightSide, normalizedTargetDir, &detectedFS, ChangeTypeAdded); err != nil {
+		if err := recurseSideChangeType(&view, RightSide, normalizedTargetDir, fs.ModeDir, &detectedFS, ChangeTypeAdded); err != nil {
 			return nil, err
 		}
 	default:

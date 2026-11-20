@@ -446,6 +446,58 @@ func TestWalkFS(t *testing.T) {
 	}
 }
 
+// One-sided entries take their file type from the directory listing.
+func TestWalkFSReportsTypesOfOneSidedEntries(t *testing.T) {
+	leftPath, rightPath := t.TempDir(), t.TempDir()
+	createTestTree(t, leftPath, []string{"/app"}, nil)
+	createTestTree(t, rightPath, []string{"/app/new/empty"}, map[string]string{
+		"/app/new/file.txt":      "x",
+		"/app/new/deep/file.txt": "y",
+	})
+	if err := os.Symlink("file.txt", filepath.Join(rightPath, "app/new/link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(filepath.Join(rightPath, "app/new/pipe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]FileType{
+		"/app/new/file.txt":      FileTypeRegular,
+		"/app/new/deep/file.txt": FileTypeRegular,
+		"/app/new/link":          FileTypeSymlink,
+		"/app/new/pipe":          FileTypeFIFO,
+	}
+	for _, tc := range []struct {
+		left, right string
+		change      ChangeType
+	}{{leftPath, rightPath, ChangeTypeAdded}, {rightPath, leftPath, ChangeTypeDeleted}} {
+		leftRoot, err := os.OpenRoot(tc.left)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer leftRoot.Close()
+		rightRoot, err := os.OpenRoot(tc.right)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rightRoot.Close()
+		view := &fsView{leftRoot: leftRoot, rightRoot: rightRoot, dirsWithCandidates: map[string]struct{}{"/app": {}}}
+		var detected []DiffFileRecord
+		if err := walkFS(view, "/", &detected); err != nil {
+			t.Fatalf("walkFS: %v", err)
+		}
+		got := map[string]FileType{}
+		for _, r := range detected {
+			if r.ChangeType != tc.change {
+				t.Errorf("%s: change type %s, want %s", r.Path, r.ChangeType, tc.change)
+			}
+			got[r.Path] = r.FileType
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s records:\n got: %v\nwant: %v", tc.change, got, want)
+		}
+	}
+}
+
 func setCompareWorkers(t *testing.T, n int) {
 	t.Helper()
 	prev := compareWorkers
