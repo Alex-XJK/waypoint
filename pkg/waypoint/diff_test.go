@@ -3,6 +3,7 @@ package waypoint
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -443,6 +444,38 @@ func TestWalkFS(t *testing.T) {
 
 			assertDiffRecords(t, detected, tt.want)
 		})
+	}
+}
+
+func TestListDirReturnsEntryTypes(t *testing.T) {
+	path := t.TempDir()
+	createTestTree(t, path, []string{"/app/sub"}, map[string]string{"/app/file": "x"})
+	if err := os.Symlink("sub", filepath.Join(path, "app/link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(filepath.Join(path, "app/pipe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	got, err := listDir(root, "app")
+	if err != nil {
+		t.Fatalf("listDir: %v", err)
+	}
+	want := map[string]fs.FileMode{"sub": fs.ModeDir, "file": 0, "link": fs.ModeSymlink, "pipe": fs.ModeNamedPipe}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("listDir = %v, want %v", got, want)
+	}
+	// Listing twice reads the directory from the start both times.
+	if again, err := listDir(root, "app"); err != nil || !reflect.DeepEqual(again, want) {
+		t.Errorf("second listDir = %v, %v", again, err)
+	}
+	if _, err := listDir(root, "missing"); err == nil {
+		t.Error("listDir of a missing directory succeeded")
 	}
 }
 

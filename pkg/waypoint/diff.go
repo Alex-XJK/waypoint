@@ -314,25 +314,43 @@ func recurseSideChangeType(view *fsView, s side, containerViewPath string, mode 
 	if err != nil {
 		return err
 	}
-	dir, err := root.Open(rootViewPath)
+	entries, err := listDir(root, rootViewPath)
 	if err != nil {
-		return fmt.Errorf("open directory %s: %w", rootViewPath, err)
+		return err
 	}
-	dentries, readErr := dir.ReadDir(-1)
-	closeErr := dir.Close()
-	if readErr != nil {
-		return fmt.Errorf("read directory %s: %w", rootViewPath, readErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close directory %s: %w", rootViewPath, closeErr)
-	}
-	for _, dentry := range dentries {
-		containerViewSubpath := filepath.Join(containerViewPath, dentry.Name())
-		if err := recurseSideChangeType(view, s, containerViewSubpath, dentry.Type(), detected, changeType); err != nil {
+	for name, entryMode := range entries {
+		containerViewSubpath := filepath.Join(containerViewPath, name)
+		if err := recurseSideChangeType(view, s, containerViewSubpath, entryMode, detected, changeType); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// listDir returns the type bits of each entry of a directory in root. ReadDir
+// on a file opened in a Root stats every entry, so the listing reads a
+// duplicate of the descriptor, which takes the types from the directory itself.
+func listDir(root *os.Root, rootViewDir string) (map[string]fs.FileMode, error) {
+	dir, err := root.Open(rootViewDir)
+	if err != nil {
+		return nil, fmt.Errorf("open directory %s: %w", rootViewDir, err)
+	}
+	defer dir.Close()
+	fd, err := unix.FcntlInt(dir.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("duplicate descriptor of directory %s: %w", rootViewDir, err)
+	}
+	plain := os.NewFile(uintptr(fd), dir.Name())
+	defer plain.Close()
+	dentries, err := plain.ReadDir(-1)
+	if err != nil {
+		return nil, fmt.Errorf("read directory %s: %w", rootViewDir, err)
+	}
+	entries := make(map[string]fs.FileMode, len(dentries))
+	for _, dentry := range dentries {
+		entries[dentry.Name()] = dentry.Type()
+	}
+	return entries, nil
 }
 
 // compareWorkers is the number of goroutines that compare candidate files.
@@ -434,52 +452,26 @@ func walkDir(view *fsView, pool *comparePool, containerViewDir string, detected 
 	if err != nil {
 		return err
 	}
-	leftDir, err := view.leftRoot.Open(rootViewDir)
+	leftEntries, err := listDir(view.leftRoot, rootViewDir)
 	if err != nil {
-		return fmt.Errorf("open left directory %s: %w", rootViewDir, err)
+		return fmt.Errorf("left side: %w", err)
 	}
-	leftEntries, readErr := leftDir.ReadDir(-1)
-	closeErr := leftDir.Close()
-	if readErr != nil {
-		return fmt.Errorf("read left directory %s: %w", rootViewDir, readErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close left directory %s: %w", rootViewDir, closeErr)
-	}
-
-	rightDir, err := view.rightRoot.Open(rootViewDir)
+	rightEntries, err := listDir(view.rightRoot, rootViewDir)
 	if err != nil {
-		return fmt.Errorf("open right directory %s: %w", rootViewDir, err)
-	}
-	rightEntries, readErr := rightDir.ReadDir(-1)
-	closeErr = rightDir.Close()
-	if readErr != nil {
-		return fmt.Errorf("read right directory %s: %w", rootViewDir, readErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close right directory %s: %w", rootViewDir, closeErr)
+		return fmt.Errorf("right side: %w", err)
 	}
 
-	leftNameMap := make(map[string]os.DirEntry, len(leftEntries))
-	for _, entry := range leftEntries {
-		leftNameMap[entry.Name()] = entry
-	}
-	rightNameMap := make(map[string]os.DirEntry, len(rightEntries))
-	for _, entry := range rightEntries {
-		rightNameMap[entry.Name()] = entry
-	}
-
-	for name, leftDentry := range leftNameMap {
+	for name, leftMode := range leftEntries {
 		containerViewSubpath := filepath.Join(containerViewDir, name)
-		rightDentry, exists := rightNameMap[name]
+		rightMode, exists := rightEntries[name]
 		if !exists {
 			// Left-only entry -> deleted
-			if err := recurseSideChangeType(view, LeftSide, containerViewSubpath, leftDentry.Type(), detected, ChangeTypeDeleted); err != nil {
+			if err := recurseSideChangeType(view, LeftSide, containerViewSubpath, leftMode, detected, ChangeTypeDeleted); err != nil {
 				return err
 			}
 			continue
 		}
-		if leftDentry.IsDir() && rightDentry.IsDir() {
+		if leftMode.IsDir() && rightMode.IsDir() {
 			_, exists := view.dirsWithCandidates[containerViewSubpath]
 			if exists {
 				// both directories and present in an unshared layer -> recurse
@@ -490,13 +482,13 @@ func walkDir(view *fsView, pool *comparePool, containerViewDir string, detected 
 			continue
 		}
 		// Just one side is directory
-		if leftDentry.IsDir() != rightDentry.IsDir() {
+		if leftMode.IsDir() != rightMode.IsDir() {
 			var fromFileType, toFileType FileType
-			if leftDentry.IsDir() {
+			if leftMode.IsDir() {
 				fromFileType = FileTypeDir
-				toFileType = getFileType(rightDentry.Type())
+				toFileType = getFileType(rightMode)
 			} else {
-				fromFileType = getFileType(leftDentry.Type())
+				fromFileType = getFileType(leftMode)
 				toFileType = FileTypeDir
 			}
 			*detected = append(*detected, DiffFileRecord{
@@ -507,7 +499,7 @@ func walkDir(view *fsView, pool *comparePool, containerViewDir string, detected 
 				ToFileType:   toFileType,
 			})
 			// collect directory side descendents
-			if leftDentry.IsDir() {
+			if leftMode.IsDir() {
 				if err := recurseSideChangeType(view, LeftSide, containerViewSubpath, fs.ModeDir, detected, ChangeTypeDeleted); err != nil {
 					return err
 				}
@@ -527,12 +519,12 @@ func walkDir(view *fsView, pool *comparePool, containerViewDir string, detected 
 		}
 	}
 	// Right-only entries -> added
-	for name, rightDentry := range rightNameMap {
-		if _, exists := leftNameMap[name]; exists {
+	for name, rightMode := range rightEntries {
+		if _, exists := leftEntries[name]; exists {
 			continue
 		}
 		containerViewSubpath := filepath.Join(containerViewDir, name)
-		if err := recurseSideChangeType(view, RightSide, containerViewSubpath, rightDentry.Type(), detected, ChangeTypeAdded); err != nil {
+		if err := recurseSideChangeType(view, RightSide, containerViewSubpath, rightMode, detected, ChangeTypeAdded); err != nil {
 			return err
 		}
 		continue
