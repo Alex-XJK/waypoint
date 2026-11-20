@@ -446,6 +446,98 @@ func TestWalkFS(t *testing.T) {
 	}
 }
 
+func setCompareWorkers(t *testing.T, n int) {
+	t.Helper()
+	prev := compareWorkers
+	t.Cleanup(func() { compareWorkers = prev })
+	compareWorkers = n
+}
+
+// Every candidate is compared exactly once, whatever the number of workers.
+func TestWalkFSComparesEveryCandidate(t *testing.T) {
+	leftFiles, rightFiles := map[string]string{}, map[string]string{}
+	candidates, dirs := map[string]struct{}{}, map[string]struct{}{}
+	var want []expectedDiff
+	for i := 0; i < 600; i++ {
+		dir := fmt.Sprintf("/app/d%02d", i%20)
+		path := fmt.Sprintf("%s/f%03d.txt", dir, i)
+		dirs["/app"], dirs[dir] = struct{}{}, struct{}{}
+		candidates[path] = struct{}{}
+		leftFiles[path] = fmt.Sprintf("content %d", i)
+		rightFiles[path] = leftFiles[path]
+		if i%3 == 0 {
+			rightFiles[path] = fmt.Sprintf("changed %d", i)
+			want = append(want, expectedDiff{path: path, changeType: ChangeTypeModified})
+		}
+	}
+	leftPath, rightPath := t.TempDir(), t.TempDir()
+	createTestTree(t, leftPath, nil, leftFiles)
+	createTestTree(t, rightPath, nil, rightFiles)
+	leftRoot, err := os.OpenRoot(leftPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer leftRoot.Close()
+	rightRoot, err := os.OpenRoot(rightPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rightRoot.Close()
+
+	for _, workers := range []int{1, 3, 16} {
+		t.Run(fmt.Sprintf("workers_%d", workers), func(t *testing.T) {
+			setCompareWorkers(t, workers)
+			view := &fsView{leftRoot: leftRoot, rightRoot: rightRoot, candidates: candidates, dirsWithCandidates: dirs}
+			var detected []DiffFileRecord
+			if err := walkFS(view, "/", &detected); err != nil {
+				t.Fatalf("walkFS: %v", err)
+			}
+			assertDiffRecords(t, detected, want)
+		})
+	}
+}
+
+func TestComparePoolReturnsFirstError(t *testing.T) {
+	leftPath, rightPath := t.TempDir(), t.TempDir()
+	files := map[string]string{}
+	for i := 0; i < 100; i++ {
+		files[fmt.Sprintf("/f%03d", i)] = "same"
+	}
+	createTestTree(t, leftPath, nil, files)
+	createTestTree(t, rightPath, nil, files)
+	leftRoot, err := os.OpenRoot(leftPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer leftRoot.Close()
+	rightRoot, err := os.OpenRoot(rightPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rightRoot.Close()
+
+	pool := newComparePool(&fsView{leftRoot: leftRoot, rightRoot: rightRoot})
+	if err := pool.submit("/missing"); err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	// The queue keeps accepting paths until a worker has failed; none may block.
+	var submitErr error
+	for i := 0; i < 100 && submitErr == nil; i++ {
+		submitErr = pool.submit(fmt.Sprintf("/f%03d", i))
+		time.Sleep(time.Millisecond)
+	}
+	if submitErr == nil || !strings.Contains(submitErr.Error(), "missing") {
+		t.Errorf("submit after a failed comparison = %v, want the error on /missing", submitErr)
+	}
+	records, err := pool.wait()
+	if err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("wait = %v, want the error on /missing", err)
+	}
+	if len(records) != 0 {
+		t.Errorf("records = %v, want none", records)
+	}
+}
+
 // One pair of buffers serves files of any size, in any order.
 func TestAreRegFilesDiffReusesBuffers(t *testing.T) {
 	big := strings.Repeat("0123456789abcdef", 6000) // 96 KB, three chunks

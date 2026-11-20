@@ -13,8 +13,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/checkpoint-restore/go-criu/v8/crit"
@@ -336,11 +339,100 @@ func recurseSideChangeType(view *fsView, s side, containerViewPath string, detec
 	return nil
 }
 
-func walkFS(view *fsView, containerViewDir string, detected *[]DiffFileRecord) error {
-	return walkDir(view, newCompareBufs(), containerViewDir, detected)
+// compareWorkers is the number of goroutines that compare candidate files.
+var compareWorkers = min(runtime.GOMAXPROCS(0), 8)
+
+// compareQueueLen is the number of candidate paths the walk can queue before
+// it waits for the workers.
+const compareQueueLen = 4096
+
+// comparePool compares candidate files on compareWorkers goroutines while the
+// directory walk goes on.
+type comparePool struct {
+	view *fsView
+	jobs chan string
+	wg   sync.WaitGroup
+
+	failed  atomic.Bool
+	mu      sync.Mutex
+	err     error // first error of the walk or of a worker
+	records []DiffFileRecord
 }
 
-func walkDir(view *fsView, bufs *compareBufs, containerViewDir string, detected *[]DiffFileRecord) error {
+func newComparePool(view *fsView) *comparePool {
+	p := &comparePool{view: view, jobs: make(chan string, compareQueueLen)}
+	for i := 0; i < compareWorkers; i++ {
+		p.wg.Add(1)
+		go p.work()
+	}
+	return p
+}
+
+func (p *comparePool) work() {
+	defer p.wg.Done()
+	var bufs *compareBufs
+	var records []DiffFileRecord
+	for path := range p.jobs {
+		if p.failed.Load() {
+			continue // drain the queue
+		}
+		if bufs == nil {
+			bufs = newCompareBufs()
+		}
+		if err := processNonDirMod(p.view, path, bufs, &records); err != nil {
+			p.fail(err)
+		}
+	}
+	p.mu.Lock()
+	p.records = append(p.records, records...)
+	p.mu.Unlock()
+}
+
+// fail records the first error; workers skip the jobs still queued.
+func (p *comparePool) fail(err error) {
+	p.mu.Lock()
+	if p.err == nil {
+		p.err = err
+	}
+	p.mu.Unlock()
+	p.failed.Store(true)
+}
+
+// submit queues a candidate path, waiting while the queue is full. After a
+// failure it returns the first error instead.
+func (p *comparePool) submit(containerViewPath string) error {
+	if p.failed.Load() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.err
+	}
+	p.jobs <- containerViewPath
+	return nil
+}
+
+// wait closes the queue and returns the records of all workers once they are done.
+func (p *comparePool) wait() ([]DiffFileRecord, error) {
+	close(p.jobs)
+	p.wg.Wait()
+	return p.records, p.err
+}
+
+// walkFS appends the differences below containerViewDir to detected, in no
+// particular order.
+func walkFS(view *fsView, containerViewDir string, detected *[]DiffFileRecord) error {
+	pool := newComparePool(view)
+	if err := walkDir(view, pool, containerViewDir, detected); err != nil {
+		pool.fail(err)
+	}
+	compared, err := pool.wait()
+	if err != nil {
+		return err
+	}
+	*detected = append(*detected, compared...)
+	return nil
+}
+
+func walkDir(view *fsView, pool *comparePool, containerViewDir string, detected *[]DiffFileRecord) error {
 	// note: won't follow symlink dirs
 	rootViewDir, err := cleanRootPath(containerViewDir)
 	if err != nil {
@@ -395,7 +487,7 @@ func walkDir(view *fsView, bufs *compareBufs, containerViewDir string, detected 
 			_, exists := view.dirsWithCandidates[containerViewSubpath]
 			if exists {
 				// both directories and present in an unshared layer -> recurse
-				if err := walkDir(view, bufs, containerViewSubpath, detected); err != nil {
+				if err := walkDir(view, pool, containerViewSubpath, detected); err != nil {
 					return err
 				}
 			}
@@ -433,7 +525,7 @@ func walkDir(view *fsView, bufs *compareBufs, containerViewDir string, detected 
 		_, exists = view.candidates[containerViewSubpath]
 		if exists {
 			// Both non-directories and candidates -> check for modification
-			if err = processNonDirMod(view, containerViewSubpath, bufs, detected); err != nil {
+			if err := pool.submit(containerViewSubpath); err != nil {
 				return err
 			}
 		}
