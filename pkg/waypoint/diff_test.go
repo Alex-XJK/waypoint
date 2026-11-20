@@ -52,8 +52,21 @@ func TestCollectCandidateDir(t *testing.T) {
 				"/app/file": {},
 			},
 			expectedDirectories: map[string]struct{}{
-				"/app":      {},
-				"/app/file": {},
+				"/app": {},
+			},
+		},
+		{
+			name: "empty directories",
+			setup: func(t *testing.T, root string) {
+				if err := os.MkdirAll(filepath.Join(root, "app", "data", "nested"), 0755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			expectedCandidates: map[string]struct{}{},
+			expectedDirectories: map[string]struct{}{
+				"/app":             {},
+				"/app/data":        {},
+				"/app/data/nested": {},
 			},
 		},
 		{
@@ -69,8 +82,7 @@ func TestCollectCandidateDir(t *testing.T) {
 				"/app/whiteout": {},
 			},
 			expectedDirectories: map[string]struct{}{
-				"/app":          {},
-				"/app/whiteout": {},
+				"/app": {},
 			},
 		},
 		{
@@ -86,8 +98,7 @@ func TestCollectCandidateDir(t *testing.T) {
 				"/app/whiteout": {},
 			},
 			expectedDirectories: map[string]struct{}{
-				"/app":          {},
-				"/app/whiteout": {},
+				"/app": {},
 			},
 		},
 		{
@@ -122,9 +133,8 @@ func TestCollectCandidateDir(t *testing.T) {
 				"/app/data/file": {},
 			},
 			expectedDirectories: map[string]struct{}{
-				"/app":           {},
-				"/app/data":      {},
-				"/app/data/file": {},
+				"/app":      {},
+				"/app/data": {},
 			},
 		},
 		{
@@ -167,11 +177,9 @@ func TestCollectCandidateDir(t *testing.T) {
 				"/app/whiteout":             {},
 			},
 			expectedDirectories: map[string]struct{}{
-				"/app":                      {},
-				"/app/config":               {},
-				"/app/config/settings.json": {},
-				"/app/whiteout":             {},
-				"/app/data":                 {},
+				"/app":        {},
+				"/app/config": {},
+				"/app/data":   {},
 			},
 		},
 	}
@@ -795,6 +803,91 @@ func TestDiffFSOverlayE2E(t *testing.T) {
 			leftLayers:  []int{0, 1},
 			rightLayers: []int{0, 2},
 			want:        nil,
+		},
+		{
+			name: "replace_directory_keeps_subdir",
+			baseActions: []func(*testing.T, string){
+				func(t *testing.T, root string) {
+					e2eWriteFile(t, root, "/app/data/sub/old.txt", "old")
+					e2eWriteFile(t, root, "/app/data/sub/deeper/older.txt", "older")
+				},
+			},
+			layers: []e2eLayer{
+				{name: "left"},
+				{
+					name: "right",
+					actions: []func(*testing.T, string){
+						func(t *testing.T, root string) {
+							e2eRemove(t, root, "/app/data")
+							e2eMkdir(t, root, "/app/data/sub/deeper")
+						},
+					},
+				},
+			},
+			leftLayers:  []int{0},
+			rightLayers: []int{1},
+			want: []expectedDiff{
+				{path: "/app/data/sub/old.txt", changeType: ChangeTypeDeleted},
+				{path: "/app/data/sub/deeper/older.txt", changeType: ChangeTypeDeleted},
+			},
+		},
+		{
+			name: "remove_then_recreate_in_later_layer",
+			baseActions: []func(*testing.T, string){
+				func(t *testing.T, root string) {
+					e2eWriteFile(t, root, "/app/data/sub/old.txt", "old")
+				},
+			},
+			layers: []e2eLayer{
+				{name: "left"},
+				{
+					name: "remove",
+					actions: []func(*testing.T, string){
+						func(t *testing.T, root string) {
+							e2eRemove(t, root, "/app/data")
+						},
+					},
+				},
+				{
+					name:        "recreate",
+					lowerLayers: []int{1},
+					actions: []func(*testing.T, string){
+						func(t *testing.T, root string) {
+							e2eMkdir(t, root, "/app/data/sub")
+						},
+					},
+				},
+			},
+			leftLayers:  []int{0},
+			rightLayers: []int{1, 2},
+			want: []expectedDiff{
+				{path: "/app/data/sub/old.txt", changeType: ChangeTypeDeleted},
+			},
+		},
+		{
+			name: "recreated_subdir_reversed",
+			baseActions: []func(*testing.T, string){
+				func(t *testing.T, root string) {
+					e2eWriteFile(t, root, "/app/data/sub/old.txt", "old")
+				},
+			},
+			layers: []e2eLayer{
+				{
+					name: "left",
+					actions: []func(*testing.T, string){
+						func(t *testing.T, root string) {
+							e2eRemove(t, root, "/app/data")
+							e2eMkdir(t, root, "/app/data/sub")
+						},
+					},
+				},
+				{name: "right"},
+			},
+			leftLayers:  []int{0},
+			rightLayers: []int{1},
+			want: []expectedDiff{
+				{path: "/app/data/sub/old.txt", changeType: ChangeTypeAdded},
+			},
 		},
 		{
 			name: "later_layer_sees_earlier_delete",

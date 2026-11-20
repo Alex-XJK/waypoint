@@ -104,7 +104,7 @@ type fsView struct {
 	rightRoot              *os.Root
 	containerViewTargetDir string
 	candidates             map[string]struct{} // non directories in unshared layers
-	dirsWithCandidates     map[string]struct{} // directories that are opaque or contain candidates in unshared layers
+	dirsWithCandidates     map[string]struct{} // directories in unshared layers
 }
 
 type side string
@@ -380,7 +380,7 @@ func walkFS(view *fsView, containerViewDir string, detected *[]DiffFileRecord) e
 		if leftDentry.IsDir() && rightDentry.IsDir() {
 			_, exists := view.dirsWithCandidates[containerViewSubpath]
 			if exists {
-				// both directories and contain candidate paths -> recurse
+				// both directories and present in an unshared layer -> recurse
 				if err := walkFS(view, containerViewSubpath, detected); err != nil {
 					return err
 				}
@@ -438,13 +438,9 @@ func walkFS(view *fsView, containerViewDir string, detected *[]DiffFileRecord) e
 	return nil
 }
 
-func (view *fsView) addSelfAncestorDirs(path string) {
-	view.dirsWithCandidates[path] = struct{}{}
-	for dir := filepath.Dir(path); dir != "." && dir != "/"; dir = filepath.Dir(dir) {
-		view.dirsWithCandidates[dir] = struct{}{}
-	}
-}
-
+// collectCandidateDir records one unshared layer: non-directories are candidates,
+// directories are walked. A directory absent from every unshared layer is the
+// same on both sides and is skipped.
 func (view *fsView) collectCandidateDir(hostDirPath, containerDirPath string) error {
 	dentries, err := os.ReadDir(hostDirPath)
 	if err != nil {
@@ -454,28 +450,20 @@ func (view *fsView) collectCandidateDir(hostDirPath, containerDirPath string) er
 		hostDentryPath := filepath.Join(hostDirPath, dentry.Name())
 		containerDentryPath := filepath.Join(containerDirPath, dentry.Name())
 		if dentry.IsDir() {
-			opaque, err := isOpaque(hostDentryPath)
-			if err != nil {
-				return err
-			}
-			if opaque {
-				view.addSelfAncestorDirs(containerDentryPath)
-			}
+			view.dirsWithCandidates[containerDentryPath] = struct{}{}
 			if err := view.collectCandidateDir(hostDentryPath, containerDentryPath); err != nil {
 				return err
 			}
 		} else {
 			view.candidates[containerDentryPath] = struct{}{}
-			view.addSelfAncestorDirs(containerDentryPath)
 		}
 	}
 	return nil
 }
 
 func (m *Manager) getAllCandidates(d *DiffFS, view *fsView) error {
-	// candidates contains non-directory paths from the unshared layer.
-	// dirsWithCandidates are possible directories that need traversal: candidate paths,
-	// their ancestors, and opaque directories.
+	// candidates contains non-directory paths from the unshared layers.
+	// dirsWithCandidates contains the directories of the unshared layers; only these are traversed.
 	view.candidates = make(map[string]struct{})
 	view.dirsWithCandidates = make(map[string]struct{})
 	lastCommonIdx := -1
