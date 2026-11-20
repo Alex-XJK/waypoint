@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -88,6 +89,7 @@ type ProcInfo struct {
 
 type DiffFS struct {
 	overlayDir string
+	lock       *os.File // overlayDir, flocked while the diff runs
 
 	leftOriginalDir  string
 	rightOriginalDir string
@@ -610,9 +612,111 @@ func newDiffFS(m *Manager, overlayDir, leftCkptID, rightCkptID string) (*DiffFS,
 		rightLayerIDs:    rightLowerIDs,
 		leftOriginalDir:  leftOriginalDir,
 		rightOriginalDir: rightOriginalDir,
-		leftMountPoint:   filepath.Join(overlayDir, "left_mount"),
-		rightMountPoint:  filepath.Join(overlayDir, "right_mount"),
+		leftMountPoint:   filepath.Join(overlayDir, diffLeftMount),
+		rightMountPoint:  filepath.Join(overlayDir, diffRightMount),
 	}, nil
+}
+
+const (
+	diffLeftMount  = "left_mount"
+	diffRightMount = "right_mount"
+)
+
+// lockDiffWorkspace opens a workspace dir and takes an exclusive flock on it
+// without waiting. busy reports that a running diff holds the lock; the
+// returned file is then open but not locked.
+func lockDiffWorkspace(dir string) (f *os.File, busy bool, err error) {
+	f, err = os.Open(dir)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return f, true, nil
+		}
+		f.Close()
+		return nil, false, fmt.Errorf("lock %s failed: %w", dir, err)
+	}
+	return f, false, nil
+}
+
+// removeDiffWorkspace unmounts both views and deletes the workspace dir.
+func removeDiffWorkspace(dir string) error {
+	for _, name := range []string{diffRightMount, diffLeftMount} {
+		mountPoint := filepath.Join(dir, name)
+		err := unix.Unmount(mountPoint, unix.MNT_DETACH)
+		if err != nil && !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOENT) {
+			return fmt.Errorf("unmount %s failed: %w", mountPoint, err)
+		}
+	}
+	return os.RemoveAll(dir)
+}
+
+// close removes the workspace and releases its lock. Later calls do nothing.
+func (d *DiffFS) close() {
+	if d.lock == nil {
+		return
+	}
+	_ = removeDiffWorkspace(d.overlayDir)
+	_ = d.lock.Close()
+	d.lock = nil
+}
+
+// claimDiffWorkspace runs under the session lock and returns one of: the cached
+// result, a new locked workspace, or the workspace dir of a running diff.
+func (m *Manager) claimDiffWorkspace(ckptIDFirst, ckptIDSecond, resultPath, workspaceDir string) (*DiffFS, []byte, *os.File, error) {
+	cachedData, err := os.ReadFile(resultPath)
+	if err == nil {
+		// case 1: already have cached result
+		// TODO further validation of cache before try to read?
+		return nil, cachedData, nil, nil
+	} else if !os.IsNotExist(err) {
+		return nil, nil, nil, fmt.Errorf("read cached diff result: %w", err)
+	}
+
+	lock, busy, err := lockDiffWorkspace(workspaceDir)
+	if err == nil {
+		if busy {
+			// case 2: a diff on this target is running
+			return nil, nil, lock, nil
+		}
+		// case 3: workspace left by an interrupted diff -> remove it, then as case 4
+		err := removeDiffWorkspace(workspaceDir)
+		lock.Close()
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("remove interrupted diff workspace %s: %w", workspaceDir, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, nil, nil, err
+	}
+
+	// case 4: no workspace on this target -> create and lock one
+	d, err := newDiffFS(m, workspaceDir, ckptIDFirst, ckptIDSecond)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(workspaceDir), 0o755); err != nil {
+		return nil, nil, nil, fmt.Errorf("mkdir %s failed: %w", filepath.Dir(workspaceDir), err)
+	}
+	if err := os.Mkdir(workspaceDir, 0o700); err != nil {
+		return nil, nil, nil, fmt.Errorf("mkdir %s failed: %w", workspaceDir, err)
+	}
+	d.lock, busy, err = lockDiffWorkspace(workspaceDir)
+	if err == nil && busy {
+		d.lock.Close()
+		err = fmt.Errorf("new diff workspace %s is locked", workspaceDir)
+	}
+	if err != nil {
+		_ = os.RemoveAll(workspaceDir)
+		return nil, nil, nil, err
+	}
+	for _, dir := range []string{d.leftMountPoint, d.rightMountPoint} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			d.close()
+			return nil, nil, nil, fmt.Errorf("mkdir %s failed: %w", dir, err)
+		}
+	}
+	return d, nil, nil, nil
 }
 
 func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir string) (*DiffFS, []byte, error) {
@@ -627,62 +731,28 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 		return nil, nil, err
 	}
 
-	var cachedData []byte
 	var d *DiffFS
-	if err := m.withSessionLock(func() error {
-		_, errCkpt := os.Stat(ckptsDiffDir)
-		_, errTemp := os.Stat(targetTempDir)
-		_, errRes := os.Stat(targetCacheResult)
-		if errRes == nil {
-			// case 1: already have cached result
-			// TODO further validation of cache before try to read?
+	for d == nil {
+		var cachedData []byte
+		var running *os.File
+		if err := m.withSessionLock(func() error {
 			var err error
-			cachedData, err = os.ReadFile(targetCacheResult)
-			if err != nil {
-				return fmt.Errorf("read cached diff result: %w", err)
-			}
-			return nil
-		} else if !os.IsNotExist(errRes) {
-			return errRes
-		}
-		if errTemp == nil {
-			// case 2: have temp dir for this target but no result yet -> computation may already in progress, fail
-			// TODO how to handle when computation interrupted, so don't have diff, but target temp dir not cleaned up
-			return fmt.Errorf("diff workspace %s on target %s already exists but results json not found", targetTempDir, normalizedTargetDir)
-		} else if !os.IsNotExist(errTemp) {
-			return errTemp
-		}
-		if errCkpt != nil {
-			if os.IsNotExist(errCkpt) {
-				// case 3: don't have any diffs on these ckpts yet
-				if err := os.MkdirAll(ckptsDiffDir, 0o755); err != nil {
-					return fmt.Errorf("mkdir %s failed: %w", ckptsDiffDir, err)
-				}
-			} else {
-				return errCkpt
-			}
-		}
-		newD, err := newDiffFS(m, targetTempDir, ckptIDFirst, ckptIDSecond)
-		if err != nil {
+			d, cachedData, running, err = m.claimDiffWorkspace(ckptIDFirst, ckptIDSecond, targetCacheResult, targetTempDir)
 			return err
+		}); err != nil {
+			return nil, nil, err
 		}
-		d = newD
-		// case 3,4: have ckpt diff dir, but not yet on this target
-		if err := os.Mkdir(targetTempDir, 0o700); err != nil {
-			return fmt.Errorf("mkdir %s failed: %w", targetTempDir, err)
+		if cachedData != nil {
+			return nil, cachedData, nil
 		}
-		for _, dir := range []string{d.leftMountPoint, d.rightMountPoint} {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				_ = os.RemoveAll(targetTempDir)
-				return fmt.Errorf("mkdir %s failed: %w", dir, err)
+		if running != nil {
+			// Wait for the running diff, then look for its result.
+			err := unix.Flock(int(running.Fd()), unix.LOCK_SH)
+			running.Close()
+			if err != nil {
+				return nil, nil, fmt.Errorf("wait for the running diff in %s: %w", targetTempDir, err)
 			}
 		}
-		return nil
-	}); err != nil {
-		return nil, nil, err
-	}
-	if cachedData != nil {
-		return nil, cachedData, nil
 	}
 
 	// Mount
@@ -692,14 +762,13 @@ func (m *Manager) setupDiffFS(ckptIDFirst, ckptIDSecond, normalizedTargetDir str
 
 	optionsLeft := fmt.Sprintf("lowerdir=%s", strings.Join(leftOverlayLowers, ":"))
 	if err := unix.Mount("overlay", d.leftMountPoint, "overlay", unix.MS_RDONLY, optionsLeft); err != nil {
-		_ = os.RemoveAll(d.overlayDir)
+		d.close()
 		return nil, nil, fmt.Errorf("mount overlay at %s failed: %w", d.leftMountPoint, err)
 	}
 
 	optionsRight := fmt.Sprintf("lowerdir=%s", strings.Join(rightOverlayLowers, ":"))
 	if err := unix.Mount("overlay", d.rightMountPoint, "overlay", unix.MS_RDONLY, optionsRight); err != nil {
-		_ = unix.Unmount(d.leftMountPoint, unix.MNT_DETACH)
-		_ = os.RemoveAll(d.overlayDir)
+		d.close()
 		return nil, nil, fmt.Errorf("mount overlay at %s failed: %w", d.rightMountPoint, err)
 	}
 
@@ -902,11 +971,7 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 		return nil
 	}
 
-	defer func() {
-		_ = unix.Unmount(d.rightMountPoint, unix.MNT_DETACH)
-		_ = unix.Unmount(d.leftMountPoint, unix.MNT_DETACH)
-		_ = os.RemoveAll(d.overlayDir)
-	}()
+	defer d.close()
 
 	// TODO: openroot will report error on absolute symlinks (doesn't resolve as relative to container root)
 	leftRoot, err := os.OpenRoot(d.leftMountPoint)
@@ -993,6 +1058,8 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 	}); err != nil {
 		return err
 	}
+	// Diffs waiting on this workspace go on once it is closed, before stdout is read.
+	d.close()
 	if _, err := os.Stdout.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("write diff result to stdout: %w", err)
 	}

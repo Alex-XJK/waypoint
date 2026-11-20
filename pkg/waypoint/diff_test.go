@@ -1339,6 +1339,122 @@ func TestComputeResultPathSkipsOldFormatResults(t *testing.T) {
 	}
 }
 
+// newDiffWorkspaceManager returns a manager with ready checkpoints A and B and
+// the result and workspace paths of diff A B on /.
+func newDiffWorkspaceManager(t *testing.T) (m *Manager, resultPath, workspaceDir string) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("removing a diff workspace unmounts its views, which requires root")
+	}
+	base := t.TempDir()
+	m = &Manager{baseDir: base, metadataDir: filepath.Join(base, "metadata"), originalDir: filepath.Join(base, "original")}
+	for _, id := range []string{"A", "B"} {
+		if err := m.saveMetadata(id, Metadata{ID: id, Status: CheckpointStatusReady}); err != nil {
+			t.Fatalf("saveMetadata(%s): %v", id, err)
+		}
+	}
+	pairDir := m.diffDir(computeCkptsDiffID("A", "B"))
+	resultPath, err := computeResultPath(pairDir, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceDir, err = computeTargetTempDir(pairDir, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m, resultPath, workspaceDir
+}
+
+func TestClaimDiffWorkspaceOneOwnerAtATime(t *testing.T) {
+	m, resultPath, workspaceDir := newDiffWorkspaceManager(t)
+
+	owner, cached, running, err := m.claimDiffWorkspace("A", "B", resultPath, workspaceDir)
+	if err != nil || owner == nil || cached != nil || running != nil {
+		t.Fatalf("first claim = (%v, %q, %v, %v), want a workspace", owner, cached, running, err)
+	}
+	for _, dir := range []string{owner.leftMountPoint, owner.rightMountPoint} {
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			t.Fatalf("mount point %s not created: %v", dir, err)
+		}
+	}
+
+	second, cached, running, err := m.claimDiffWorkspace("A", "B", resultPath, workspaceDir)
+	if err != nil || second != nil || cached != nil || running == nil {
+		t.Fatalf("claim during a running diff = (%v, %q, %v, %v), want the running workspace", second, cached, running, err)
+	}
+	if _, err := os.Stat(workspaceDir); err != nil {
+		t.Fatalf("the running diff's workspace was removed: %v", err)
+	}
+
+	// A waiter gets the shared lock once the owner is done.
+	waited := make(chan error, 1)
+	go func() { waited <- unix.Flock(int(running.Fd()), unix.LOCK_SH) }()
+	select {
+	case err := <-waited:
+		t.Fatalf("waiter got the lock (err=%v) while the diff was running", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := atomicWriteFile(resultPath, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	owner.close()
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Fatalf("waiter: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("waiter still blocked after the owner finished")
+	}
+	running.Close()
+	if _, err := os.Stat(workspaceDir); !os.IsNotExist(err) {
+		t.Fatalf("workspace still present after close: err=%v", err)
+	}
+
+	third, cached, running, err := m.claimDiffWorkspace("A", "B", resultPath, workspaceDir)
+	if err != nil || third != nil || string(cached) != "{}" || running != nil {
+		t.Fatalf("claim after the diff finished = (%v, %q, %v, %v), want the cached result", third, cached, running, err)
+	}
+}
+
+func TestClaimDiffWorkspaceReplacesInterruptedRun(t *testing.T) {
+	m, resultPath, workspaceDir := newDiffWorkspaceManager(t)
+
+	// What a killed diff leaves: the workspace without a lock holder or a result.
+	leftover := filepath.Join(workspaceDir, diffLeftMount, "leftover")
+	if err := os.MkdirAll(leftover, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	d, cached, running, err := m.claimDiffWorkspace("A", "B", resultPath, workspaceDir)
+	if err != nil || d == nil || cached != nil || running != nil {
+		t.Fatalf("claim = (%v, %q, %v, %v), want a new workspace", d, cached, running, err)
+	}
+	defer d.close()
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("content of the interrupted workspace survived: err=%v", err)
+	}
+	f, busy, err := lockDiffWorkspace(workspaceDir)
+	if err != nil || !busy {
+		t.Fatalf("new workspace is not locked: busy=%v err=%v", busy, err)
+	}
+	f.Close()
+}
+
+func TestClaimDiffWorkspaceRefusesCheckpointNotReady(t *testing.T) {
+	m, resultPath, workspaceDir := newDiffWorkspaceManager(t)
+	if err := m.saveMetadata("B", Metadata{ID: "B", Status: CheckpointStatusFailed}); err != nil {
+		t.Fatal(err)
+	}
+	if d, _, _, err := m.claimDiffWorkspace("A", "B", resultPath, workspaceDir); err == nil {
+		d.close()
+		t.Fatal("claim succeeded on a failed checkpoint")
+	}
+	if _, err := os.Stat(workspaceDir); !os.IsNotExist(err) {
+		t.Fatalf("workspace created for a refused diff: err=%v", err)
+	}
+}
+
 func TestExplorePsFlatReadsEveryProcess(t *testing.T) {
 	dir := t.TempDir()
 	writeProcImages(t, dir, []ProcInfo{

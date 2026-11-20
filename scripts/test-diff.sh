@@ -88,6 +88,8 @@ start_job() {
     sed -n 's/^pid=//p'
 }
 fails() { ! "$@"; }
+# no_mount_under <dir>: true when nothing is mounted below dir.
+no_mount_under() { ! awk -v w="$1" 'index($5, w "/") == 1 {found = 1} END {exit !found}' /proc/self/mountinfo; }
 
 # ---------------------------------------------------------------------------
 say "Environment checks"
@@ -257,6 +259,25 @@ rm -f "$DDIR"/result-v*-"$KEY".json
 echo '{"from": "old-format"}' >"$DDIR/result-$KEY.json"
 check "diff exits 0 next to a result without a version" diff_to ab3 A B --dir /data
 check "a result without a version is not reused" cmp -s "$OUT/ab.json" "$OUT/ab3.json"
+
+# What a killed diff leaves: its workspace, here with one view still mounted.
+rm -f "$DDIR"/result-v*-"$KEY".json
+mkdir -p "$DDIR/temp-$KEY"/{left_mount,right_mount}
+mount -t overlay overlay -o "ro,lowerdir=$ROOTFS/data:$ROOTFS/bin" "$DDIR/temp-$KEY/left_mount"
+check "diff exits 0 after an interrupted run" diff_to ab4 A B --dir /data
+check "the result after an interrupted run is the same" cmp -s "$OUT/ab.json" "$OUT/ab4.json"
+check "the interrupted run's workspace is removed" [ ! -e "$DDIR/temp-$KEY" ]
+check "the interrupted run's mount is gone" no_mount_under "$DDIR"
+check "files behind that mount are kept" [ -f "$ROOTFS/data/same.txt" ]
+
+rm -f "$DDIR"/result-v*-"$KEY".json
+PIDS=""; DONE=0
+for i in 1 2 3 4 5 6; do diff_to "par$i" A B --dir /data & PIDS="$PIDS $!"; done
+for p in $PIDS; do wait "$p" && DONE=$((DONE+1)); done
+check "6 concurrent diffs of one pair all exit 0" [ "$DONE" -eq 6 ]
+SAME=0
+for i in 1 2 3 4 5 6; do cmp -s "$OUT/ab.json" "$OUT/par$i.json" && SAME=$((SAME+1)); done
+check "6 concurrent diffs print the same result" [ "$SAME" -eq 6 ]
 
 "$W" cleanup "$SESSION" >/dev/null
 SESSION=""
