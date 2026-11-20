@@ -68,7 +68,6 @@ has_record() { [ "$(record "$1" "$2")" = "$3" ]; }
 no_record() { [ -z "$(record "$1" "$2")" ]; }
 any_record() { [ -n "$(record "$1" "$2")" ]; }
 records_contain() { grep -q "$2" "$OUT/$1.json"; }
-not_only_added() { local r; r="$(record "$1" "$2")"; [ -n "$r" ] && [ "$r" != "added regular" ]; }
 # proc <name> <pid>: prints the change_type of the process record for pid.
 proc() {
   python3 - "$OUT/$1.json" "$2" <<'EOF' 2>/dev/null
@@ -176,10 +175,11 @@ check "new file in a subdirectory: /data/sub/new2 added" has_record ab /data/sub
 check "same-content rewrite: no record for /data/same.txt" no_record ab /data/same.txt
 check "created then deleted: no record for /data/gone.txt" no_record ab /data/gone.txt
 check "touch only: no record for /data/sub/keep" no_record ab /data/sub/keep
-later "new empty directory: /data/emptydir reported" any_record ab /data/emptydir
-later "chmod on a directory: /data/dirperm reported" any_record ab /data/dirperm
-later "empty directory replaced by a file: /data/todir reported as more than added" \
-  not_only_added ab /data/todir
+check "new empty directory: /data/emptydir added" has_record ab /data/emptydir "added directory"
+check "chmod on a directory: /data/dirperm metadata" has_record ab /data/dirperm "metadata directory"
+check "empty directory replaced by a file: /data/todir is a type change" \
+  has_record ab /data/todir "modified modified"
+check "the target directory itself is not reported" no_record ab /data
 
 # ---------------------------------------------------------------------------
 say "3. diff B A and diff A A"
@@ -188,6 +188,7 @@ check "diff B A exits 0" diff_to ba B A --dir /data
 check "reverse: /data/new.txt deleted" has_record ba /data/new.txt "deleted regular"
 check "reverse: /data/del.txt added" has_record ba /data/del.txt "added regular"
 check "reverse: /data/chmod.txt metadata" has_record ba /data/chmod.txt "metadata regular"
+check "reverse: /data/emptydir deleted" has_record ba /data/emptydir "deleted directory"
 check "diff A A exits 0" diff_to aa A A
 check "diff A A has no records" [ "$(field aa 'len(j["filesystem"]["records"])')" = 0 ]
 check "diff A A has no process records" [ "$(field aa 'len(j["processes"])')" = 0 ]
@@ -230,6 +231,7 @@ echo "jobs: keep=$KEEP gone=$GONE new=$NEW"
 "$W" checkpoint "$SESSION" Q >/dev/null
 check "diff P Q exits 0" diff_to pq P Q
 check "processes is a list" [ "$(field pq 'type(j["processes"]).__name__')" = list ]
+check "the root directory is not reported" no_record pq /
 check "killed job: pid $GONE reported" any_proc pq "$GONE"
 check "new job: pid $NEW reported" any_proc pq "$NEW"
 check "running job: pid $KEEP not reported as added or deleted" not_added_or_deleted pq "$KEEP"

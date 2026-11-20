@@ -269,6 +269,56 @@ func TestWalkFS(t *testing.T) {
 		want []expectedDiff
 	}{
 		{
+			name:       "directory_mode_change_is_metadata",
+			leftDirs:   []string{"/app/data"},
+			rightDirs:  []string{"/app/data"},
+			rightModes: map[string]os.FileMode{"/app/data": 0700},
+			dirsWithCandidates: map[string]struct{}{
+				"/app":      {},
+				"/app/data": {},
+			},
+			want: []expectedDiff{
+				{path: "/app/data", changeType: ChangeTypeMetadata, fileType: FileTypeDir, checkTypes: true},
+			},
+		},
+		{
+			name:      "deleted_directory_tree",
+			leftDirs:  []string{"/app/old/sub", "/app/old/empty"},
+			leftFiles: map[string]string{"/app/old/sub/f.txt": "x"},
+			rightDirs: []string{"/app"},
+			dirsWithCandidates: map[string]struct{}{
+				"/app": {},
+			},
+			want: []expectedDiff{
+				{path: "/app/old", changeType: ChangeTypeDeleted, fileType: FileTypeDir, checkTypes: true},
+				{path: "/app/old/sub", changeType: ChangeTypeDeleted, fileType: FileTypeDir, checkTypes: true},
+				{path: "/app/old/empty", changeType: ChangeTypeDeleted, fileType: FileTypeDir, checkTypes: true},
+				{path: "/app/old/sub/f.txt", changeType: ChangeTypeDeleted, fileType: FileTypeRegular, checkTypes: true},
+			},
+		},
+		{
+			name:       "directory_with_subdirectory_to_file",
+			leftDirs:   []string{"/app/data/sub"},
+			leftFiles:  map[string]string{"/app/data/sub/f.txt": "x"},
+			rightFiles: map[string]string{"/app/data": "now a file"},
+			candidates: map[string]struct{}{"/app/data": {}},
+			dirsWithCandidates: map[string]struct{}{
+				"/app": {},
+			},
+			want: []expectedDiff{
+				{
+					path:       "/app/data",
+					changeType: ChangeTypeModified,
+					fileType:   FileTypeModified,
+					fromType:   FileTypeDir,
+					toType:     FileTypeRegular,
+					checkTypes: true,
+				},
+				{path: "/app/data/sub", changeType: ChangeTypeDeleted, fileType: FileTypeDir, checkTypes: true},
+				{path: "/app/data/sub/f.txt", changeType: ChangeTypeDeleted, fileType: FileTypeRegular, checkTypes: true},
+			},
+		},
+		{
 			name:       "mode_only_change_is_metadata",
 			leftFiles:  map[string]string{"/app/run.sh": "echo hi"},
 			rightFiles: map[string]string{"/app/run.sh": "echo hi"},
@@ -311,7 +361,8 @@ func TestWalkFS(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "added_file",
+			name:     "added_file",
+			leftDirs: []string{"/app"},
 			rightFiles: map[string]string{
 				"/app/new.txt": "new content",
 			},
@@ -330,6 +381,7 @@ func TestWalkFS(t *testing.T) {
 			leftFiles: map[string]string{
 				"/app/old.txt": "old content",
 			},
+			rightDirs: []string{"/app"},
 			candidates: map[string]struct{}{
 				"/app/old.txt": {},
 			},
@@ -495,24 +547,30 @@ func TestListDirReturnsEntryTypes(t *testing.T) {
 	}
 	defer root.Close()
 
-	got, err := listDir(root, "app")
+	if err := os.Chmod(filepath.Join(path, "app"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	got, dirMode, err := listDir(root, "app")
 	if err != nil {
 		t.Fatalf("listDir: %v", err)
+	}
+	if dirMode != fs.ModeDir|0o750 {
+		t.Errorf("listDir directory mode = %v, want %v", dirMode, fs.ModeDir|0o750)
 	}
 	want := map[string]fs.FileMode{"sub": fs.ModeDir, "file": 0, "link": fs.ModeSymlink, "pipe": fs.ModeNamedPipe}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("listDir = %v, want %v", got, want)
 	}
 	// Listing twice reads the directory from the start both times.
-	if again, err := listDir(root, "app"); err != nil || !reflect.DeepEqual(again, want) {
+	if again, _, err := listDir(root, "app"); err != nil || !reflect.DeepEqual(again, want) {
 		t.Errorf("second listDir = %v, %v", again, err)
 	}
-	if _, err := listDir(root, "missing"); err == nil {
+	if _, _, err := listDir(root, "missing"); err == nil {
 		t.Error("listDir of a missing directory succeeded")
 	}
 }
 
-// One-sided entries take their file type from the directory listing.
+// One-sided entries, directories included, take their file type from the directory listing.
 func TestWalkFSReportsTypesOfOneSidedEntries(t *testing.T) {
 	leftPath, rightPath := t.TempDir(), t.TempDir()
 	createTestTree(t, leftPath, []string{"/app"}, nil)
@@ -527,6 +585,9 @@ func TestWalkFSReportsTypesOfOneSidedEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]FileType{
+		"/app/new":               FileTypeDir,
+		"/app/new/empty":         FileTypeDir,
+		"/app/new/deep":          FileTypeDir,
 		"/app/new/file.txt":      FileTypeRegular,
 		"/app/new/deep/file.txt": FileTypeRegular,
 		"/app/new/link":          FileTypeSymlink,
@@ -912,7 +973,9 @@ func TestDiffFSOverlayE2E(t *testing.T) {
 			},
 			leftLayers:  []int{0},
 			rightLayers: []int{1},
-			want:        nil,
+			want: []expectedDiff{
+				{path: "/app/empty", changeType: ChangeTypeAdded, fileType: FileTypeDir, checkTypes: true},
+			},
 		},
 		{
 			name: "directory_with_file_added",
@@ -935,6 +998,7 @@ func TestDiffFSOverlayE2E(t *testing.T) {
 			leftLayers:  []int{0},
 			rightLayers: []int{1},
 			want: []expectedDiff{
+				{path: "/app/new", changeType: ChangeTypeAdded, fileType: FileTypeDir, checkTypes: true},
 				{path: "/app/new/file.txt", changeType: ChangeTypeAdded},
 			},
 		},
@@ -1145,6 +1209,57 @@ func TestDiffFSOverlayE2E(t *testing.T) {
 			rightLayers: []int{1},
 			want: []expectedDiff{
 				{path: "/app/data/sub/old.txt", changeType: ChangeTypeAdded},
+			},
+		},
+		{
+			name: "chmod_directory",
+			baseActions: []func(*testing.T, string){
+				func(t *testing.T, root string) {
+					e2eWriteFile(t, root, "/app/data/keep.txt", "keep")
+				},
+			},
+			layers: []e2eLayer{
+				{name: "left"},
+				{
+					name: "right",
+					actions: []func(*testing.T, string){
+						func(t *testing.T, root string) {
+							e2eChmod(t, root, "/app/data", 0700)
+						},
+					},
+				},
+			},
+			leftLayers:  []int{0},
+			rightLayers: []int{1},
+			want: []expectedDiff{
+				{path: "/app/data", changeType: ChangeTypeMetadata, fileType: FileTypeDir, checkTypes: true},
+			},
+		},
+		{
+			name: "directory_tree_removed",
+			baseActions: []func(*testing.T, string){
+				func(t *testing.T, root string) {
+					e2eWriteFile(t, root, "/app/data/sub/f.txt", "x")
+					e2eWriteFile(t, root, "/app/keep.txt", "keep")
+				},
+			},
+			layers: []e2eLayer{
+				{name: "left"},
+				{
+					name: "right",
+					actions: []func(*testing.T, string){
+						func(t *testing.T, root string) {
+							e2eRemove(t, root, "/app/data")
+						},
+					},
+				},
+			},
+			leftLayers:  []int{0},
+			rightLayers: []int{1},
+			want: []expectedDiff{
+				{path: "/app/data", changeType: ChangeTypeDeleted, fileType: FileTypeDir, checkTypes: true},
+				{path: "/app/data/sub", changeType: ChangeTypeDeleted, fileType: FileTypeDir, checkTypes: true},
+				{path: "/app/data/sub/f.txt", changeType: ChangeTypeDeleted, fileType: FileTypeRegular, checkTypes: true},
 			},
 		},
 		{

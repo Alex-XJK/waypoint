@@ -62,10 +62,10 @@ type FileType string
 const (
 	FileTypeSymlink  FileType = "symlink"
 	FileTypeRegular  FileType = "regular"
-	FileTypeDevice   FileType = "device"    // modified = major/minor number change
-	FileTypeFIFO     FileType = "fifo"      // currently only add/delete tracked
-	FileTypeSocket   FileType = "socket"    // currently only add/delete tracked
-	FileTypeDir      FileType = "directory" // only tracked if type change
+	FileTypeDevice   FileType = "device" // modified = major/minor number change
+	FileTypeFIFO     FileType = "fifo"   // currently only add/delete tracked
+	FileTypeSocket   FileType = "socket" // currently only add/delete tracked
+	FileTypeDir      FileType = "directory"
 	FileTypeOther    FileType = "other"
 	FileTypeModified FileType = "modified"
 )
@@ -302,7 +302,17 @@ func recurseSideChangeType(view *fsView, s side, containerViewPath string, mode 
 		})
 		return nil
 	}
+	*detected = append(*detected, DiffFileRecord{
+		Path:       containerViewPath,
+		ChangeType: changeType,
+		FileType:   FileTypeDir,
+	})
+	return recurseSideChildren(view, s, containerViewPath, detected, changeType)
+}
 
+// recurseSideChildren reports everything below the directory at
+// containerViewPath, but not the directory itself, as changeType.
+func recurseSideChildren(view *fsView, s side, containerViewPath string, detected *[]DiffFileRecord, changeType ChangeType) error {
 	rootViewPath, err := cleanRootPath(containerViewPath)
 	if err != nil {
 		return err
@@ -311,7 +321,7 @@ func recurseSideChangeType(view *fsView, s side, containerViewPath string, mode 
 	if err != nil {
 		return err
 	}
-	entries, err := listDir(root, rootViewPath)
+	entries, _, err := listDir(root, rootViewPath)
 	if err != nil {
 		return err
 	}
@@ -324,30 +334,35 @@ func recurseSideChangeType(view *fsView, s side, containerViewPath string, mode 
 	return nil
 }
 
-// listDir returns the type bits of each entry of a directory in root. ReadDir
-// on a file opened in a Root stats every entry, so the listing reads a
-// duplicate of the descriptor, which takes the types from the directory itself.
-func listDir(root *os.Root, rootViewDir string) (map[string]fs.FileMode, error) {
+// listDir returns the type bits of each entry of a directory in root, and the
+// mode of the directory itself. ReadDir on a file opened in a Root stats every
+// entry, so the listing reads a duplicate of the descriptor, which takes the
+// types from the directory itself.
+func listDir(root *os.Root, rootViewDir string) (map[string]fs.FileMode, fs.FileMode, error) {
 	dir, err := root.Open(rootViewDir)
 	if err != nil {
-		return nil, fmt.Errorf("open directory %s: %w", rootViewDir, err)
+		return nil, 0, fmt.Errorf("open directory %s: %w", rootViewDir, err)
 	}
 	defer dir.Close()
+	info, err := dir.Stat()
+	if err != nil {
+		return nil, 0, fmt.Errorf("stat directory %s: %w", rootViewDir, err)
+	}
 	fd, err := unix.FcntlInt(dir.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
-		return nil, fmt.Errorf("duplicate descriptor of directory %s: %w", rootViewDir, err)
+		return nil, 0, fmt.Errorf("duplicate descriptor of directory %s: %w", rootViewDir, err)
 	}
 	plain := os.NewFile(uintptr(fd), dir.Name())
 	defer plain.Close()
 	dentries, err := plain.ReadDir(-1)
 	if err != nil {
-		return nil, fmt.Errorf("read directory %s: %w", rootViewDir, err)
+		return nil, 0, fmt.Errorf("read directory %s: %w", rootViewDir, err)
 	}
 	entries := make(map[string]fs.FileMode, len(dentries))
 	for _, dentry := range dentries {
 		entries[dentry.Name()] = dentry.Type()
 	}
-	return entries, nil
+	return entries, info.Mode(), nil
 }
 
 // compareWorkers is the number of goroutines that compare candidate files.
@@ -449,13 +464,20 @@ func walkDir(view *fsView, pool *comparePool, containerViewDir string, detected 
 	if err != nil {
 		return err
 	}
-	leftEntries, err := listDir(view.leftRoot, rootViewDir)
+	leftEntries, leftDirMode, err := listDir(view.leftRoot, rootViewDir)
 	if err != nil {
 		return fmt.Errorf("left side: %w", err)
 	}
-	rightEntries, err := listDir(view.rightRoot, rootViewDir)
+	rightEntries, rightDirMode, err := listDir(view.rightRoot, rootViewDir)
 	if err != nil {
 		return fmt.Errorf("right side: %w", err)
+	}
+	if leftDirMode != rightDirMode {
+		*detected = append(*detected, DiffFileRecord{
+			Path:       containerViewDir,
+			ChangeType: ChangeTypeMetadata,
+			FileType:   FileTypeDir,
+		})
 	}
 
 	for name, leftMode := range leftEntries {
@@ -497,11 +519,11 @@ func walkDir(view *fsView, pool *comparePool, containerViewDir string, detected 
 			})
 			// collect directory side descendents
 			if leftMode.IsDir() {
-				if err := recurseSideChangeType(view, LeftSide, containerViewSubpath, fs.ModeDir, detected, ChangeTypeDeleted); err != nil {
+				if err := recurseSideChildren(view, LeftSide, containerViewSubpath, detected, ChangeTypeDeleted); err != nil {
 					return err
 				}
 			} else {
-				if err := recurseSideChangeType(view, RightSide, containerViewSubpath, fs.ModeDir, detected, ChangeTypeAdded); err != nil {
+				if err := recurseSideChildren(view, RightSide, containerViewSubpath, detected, ChangeTypeAdded); err != nil {
 					return err
 				}
 			}
@@ -651,7 +673,7 @@ func computeTargetTempDir(ckptsDiffDir string, targetDir string) (string, error)
 
 // diffResultVersion is part of a cached result's file name, so results written
 // in an older format are not reused. Bump it when the output format changes.
-const diffResultVersion = 3
+const diffResultVersion = 4
 
 func computeResultPath(ckptsDiffDir string, targetDir string) (string, error) {
 	targetCacheKey, err := computeTargetHash(targetDir)
