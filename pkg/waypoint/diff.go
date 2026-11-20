@@ -127,7 +127,17 @@ func (view *fsView) getRootSide(s side) (*os.Root, error) {
 	}
 }
 
-func areRegFilesDiff(leftRoot, rightRoot *os.Root, path string) (bool, error) {
+// compareBufs are the read buffers of a file comparison, one per side.
+type compareBufs struct {
+	left, right []byte
+}
+
+func newCompareBufs() *compareBufs {
+	const chunkSize = 32 * 1024
+	return &compareBufs{left: make([]byte, chunkSize), right: make([]byte, chunkSize)}
+}
+
+func areRegFilesDiff(leftRoot, rightRoot *os.Root, path string, bufs *compareBufs) (bool, error) {
 	leftFile, err := leftRoot.Open(path)
 	if err != nil {
 		return false, fmt.Errorf("open left file %s: %w", path, err)
@@ -154,9 +164,7 @@ func areRegFilesDiff(leftRoot, rightRoot *os.Root, path string) (bool, error) {
 	}
 
 	// Compare contents in chunks.
-	const chunkSize = 32 * 1024
-	leftBuf := make([]byte, chunkSize)
-	rightBuf := make([]byte, chunkSize)
+	leftBuf, rightBuf := bufs.left, bufs.right
 
 	for {
 		leftN, leftErr := io.ReadFull(leftFile, leftBuf)
@@ -205,7 +213,7 @@ func getFileType(mode fs.FileMode) FileType {
 	return FileTypeOther
 }
 
-func processNonDirMod(view *fsView, containerViewPath string, detected *[]DiffFileRecord) error {
+func processNonDirMod(view *fsView, containerViewPath string, bufs *compareBufs, detected *[]DiffFileRecord) error {
 	rootViewPath, err := cleanRootPath(containerViewPath)
 	if err != nil {
 		return err
@@ -244,7 +252,7 @@ func processNonDirMod(view *fsView, containerViewPath string, detected *[]DiffFi
 	// Other changes currently tracked: cmp on regular, symlink target, dev major/minor. TODO support other changes/types
 	mod := false
 	if leftFileType == FileTypeRegular {
-		res, err := areRegFilesDiff(leftRoot, rightRoot, rootViewPath)
+		res, err := areRegFilesDiff(leftRoot, rightRoot, rootViewPath, bufs)
 		if err != nil {
 			return err
 		}
@@ -329,6 +337,10 @@ func recurseSideChangeType(view *fsView, s side, containerViewPath string, detec
 }
 
 func walkFS(view *fsView, containerViewDir string, detected *[]DiffFileRecord) error {
+	return walkDir(view, newCompareBufs(), containerViewDir, detected)
+}
+
+func walkDir(view *fsView, bufs *compareBufs, containerViewDir string, detected *[]DiffFileRecord) error {
 	// note: won't follow symlink dirs
 	rootViewDir, err := cleanRootPath(containerViewDir)
 	if err != nil {
@@ -383,7 +395,7 @@ func walkFS(view *fsView, containerViewDir string, detected *[]DiffFileRecord) e
 			_, exists := view.dirsWithCandidates[containerViewSubpath]
 			if exists {
 				// both directories and present in an unshared layer -> recurse
-				if err := walkFS(view, containerViewSubpath, detected); err != nil {
+				if err := walkDir(view, bufs, containerViewSubpath, detected); err != nil {
 					return err
 				}
 			}
@@ -421,7 +433,7 @@ func walkFS(view *fsView, containerViewDir string, detected *[]DiffFileRecord) e
 		_, exists = view.candidates[containerViewSubpath]
 		if exists {
 			// Both non-directories and candidates -> check for modification
-			if err = processNonDirMod(view, containerViewSubpath, detected); err != nil {
+			if err = processNonDirMod(view, containerViewSubpath, bufs, detected); err != nil {
 				return err
 			}
 		}

@@ -446,6 +446,53 @@ func TestWalkFS(t *testing.T) {
 	}
 }
 
+// One pair of buffers serves files of any size, in any order.
+func TestAreRegFilesDiffReusesBuffers(t *testing.T) {
+	big := strings.Repeat("0123456789abcdef", 6000) // 96 KB, three chunks
+	lateChange := big[:len(big)-1] + "X"
+	cases := []struct {
+		name        string
+		left, right string
+		want        bool
+	}{
+		{"big_same", big, big, false},
+		{"small_differs", "abc", "abd", true},
+		{"small_same", "abc", "abc", false},
+		{"big_differs_in_last_chunk", big, lateChange, true},
+		{"empty", "", "", false},
+		{"size_differs", "abc", "abcd", true},
+		{"one_chunk_same", big[:32*1024], big[:32*1024], false},
+	}
+	leftPath, rightPath := t.TempDir(), t.TempDir()
+	for _, tc := range cases {
+		createTestTree(t, leftPath, nil, map[string]string{tc.name: tc.left})
+		createTestTree(t, rightPath, nil, map[string]string{tc.name: tc.right})
+	}
+	leftRoot, err := os.OpenRoot(leftPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer leftRoot.Close()
+	rightRoot, err := os.OpenRoot(rightPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rightRoot.Close()
+
+	bufs := newCompareBufs()
+	for round := 0; round < 2; round++ {
+		for _, tc := range cases {
+			got, err := areRegFilesDiff(leftRoot, rightRoot, tc.name, bufs)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if got != tc.want {
+				t.Errorf("round %d, %s: differ = %v, want %v", round, tc.name, got, tc.want)
+			}
+		}
+	}
+}
+
 type expectedDiff struct {
 	path       string
 	changeType ChangeType
