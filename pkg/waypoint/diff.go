@@ -1024,6 +1024,57 @@ func (m *Manager) getProcDiff(ckptIDLeft, ckptIDRight string, detected *[]DiffPr
 	return nil
 }
 
+// getFSDiff compares the two mounted views below normalizedTargetDir.
+func (m *Manager) getFSDiff(d *DiffFS, normalizedTargetDir string) ([]DiffFileRecord, error) {
+	// TODO: openroot will report error on absolute symlinks (doesn't resolve as relative to container root)
+	leftRoot, err := os.OpenRoot(d.leftMountPoint)
+	if err != nil {
+		return nil, err
+	}
+	defer leftRoot.Close()
+	rightRoot, err := os.OpenRoot(d.rightMountPoint)
+	if err != nil {
+		return nil, err
+	}
+	defer rightRoot.Close()
+	view := fsView{
+		leftRoot:               leftRoot,
+		rightRoot:              rightRoot,
+		containerViewTargetDir: normalizedTargetDir,
+	}
+
+	leftExists, err := existsTargetDir(&view, LeftSide)
+	if err != nil {
+		return nil, err
+	}
+	rightExists, err := existsTargetDir(&view, RightSide)
+	if err != nil {
+		return nil, err
+	}
+
+	detectedFS := make([]DiffFileRecord, 0)
+	switch {
+	case !leftExists && !rightExists:
+		// target dne so no diff
+	case leftExists && !rightExists:
+		if err := recurseSideChangeType(&view, LeftSide, normalizedTargetDir, &detectedFS, ChangeTypeDeleted); err != nil {
+			return nil, err
+		}
+	case !leftExists && rightExists:
+		if err := recurseSideChangeType(&view, RightSide, normalizedTargetDir, &detectedFS, ChangeTypeAdded); err != nil {
+			return nil, err
+		}
+	default:
+		if err := m.getAllCandidates(d, &view); err != nil {
+			return nil, err
+		}
+		if err := walkFS(&view, normalizedTargetDir, &detectedFS); err != nil {
+			return nil, err
+		}
+	}
+	return detectedFS, nil
+}
+
 // Entry point for diff
 func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 	normalizedTargetDir, err := normalizeTargetDir(targetDir)
@@ -1077,61 +1128,23 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 
 	defer d.close()
 
-	// TODO: openroot will report error on absolute symlinks (doesn't resolve as relative to container root)
-	leftRoot, err := os.OpenRoot(d.leftMountPoint)
-	if err != nil {
-		return err
+	// The filesystem and process diffs share nothing and run concurrently.
+	detectedProc := make([]DiffProcRecord, 0)
+	procDone := make(chan error, 1)
+	go func() {
+		procDone <- m.getProcDiff(ckptIDFirst, ckptIDSecond, &detectedProc)
+	}()
+	detectedFS, fsErr := m.getFSDiff(d, normalizedTargetDir)
+	procErr := <-procDone
+	if fsErr != nil {
+		return fsErr
 	}
-	defer leftRoot.Close()
-	rightRoot, err := os.OpenRoot(d.rightMountPoint)
-	if err != nil {
-		return err
-	}
-	defer rightRoot.Close()
-	view := fsView{
-		leftRoot:               leftRoot,
-		rightRoot:              rightRoot,
-		containerViewTargetDir: normalizedTargetDir,
-	}
-
-	leftExists, err := existsTargetDir(&view, LeftSide)
-	if err != nil {
-		return err
-	}
-	rightExists, err := existsTargetDir(&view, RightSide)
-	if err != nil {
-		return err
-	}
-
-	detectedFS := make([]DiffFileRecord, 0)
-	switch {
-	case !leftExists && !rightExists:
-		// target dne so no diff
-	case leftExists && !rightExists:
-		if err := recurseSideChangeType(&view, LeftSide, normalizedTargetDir, &detectedFS, ChangeTypeDeleted); err != nil {
-			return err
-		}
-	case !leftExists && rightExists:
-		if err := recurseSideChangeType(&view, RightSide, normalizedTargetDir, &detectedFS, ChangeTypeAdded); err != nil {
-			return err
-		}
-	default:
-		if err := m.getAllCandidates(d, &view); err != nil {
-			return err
-		}
-		if err := walkFS(&view, normalizedTargetDir, &detectedFS); err != nil {
-			return err
-		}
+	if procErr != nil {
+		return procErr
 	}
 	sort.Slice(detectedFS, func(i, j int) bool {
 		return detectedFS[i].Path < detectedFS[j].Path
 	})
-
-	// Memory
-	detectedProc := make([]DiffProcRecord, 0)
-	if err := m.getProcDiff(ckptIDFirst, ckptIDSecond, &detectedProc); err != nil {
-		return err
-	}
 	sort.Slice(detectedProc, func(i, j int) bool {
 		return detectedProc[i].PID < detectedProc[j].PID
 	})
