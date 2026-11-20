@@ -995,6 +995,20 @@ func explorePsFlat(inputDirPath string) (map[uint32]ProcInfo, error) {
 	return processes, nil
 }
 
+// exploreProcImages reads the processes and the session shell from the CRIU
+// images in criuDir.
+func exploreProcImages(criuDir string) (map[uint32]ProcInfo, *shellState, error) {
+	processes, err := explorePsFlat(criuDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	shell, err := exploreShell(criuDir, processes)
+	if err != nil {
+		return nil, nil, err
+	}
+	return processes, shell, nil
+}
+
 // getProcDiff compares the CRIU images of two checkpoints: the processes go
 // to detected, the session shell's changes to shellChanges.
 func (m *Manager) getProcDiff(ckptIDLeft, ckptIDRight string, detected *[]DiffProcRecord, shellChanges *[]ShellChange) error {
@@ -1012,21 +1026,22 @@ func (m *Manager) getProcDiff(ckptIDLeft, ckptIDRight string, detected *[]DiffPr
 	if unlock, err := lockImages(m.checkpointDir(ckptIDRight), false); err == nil {
 		defer unlock()
 	}
-	expLeft, err := explorePsFlat(criuDirLeft)
-	if err != nil {
-		return err
+	// The two checkpoints' images are read concurrently.
+	var expLeft map[uint32]ProcInfo
+	var shellLeft *shellState
+	var errLeft error
+	leftDone := make(chan struct{})
+	go func() {
+		defer close(leftDone)
+		expLeft, shellLeft, errLeft = exploreProcImages(criuDirLeft)
+	}()
+	expRight, shellRight, errRight := exploreProcImages(criuDirRight)
+	<-leftDone
+	if errLeft != nil {
+		return errLeft
 	}
-	expRight, err := explorePsFlat(criuDirRight)
-	if err != nil {
-		return err
-	}
-	shellLeft, err := exploreShell(criuDirLeft, expLeft)
-	if err != nil {
-		return err
-	}
-	shellRight, err := exploreShell(criuDirRight, expRight)
-	if err != nil {
-		return err
+	if errRight != nil {
+		return errRight
 	}
 	*shellChanges = diffShell(shellLeft, shellRight)
 
