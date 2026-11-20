@@ -259,6 +259,10 @@ rm -f "$DDIR"/result-v*-"$KEY".json
 echo '{"from": "old-format"}' >"$DDIR/result-$KEY.json"
 check "diff exits 0 next to a result without a version" diff_to ab3 A B --dir /data
 check "a result without a version is not reused" cmp -s "$OUT/ab.json" "$OUT/ab3.json"
+# A result cut short, as a crash can leave it.
+printf '{"from": "A", "to"' >"$(echo "$DDIR"/result-v*-"$KEY".json)"
+check "diff exits 0 next to an incomplete result" diff_to ab5 A B --dir /data
+check "an incomplete result is computed again" cmp -s "$OUT/ab.json" "$OUT/ab5.json"
 
 # What a killed diff leaves: its workspace, here with one view still mounted.
 rm -f "$DDIR"/result-v*-"$KEY".json

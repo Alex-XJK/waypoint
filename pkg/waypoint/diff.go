@@ -754,17 +754,31 @@ func (d *DiffFS) close() {
 	d.lock = nil
 }
 
+// writeDiffResult stores a result with a rename and no fsync. It runs under
+// the session lock. A file left incomplete by a crash fails the check on read.
+func writeDiffResult(resultPath string, data []byte) error {
+	tmp := resultPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, resultPath); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 // claimDiffWorkspace runs under the session lock and returns one of: the cached
 // result, a new locked workspace, or the workspace dir of a running diff.
 func (m *Manager) claimDiffWorkspace(ckptIDFirst, ckptIDSecond, resultPath, workspaceDir string) (*DiffFS, []byte, *os.File, error) {
 	cachedData, err := os.ReadFile(resultPath)
-	if err == nil {
+	if err == nil && json.Valid(cachedData) {
 		// case 1: already have cached result
-		// TODO further validation of cache before try to read?
 		return nil, cachedData, nil, nil
-	} else if !os.IsNotExist(err) {
+	} else if err != nil && !os.IsNotExist(err) {
 		return nil, nil, nil, fmt.Errorf("read cached diff result: %w", err)
 	}
+	// A result that is not complete JSON is computed again and overwritten.
 
 	lock, busy, err := lockDiffWorkspace(workspaceDir)
 	if err == nil {
@@ -1159,7 +1173,7 @@ func (m *Manager) PrintDiff(ckptIDFirst, ckptIDSecond, targetDir string) error {
 	}
 
 	if err := m.withSessionLock(func() error {
-		return atomicWriteFile(resultPath, data, 0o644)
+		return writeDiffResult(resultPath, data)
 	}); err != nil {
 		return err
 	}

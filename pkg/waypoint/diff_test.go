@@ -1641,6 +1641,34 @@ func TestClaimDiffWorkspaceOneOwnerAtATime(t *testing.T) {
 	}
 }
 
+// A result file cut short by a crash is not served; the diff runs again.
+func TestClaimDiffWorkspaceIgnoresIncompleteResult(t *testing.T) {
+	m, resultPath, workspaceDir := newDiffWorkspaceManager(t)
+	for _, content := range []string{"", `{"from": "A", "to"`, "\x00\x00\x00\x00"} {
+		if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(resultPath, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		d, cached, running, err := m.claimDiffWorkspace("A", "B", resultPath, workspaceDir)
+		if err != nil || d == nil || cached != nil || running != nil {
+			t.Fatalf("claim next to result %q = (%v, %q, %v, %v), want a new workspace", content, d, cached, running, err)
+		}
+		if err := writeDiffResult(resultPath, []byte(`{"from": "A"}`)); err != nil {
+			t.Fatalf("writeDiffResult: %v", err)
+		}
+		d.close()
+		_, cached, _, err = m.claimDiffWorkspace("A", "B", resultPath, workspaceDir)
+		if err != nil || string(cached) != `{"from": "A"}` {
+			t.Fatalf("claim after rewriting result %q = (%q, %v), want the new result", content, cached, err)
+		}
+		if _, err := os.Stat(resultPath + ".tmp"); !os.IsNotExist(err) {
+			t.Errorf("temporary result file left behind: err=%v", err)
+		}
+	}
+}
+
 func TestClaimDiffWorkspaceReplacesInterruptedRun(t *testing.T) {
 	m, resultPath, workspaceDir := newDiffWorkspaceManager(t)
 
