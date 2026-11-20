@@ -1,6 +1,7 @@
 package waypoint
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -1978,6 +1979,35 @@ func TestGetProcDiffSameProcessesIsEmpty(t *testing.T) {
 	writeProcImages(t, m.checkpointCriuDir("B"), procs)
 	if got := procDiffByPID(t, m, "A", "B"); len(got) != 0 {
 		t.Fatalf("getProcDiff(A, B) = %v, want no records", got)
+	}
+}
+
+func TestGetProcDiffNamesChangedValuesFromAndTo(t *testing.T) {
+	m := &Manager{baseDir: t.TempDir()}
+	writeProcImages(t, m.checkpointCriuDir("A"), []ProcInfo{
+		{PID: 1, PPID: 0, PGID: 1, SID: 1, Comm: "bash_init"},
+		{PID: 13, PPID: 1, PGID: 13, SID: 1, Comm: "sh"},
+	})
+	writeProcImages(t, m.checkpointCriuDir("B"), []ProcInfo{
+		{PID: 1, PPID: 0, PGID: 1, SID: 1, Comm: "bash_init"},
+		{PID: 13, PPID: 1, PGID: 13, SID: 1, Comm: "python3"},
+	})
+
+	for _, tc := range []struct{ left, right, want string }{
+		{"A", "B", `[{"pid":13,"change_type":"modified","changes":[{"field":"comm","from":"sh","to":"python3"}]}]`},
+		{"B", "A", `[{"pid":13,"change_type":"modified","changes":[{"field":"comm","from":"python3","to":"sh"}]}]`},
+	} {
+		var records []DiffProcRecord
+		if err := m.getProcDiff(tc.left, tc.right, &records, &[]ShellChange{}); err != nil {
+			t.Fatalf("getProcDiff(%s, %s): %v", tc.left, tc.right, err)
+		}
+		got, err := json.Marshal(records)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != tc.want {
+			t.Fatalf("getProcDiff(%s, %s) = %s\nwant %s", tc.left, tc.right, got, tc.want)
+		}
 	}
 }
 

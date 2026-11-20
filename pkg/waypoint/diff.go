@@ -79,9 +79,9 @@ type DiffProcRecord struct {
 }
 
 type ProcChange struct {
-	Field    string `json:"field"`
-	Previous any    `json:"previous"`
-	New      any    `json:"new"`
+	Field string `json:"field"`
+	From  any    `json:"from"`
+	To    any    `json:"to"`
 }
 
 type ProcInfo struct {
@@ -908,30 +908,30 @@ func processProcMod(leftInfo, rightInfo *ProcInfo, detected *[]DiffProcRecord) e
 	var changes []ProcChange
 	if leftInfo.PPID != rightInfo.PPID {
 		changes = append(changes, ProcChange{
-			Field:    "ppid",
-			Previous: leftInfo.PPID,
-			New:      rightInfo.PPID,
+			Field: "ppid",
+			From:  leftInfo.PPID,
+			To:    rightInfo.PPID,
 		})
 	}
 	if leftInfo.PGID != rightInfo.PGID {
 		changes = append(changes, ProcChange{
-			Field:    "pgid",
-			Previous: leftInfo.PGID,
-			New:      rightInfo.PGID,
+			Field: "pgid",
+			From:  leftInfo.PGID,
+			To:    rightInfo.PGID,
 		})
 	}
 	if leftInfo.SID != rightInfo.SID {
 		changes = append(changes, ProcChange{
-			Field:    "sid",
-			Previous: leftInfo.SID,
-			New:      rightInfo.SID,
+			Field: "sid",
+			From:  leftInfo.SID,
+			To:    rightInfo.SID,
 		})
 	}
 	if leftInfo.Comm != rightInfo.Comm {
 		changes = append(changes, ProcChange{
-			Field:    "comm",
-			Previous: leftInfo.Comm,
-			New:      rightInfo.Comm,
+			Field: "comm",
+			From:  leftInfo.Comm,
+			To:    rightInfo.Comm,
 		})
 	}
 	if len(changes) > 0 {
