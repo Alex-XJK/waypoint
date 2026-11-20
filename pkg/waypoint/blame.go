@@ -3,6 +3,7 @@ package waypoint
 // TODO add description
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,8 @@ type BlameCkptRecord struct {
 	CheckpointID string     `json:"checkpoint_id"`
 	ChangeType   ChangeType `json:"change_type"`
 	LineByLine   []string   `json:"line_by_line_diff"`
+	// Binary is set when a version of the file is binary; the record then has no lines.
+	Binary bool `json:"binary,omitempty"`
 }
 
 type state struct {
@@ -112,6 +115,30 @@ func (b *diffBudget) acquire(size int64) (release func()) {
 	}
 }
 
+// What counts as binary follows git: a NUL byte in the first 8000 bytes, or a
+// size over core.bigFileThreshold's default.
+const blameBinarySniffBytes = 8000
+
+var blameBigFileBytes int64 = 512 << 20
+
+// isBinaryFile reports whether the regular file at path, of the given size,
+// counts as binary. buf holds the bytes it looks at.
+func isBinaryFile(path string, size int64, buf []byte) (bool, error) {
+	if size > blameBigFileBytes {
+		return true, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("read file %s: %w", path, err)
+	}
+	defer file.Close()
+	n, err := io.ReadFull(file, buf[:blameBinarySniffBytes])
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return false, fmt.Errorf("read file %s: %w", path, err)
+	}
+	return bytes.IndexByte(buf[:n], 0) >= 0, nil
+}
+
 // regularSize returns the size of path and whether it is a regular file.
 func regularSize(path string) (int64, bool, error) {
 	info, err := os.Lstat(path)
@@ -153,7 +180,8 @@ func readFileString(path string, size int64) (string, error) {
 
 // buildBlameRecord turns an event into its record, with the change as
 // unified-diff lines. A layer that holds a regular file with unchanged
-// content changed only its metadata.
+// content changed only its metadata. A change to or from a binary version is
+// reported without lines, as git log -p does.
 func buildBlameRecord(event *blameEvent, bufs *compareBufs, budget *diffBudget) (BlameCkptRecord, error) {
 	record := BlameCkptRecord{CheckpointID: event.next.ckptID, ChangeType: event.change, LineByLine: []string{}}
 	fail := func(err error) (BlameCkptRecord, error) {
@@ -192,6 +220,27 @@ func buildBlameRecord(event *blameEvent, bufs *compareBufs, budget *diffBudget) 
 		}
 		if !differ {
 			record.ChangeType = ChangeTypeMetadata
+			return record, nil
+		}
+	}
+
+	for _, version := range []struct {
+		path    string
+		size    int64
+		regular bool
+	}{
+		{event.prev.rootViewPath, prevSize, prevRegular},
+		{event.next.rootViewPath, nextSize, nextRegular},
+	} {
+		if !version.regular {
+			continue
+		}
+		binary, err := isBinaryFile(version.path, version.size, bufs.left)
+		if err != nil {
+			return fail(err)
+		}
+		if binary {
+			record.Binary = true
 			return record, nil
 		}
 	}
