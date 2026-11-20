@@ -1320,6 +1320,25 @@ func TestComputeCkptsDiffIDDistinguishesPairs(t *testing.T) {
 	}
 }
 
+func TestComputeResultPathSkipsOldFormatResults(t *testing.T) {
+	dir := "/s/diffs/A-B-0123"
+	key, err := computeTargetHash("/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := computeResultPath(dir, "/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, fmt.Sprintf("result-v%d-%s.json", diffResultVersion, key)); got != want {
+		t.Fatalf("computeResultPath = %s, want %s", got, want)
+	}
+	// Results written before the name carried a version.
+	if old := filepath.Join(dir, "result-"+key+".json"); got == old {
+		t.Fatalf("computeResultPath = %s, the name of an unversioned result", got)
+	}
+}
+
 func TestExplorePsFlatReadsEveryProcess(t *testing.T) {
 	dir := t.TempDir()
 	writeProcImages(t, dir, []ProcInfo{

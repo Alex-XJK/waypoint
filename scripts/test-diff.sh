@@ -5,8 +5,9 @@
 # checks the JSON from `diff`: its shape, the records for each change, changes
 # that leave the final content the same, argument errors, and refusal to diff a
 # checkpoint that is not ready. Section 5 checks that `processes` reports the
-# pids of jobs killed and started between two checkpoints. TODO lines print
-# changes `diff` does not report yet; they do not count as failures.
+# pids of jobs killed and started between two checkpoints. Section 6 checks the
+# result cache. TODO lines print changes `diff` does not report yet; they do not
+# count as failures.
 #
 # Requires root, criu, a static busybox, python3, and Go unless WAYPOINT_BIN and
 # BASH_INIT_BIN are given. Sessions, registry and rootfs live in a private temp
@@ -241,6 +242,21 @@ wx 'WAYPOINT_DIFF_TEST_VAR=changed' >/dev/null
 check "diff R S exits 0" diff_to rs R S
 later "memory-only change (a variable in main's shell, pid $SHELL_PID) reported" \
   any_proc rs "$SHELL_PID"
+
+# ---------------------------------------------------------------------------
+say "6. cached results"
+# ---------------------------------------------------------------------------
+# Results live in diffs/<pair>/result-v<N>-<key>.json, key = hash of the target dir.
+DDIR="$(echo "$WORK/s/$SESSION"/diffs/A-B-*)"
+KEY="$(printf %s /data | sha256sum | cut -c1-16)"
+cached() { ls "$DDIR"/result-v*-"$KEY".json >/dev/null 2>&1; }
+check "diff A B --dir /data left a cached result" cached
+check "a second run exits 0" diff_to ab2 A B --dir /data
+check "a second run prints the same result" cmp -s "$OUT/ab.json" "$OUT/ab2.json"
+rm -f "$DDIR"/result-v*-"$KEY".json
+echo '{"from": "old-format"}' >"$DDIR/result-$KEY.json"
+check "diff exits 0 next to a result without a version" diff_to ab3 A B --dir /data
+check "a result without a version is not reused" cmp -s "$OUT/ab.json" "$OUT/ab3.json"
 
 "$W" cleanup "$SESSION" >/dev/null
 SESSION=""

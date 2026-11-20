@@ -558,12 +558,16 @@ func computeTargetTempDir(ckptsDiffDir string, targetDir string) (string, error)
 	return targetTempDir, nil
 }
 
+// diffResultVersion is part of a cached result's file name, so results written
+// in an older format are not reused. Bump it when the output format changes.
+const diffResultVersion = 2
+
 func computeResultPath(ckptsDiffDir string, targetDir string) (string, error) {
 	targetCacheKey, err := computeTargetHash(targetDir)
 	if err != nil {
 		return "", err
 	}
-	res_id := "result-" + targetCacheKey
+	res_id := fmt.Sprintf("result-v%d-%s", diffResultVersion, targetCacheKey)
 	targetCacheResult := filepath.Join(ckptsDiffDir, res_id+".json")
 	return targetCacheResult, nil
 }
