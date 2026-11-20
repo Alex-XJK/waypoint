@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/aymanbagabas/go-udiff"
@@ -31,55 +34,6 @@ type state struct {
 	visible      bool
 	rootViewPath string
 	ckptID       string
-}
-
-// constructFileDiff compares two files and returns their unified diff.
-func constructFileDiff(prevState, newState *state, change ChangeType) (string, error) {
-	if change == ChangeTypeAdded {
-		return constructSingleFileDiff(newState.rootViewPath, prevState.ckptID, newState.ckptID, true)
-	}
-	if change == ChangeTypeDeleted {
-		return constructSingleFileDiff(prevState.rootViewPath, prevState.ckptID, newState.ckptID, false)
-	}
-	for _, path := range []string{prevState.rootViewPath, newState.rootViewPath} {
-		info, err := os.Lstat(path)
-		if err != nil {
-			return "", fmt.Errorf("lstat file %s: %w", path, err)
-		}
-		if !info.Mode().IsRegular() {
-			return "", nil
-		}
-	}
-
-	previousContent, err := os.ReadFile(prevState.rootViewPath)
-	if err != nil {
-		return "", fmt.Errorf("read file %s: %w", prevState.rootViewPath, err)
-	}
-	newContent, err := os.ReadFile(newState.rootViewPath)
-	if err != nil {
-		return "", fmt.Errorf("read file %s: %w", newState.rootViewPath, err)
-	}
-	diff := udiff.Unified(prevState.ckptID, newState.ckptID, string(previousContent), string(newContent))
-
-	return diff, nil
-}
-
-func constructSingleFileDiff(path, prevCkptID, newCkptID string, added bool) (string, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", fmt.Errorf("lstat file %s: %w", path, err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", nil
-	}
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read file %s: %w", path, err)
-	}
-	if added {
-		return udiff.Unified(prevCkptID, newCkptID, "", string(content)), nil
-	}
-	return udiff.Unified(prevCkptID, newCkptID, string(content), ""), nil
 }
 
 func isOpaque(dir string) (bool, error) {
@@ -120,46 +74,178 @@ func isWhiteoutInfo(path string, info os.FileInfo) (bool, error) {
 	return false, nil
 }
 
-func areRegularFiles(paths ...string) (bool, error) {
-	for _, path := range paths {
-		info, err := os.Lstat(path)
-		if err != nil {
-			return false, fmt.Errorf("lstat file %s: %w", path, err)
-		}
-		if !info.Mode().IsRegular() {
-			return false, nil
-		}
+// blameDiffBudgetBytes bounds the file content that diffs running at the same
+// time hold in memory.
+const blameDiffBudgetBytes = 64 << 20
+
+// diffBudget admits diffs while their inputs fit in blameDiffBudgetBytes. A
+// diff larger than the budget runs alone.
+type diffBudget struct {
+	mu     sync.Mutex
+	freed  *sync.Cond
+	inUse  int64
+	active int
+}
+
+func newDiffBudget() *diffBudget {
+	b := &diffBudget{}
+	b.freed = sync.NewCond(&b.mu)
+	return b
+}
+
+// acquire waits until a diff reading size bytes may run and returns the
+// function that ends it.
+func (b *diffBudget) acquire(size int64) (release func()) {
+	b.mu.Lock()
+	for b.active > 0 && b.inUse+size > blameDiffBudgetBytes {
+		b.freed.Wait()
 	}
-	return true, nil
+	b.inUse += size
+	b.active++
+	b.mu.Unlock()
+	return func() {
+		b.mu.Lock()
+		b.inUse -= size
+		b.active--
+		b.mu.Unlock()
+		b.freed.Broadcast()
+	}
+}
+
+// regularSize returns the size of path and whether it is a regular file.
+func regularSize(path string) (int64, bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return 0, false, fmt.Errorf("lstat file %s: %w", path, err)
+	}
+	return info.Size(), info.Mode().IsRegular(), nil
+}
+
+// pathsDiffer reports whether two regular files differ in content.
+func pathsDiffer(prevPath, nextPath string, bufs *compareBufs) (bool, error) {
+	prevFile, err := os.Open(prevPath)
+	if err != nil {
+		return false, fmt.Errorf("open file %s: %w", prevPath, err)
+	}
+	defer prevFile.Close()
+	nextFile, err := os.Open(nextPath)
+	if err != nil {
+		return false, fmt.Errorf("open file %s: %w", nextPath, err)
+	}
+	defer nextFile.Close()
+	return openFilesDiffer(prevFile, nextFile, nextPath, bufs)
+}
+
+// readFileString reads a file into a string without a second copy.
+func readFileString(path string, size int64) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("read file %s: %w", path, err)
+	}
+	defer file.Close()
+	var content strings.Builder
+	content.Grow(int(size))
+	if _, err := io.Copy(&content, file); err != nil {
+		return "", fmt.Errorf("read file %s: %w", path, err)
+	}
+	return content.String(), nil
 }
 
 // buildBlameRecord turns an event into its record, with the change as
-// unified-diff lines.
-func buildBlameRecord(event *blameEvent) (BlameCkptRecord, error) {
-	changeType := event.change
-	diff, err := constructFileDiff(&event.prev, &event.next, changeType)
-	if err != nil {
+// unified-diff lines. A layer that holds a regular file with unchanged
+// content changed only its metadata.
+func buildBlameRecord(event *blameEvent, bufs *compareBufs, budget *diffBudget) (BlameCkptRecord, error) {
+	record := BlameCkptRecord{CheckpointID: event.next.ckptID, ChangeType: event.change, LineByLine: []string{}}
+	fail := func(err error) (BlameCkptRecord, error) {
 		return BlameCkptRecord{}, fmt.Errorf("construct diff for checkpoints %s, %s: %w", event.prev.ckptID, event.next.ckptID, err)
 	}
-	lines := []string{}
-	if diff != "" {
-		lines = strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
-	} else if changeType == ChangeTypeModified {
-		// A layer that holds a regular file with unchanged content changed only its metadata.
-		regular, err := areRegularFiles(event.prev.rootViewPath, event.next.rootViewPath)
-		if err != nil {
-			return BlameCkptRecord{}, err
+
+	var prevSize, nextSize int64
+	var prevRegular, nextRegular bool
+	var err error
+	if event.change != ChangeTypeAdded {
+		if prevSize, prevRegular, err = regularSize(event.prev.rootViewPath); err != nil {
+			return fail(err)
 		}
-		if regular {
-			changeType = ChangeTypeMetadata
+	}
+	if event.change != ChangeTypeDeleted {
+		if nextSize, nextRegular, err = regularSize(event.next.rootViewPath); err != nil {
+			return fail(err)
+		}
+	}
+	switch event.change {
+	case ChangeTypeAdded:
+		if !nextRegular {
+			return record, nil
+		}
+	case ChangeTypeDeleted:
+		if !prevRegular {
+			return record, nil
+		}
+	default:
+		if !prevRegular || !nextRegular {
+			return record, nil
+		}
+		differ, err := pathsDiffer(event.prev.rootViewPath, event.next.rootViewPath, bufs)
+		if err != nil {
+			return fail(err)
+		}
+		if !differ {
+			record.ChangeType = ChangeTypeMetadata
+			return record, nil
 		}
 	}
 
-	return BlameCkptRecord{
-		CheckpointID: event.next.ckptID,
-		ChangeType:   changeType,
-		LineByLine:   lines,
-	}, nil
+	defer budget.acquire(prevSize + nextSize)()
+	var prevText, nextText string
+	if prevRegular {
+		if prevText, err = readFileString(event.prev.rootViewPath, prevSize); err != nil {
+			return fail(err)
+		}
+	}
+	if nextRegular {
+		if nextText, err = readFileString(event.next.rootViewPath, nextSize); err != nil {
+			return fail(err)
+		}
+	}
+	if diff := udiff.Unified(event.prev.ckptID, event.next.ckptID, prevText, nextText); diff != "" {
+		record.LineByLine = strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
+	}
+	return record, nil
+}
+
+// buildBlameRecords builds the records of events, in order, on up to
+// compareWorkers goroutines.
+func buildBlameRecords(events []*blameEvent) ([]BlameCkptRecord, error) {
+	records := make([]BlameCkptRecord, len(events))
+	errs := make([]error, len(events))
+	budget := newDiffBudget()
+	var next atomic.Int64
+	var failed atomic.Bool
+	var wg sync.WaitGroup
+	for range min(compareWorkers, len(events)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			bufs := newCompareBufs()
+			for !failed.Load() {
+				i := int(next.Add(1)) - 1
+				if i >= len(events) {
+					return
+				}
+				if records[i], errs[i] = buildBlameRecord(events[i], bufs, budget); errs[i] != nil {
+					failed.Store(true)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return records, nil
 }
 
 // layerEntry is what one layer holds at the target path.
@@ -284,8 +370,6 @@ func (m *Manager) PrintBlame(ckptID, path string) error {
 		return err
 	}
 
-	blamedCkpts := make([]BlameCkptRecord, 0)
-
 	ckptIDs := append([]string(nil), metadata.LayerIDs...)
 	originalDir := metadata.OriginalDir
 	// first check through original dir to set up visibility of target path
@@ -297,20 +381,20 @@ func (m *Manager) PrintBlame(ckptID, path string) error {
 	if _, err := advance(state, originalDir, "original", normalizedTargetPath); err != nil {
 		return err
 	}
-	// then advance through checkpoint layers, blaming
+	// then advance through checkpoint layers, collecting what each did to the target
+	var events []*blameEvent
 	for _, ckptID := range ckptIDs {
 		event, err := advance(state, m.checkpointUpperDir(ckptID), ckptID, normalizedTargetPath)
 		if err != nil {
 			return err
 		}
-		if event == nil {
-			continue
+		if event != nil {
+			events = append(events, event)
 		}
-		record, err := buildBlameRecord(event)
-		if err != nil {
-			return err
-		}
-		blamedCkpts = append(blamedCkpts, record)
+	}
+	blamedCkpts, err := buildBlameRecords(events)
+	if err != nil {
+		return err
 	}
 
 	result := BlameResult{

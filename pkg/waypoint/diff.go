@@ -155,6 +155,12 @@ func areRegFilesDiff(leftRoot, rightRoot *os.Root, path string, bufs *compareBuf
 	}
 	defer rightFile.Close()
 
+	return openFilesDiffer(leftFile, rightFile, path, bufs)
+}
+
+// openFilesDiffer reports whether two open regular files differ: by size
+// first, then by content in chunks. path names them in errors.
+func openFilesDiffer(leftFile, rightFile *os.File, path string, bufs *compareBufs) (bool, error) {
 	// Compare sizes first.
 	leftInfo, err := leftFile.Stat()
 	if err != nil {
