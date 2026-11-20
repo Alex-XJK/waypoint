@@ -133,6 +133,19 @@ func isDescendant(dirPath string, targetPath string) (bool, error) {
 	return true, nil
 }
 
+func areRegularFiles(paths ...string) (bool, error) {
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return false, fmt.Errorf("lstat file %s: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func insertBlameRecord(blamed *[]BlameCkptRecord, prevState, newState *state, changeType ChangeType) error {
 	if blamed == nil {
 		return nil
@@ -144,6 +157,15 @@ func insertBlameRecord(blamed *[]BlameCkptRecord, prevState, newState *state, ch
 	lines := []string{}
 	if diff != "" {
 		lines = strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
+	} else if changeType == ChangeTypeModified {
+		// A layer that holds a regular file with unchanged content changed only its metadata.
+		regular, err := areRegularFiles(prevState.rootViewPath, newState.rootViewPath)
+		if err != nil {
+			return err
+		}
+		if regular {
+			changeType = ChangeTypeMetadata
+		}
 	}
 
 	*blamed = append(*blamed, BlameCkptRecord{

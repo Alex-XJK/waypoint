@@ -44,7 +44,7 @@ const (
 	ChangeTypeAdded    ChangeType = "added"
 	ChangeTypeDeleted  ChangeType = "deleted"
 	ChangeTypeModified ChangeType = "modified"
-	ChangeTypeMetadata ChangeType = "metadata" // same content, different mode bits
+	ChangeTypeMetadata ChangeType = "metadata" // content unchanged: mode bits in diff, any metadata in blame
 )
 
 type DiffFileRecord struct {

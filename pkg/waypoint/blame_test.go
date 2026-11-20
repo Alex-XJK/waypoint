@@ -136,6 +136,75 @@ func TestCheckDir_ModifyFile(t *testing.T) {
 	assertChangeType(t, records, ChangeTypeModified)
 }
 
+// A layer that copied the file up without changing its content, as chmod,
+// chown or touch do, is blamed with change type metadata.
+func TestCheckDir_SameContentCopyIsMetadata(t *testing.T) {
+	root := t.TempDir()
+	target := "/app/file.txt"
+
+	oldRoot := t.TempDir()
+	oldFile := filepath.Join(oldRoot, "file.txt")
+	writeTestFile(t, oldFile, "same content\n")
+
+	newFile := filepath.Join(root, "app/file.txt")
+	writeTestFile(t, newFile, "same content\n")
+	if err := os.Chmod(newFile, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := &state{
+		visible:      true,
+		rootViewPath: oldFile,
+		ckptID:       "previous",
+	}
+	var records []BlameCkptRecord
+
+	found, err := checkDir(root, "/", target, prev, &records, "checkpoint-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("expected target to be found")
+	}
+	assertChangeType(t, records, ChangeTypeMetadata)
+	if len(records[0].LineByLine) != 0 {
+		t.Errorf("line diff = %v, want none", records[0].LineByLine)
+	}
+
+	// A later layer with new content is a modification again.
+	nextRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(nextRoot, "app/file.txt"), "new content\n")
+	if _, err := checkDir(nextRoot, "/", target, prev, &records, "checkpoint-2"); err != nil {
+		t.Fatal(err)
+	}
+	assertChangeType(t, records, ChangeTypeMetadata, ChangeTypeModified)
+}
+
+// A symlink that is created again has no line diff; it stays a modification.
+func TestCheckDir_RecreatedSymlinkIsModified(t *testing.T) {
+	root := t.TempDir()
+	target := "/app/link"
+
+	oldRoot := t.TempDir()
+	oldLink := filepath.Join(oldRoot, "link")
+	if err := os.Symlink("a", oldLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "app"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("b", filepath.Join(root, "app/link")); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := &state{visible: true, rootViewPath: oldLink, ckptID: "previous"}
+	var records []BlameCkptRecord
+	if _, err := checkDir(root, "/", target, prev, &records, "checkpoint-1"); err != nil {
+		t.Fatal(err)
+	}
+	assertChangeType(t, records, ChangeTypeModified)
+}
+
 func TestCheckDir_ReplaceAncestorWithRegularFile(t *testing.T) {
 	root := t.TempDir()
 	target := "/app/repl/inner.txt"
