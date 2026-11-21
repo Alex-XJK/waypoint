@@ -33,9 +33,9 @@
 # incremental_dumps value. A CSV written by an older version of the script
 # has a different header and is refused.
 #
-# Usage:  sudo ./scripts/benchmark.sh
-#         sudo env LABEL=my-change CSV=runs.csv ./scripts/benchmark.sh
-#         sudo env WAYPOINT_BIN=... BASH_INIT_BIN=... ./scripts/benchmark.sh
+# Usage:  sudo ./scripts/bench-basic.sh
+#         sudo env LABEL=my-change CSV=runs.csv ./scripts/bench-basic.sh
+#         sudo env WAYPOINT_BIN=... BASH_INIT_BIN=... ./scripts/bench-basic.sh
 set -euo pipefail
 export LC_ALL=C
 

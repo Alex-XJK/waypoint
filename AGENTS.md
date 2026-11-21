@@ -218,7 +218,7 @@ Choose validation for the affected behavior:
   related logic. `./setup test` also runs the Bash completion tests. These do not
   replace real CRIU/namespace lifecycle checks.
 - For changes to CRIU, mounts, namespaces, lifecycle, `bash_init`, or the exec
-  protocol, run `sudo ./scripts/demo.sh` as the baseline runtime check, plus focused
+  protocol, run `sudo ./scripts/test-basic.sh` as the baseline runtime check, plus focused
   coverage for the change. It rebuilds binaries and asserts CLI behavior and cleanup;
   its Dockerfile section requires Buildah and reports a skip if unavailable.
 - For changes to private network mode, also run `sudo ./scripts/test-private-network.sh`
@@ -228,7 +228,7 @@ Choose validation for the affected behavior:
   `sudo ./scripts/test-ns-last-pid.sh` (new pids after checkpoint, fork, and a
   second-generation fork stay above the restored tree's).
 - For changes to dumps, restores, or `chain.go`, also run
-  `sudo ./scripts/membench.sh` with `INCREMENTAL="0 1"`: it times checkpoints,
+  `sudo ./scripts/bench-memory.sh` with `INCREMENTAL="0 1"`: it times checkpoints,
   snapshots, and forks against a memory-heavy holder, with incremental dumps off
   and on, and asserts the holder's state after every chain. `MEM_MB=128 DEPTH=4
   FORKS=2 PATTERNS=random` is a quick check.
@@ -237,7 +237,7 @@ Choose validation for the affected behavior:
 - `sudo ./scripts/test-search-workflow.sh` adds an offline Dockerfile build, file
   transfer, concurrent branching, recursive snapshots/backtracking, export, and
   cleanup workload. Its header documents prerequisites and scaling options.
-- `sudo ./scripts/benchmark.sh` times each basic operation (median/min/max ms) for
+- `sudo ./scripts/bench-basic.sh` times each basic operation (median/min/max ms) for
   comparing hosts or spotting performance regressions; it asserts no behavior
   beyond success and cleanup.
 - Run Waypoint runtime operations as root through `sudo` or a root test harness.
@@ -248,6 +248,26 @@ Choose validation for the affected behavior:
   verify statements, examples, and links; runtime tests are unnecessary. For test
   changes, exercise the affected tests. Report commands, failures, skips, and coverage
   limits explicitly; do not describe a build or helper test as runtime validation.
+
+## Performance
+
+Waypoint's operations run on every agent step, so a change must not make them
+noticeably slower by accident.
+
+- Before committing a change to runtime code, compare the build before the change
+  with the build after it, on the same machine: `sudo ./scripts/bench-basic.sh` for
+  the basic operations, `sudo ./scripts/bench-memory.sh` for dumps and restores, and
+  `sudo env BASELINE_BIN=<waypoint before the change> ./scripts/bench-diff-blame.sh`
+  for `diff` and `blame`.
+- Run the two builds in turn (before, after, before, after, ...), several times each,
+  and compare medians. Timing one build after the other in blocks has given false
+  regressions.
+- A difference within the spread between runs of the same build, or a slight cost
+  that comes with the feature, is fine. Report the comparison in relative terms;
+  absolute numbers depend on the host and stay out of commits and pull requests.
+- If an operation gets clearly slower, stop and ask the human developer. Do not
+  decide on your own that the cost is acceptable. If the developer accepts it, the
+  commit has a body that says what got slower and why the change is worth it.
 
 ## Development notes
 
@@ -280,3 +300,7 @@ next one.
   - The README (the `full_dump_ratio` paragraphs and the sessions-dir tree) and
     `docs/architecture.md` (the `chain.go` entry and the file list) still describe
     the v0.8.0 rule.
+- **Script names.** Tests are named `test-*.sh` and benchmarks `bench-*.sh`:
+  `scripts/demo.sh` is now `scripts/test-basic.sh`, `scripts/benchmark.sh` is
+  `scripts/bench-basic.sh` and `scripts/membench.sh` is `scripts/bench-memory.sh`.
+  The README still names `scripts/demo.sh` and `scripts/benchmark.sh`.

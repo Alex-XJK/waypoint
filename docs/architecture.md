@@ -528,7 +528,7 @@ mount. **Never mount `devtmpfs` here.** It is a kernel-wide singleton
 superblock shared with the host's `/dev`; a private mount namespace isolates
 the mount table, not file contents, so mutations like the `/dev/ptmx` symlink
 swap would propagate to the host and break `forkpty(3)` for every unprivileged
-host process until reboot. `scripts/demo.sh` asserts host `/dev/ptmx` integrity
+host process until reboot. `scripts/test-basic.sh` asserts host `/dev/ptmx` integrity
 after every run to keep this invariant honest.
 
 ### `waypoint fork <session> A --id f1`

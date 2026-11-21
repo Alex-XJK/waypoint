@@ -1,4 +1,4 @@
-# Shared by benchmark.sh and membench.sh; sourced, not run. Expects REPO (the
+# Shared by the bench-*.sh scripts; sourced, not run. Expects REPO (the
 # checkout), WORK (the private temp dir), BIN (where to build), CSV and LABEL,
 # and WAYPOINT_BIN with BASH_INIT_BIN when the caller is not to build.
 #

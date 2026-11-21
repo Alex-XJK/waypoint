@@ -43,9 +43,9 @@
 # says. A CSV written by an older version of the script has a different
 # header and is refused.
 #
-# Usage:  sudo ./scripts/membench.sh
-#         sudo env MEM_MB=1024 PCT=2 PATTERNS=random ./scripts/membench.sh
-#         sudo env LABEL=my-change CSV=runs.csv ./scripts/membench.sh
+# Usage:  sudo ./scripts/bench-memory.sh
+#         sudo env MEM_MB=1024 PCT=2 PATTERNS=random ./scripts/bench-memory.sh
+#         sudo env LABEL=my-change CSV=runs.csv ./scripts/bench-memory.sh
 set -euo pipefail
 export LC_ALL=C
 

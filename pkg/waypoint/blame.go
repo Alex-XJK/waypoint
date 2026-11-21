@@ -3,12 +3,16 @@ package waypoint
 // TODO add description
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/aymanbagabas/go-udiff"
@@ -25,61 +29,14 @@ type BlameCkptRecord struct {
 	CheckpointID string     `json:"checkpoint_id"`
 	ChangeType   ChangeType `json:"change_type"`
 	LineByLine   []string   `json:"line_by_line_diff"`
+	// Binary is set when a version of the file is binary; the record then has no lines.
+	Binary bool `json:"binary,omitempty"`
 }
 
 type state struct {
 	visible      bool
 	rootViewPath string
 	ckptID       string
-}
-
-// constructFileDiff compares two files and returns their unified diff.
-func constructFileDiff(prevState, newState *state, change ChangeType) (string, error) {
-	if change == ChangeTypeAdded {
-		return constructSingleFileDiff(newState.rootViewPath, prevState.ckptID, newState.ckptID, true)
-	}
-	if change == ChangeTypeDeleted {
-		return constructSingleFileDiff(prevState.rootViewPath, prevState.ckptID, newState.ckptID, false)
-	}
-	for _, path := range []string{prevState.rootViewPath, newState.rootViewPath} {
-		info, err := os.Lstat(path)
-		if err != nil {
-			return "", fmt.Errorf("lstat file %s: %w", path, err)
-		}
-		if !info.Mode().IsRegular() {
-			return "", nil
-		}
-	}
-
-	previousContent, err := os.ReadFile(prevState.rootViewPath)
-	if err != nil {
-		return "", fmt.Errorf("read file %s: %w", prevState.rootViewPath, err)
-	}
-	newContent, err := os.ReadFile(newState.rootViewPath)
-	if err != nil {
-		return "", fmt.Errorf("read file %s: %w", newState.rootViewPath, err)
-	}
-	diff := udiff.Unified(prevState.ckptID, newState.ckptID, string(previousContent), string(newContent))
-
-	return diff, nil
-}
-
-func constructSingleFileDiff(path, prevCkptID, newCkptID string, added bool) (string, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", fmt.Errorf("lstat file %s: %w", path, err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", nil
-	}
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read file %s: %w", path, err)
-	}
-	if added {
-		return udiff.Unified(prevCkptID, newCkptID, "", string(content)), nil
-	}
-	return udiff.Unified(prevCkptID, newCkptID, string(content), ""), nil
 }
 
 func isOpaque(dir string) (bool, error) {
@@ -95,11 +52,9 @@ func isOpaque(dir string) (bool, error) {
 	return string(value[:n]) == "y", nil
 }
 
-func isWhiteout(path string) (bool, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return false, err
-	}
+// isWhiteoutInfo reports whether path, with the given Lstat result, is an
+// OverlayFS whiteout.
+func isWhiteoutInfo(path string, info os.FileInfo) (bool, error) {
 	// Whiteout represented as a character device with major/minor 0/0.
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 		if info.Mode()&os.ModeCharDevice != 0 &&
@@ -122,136 +77,314 @@ func isWhiteout(path string) (bool, error) {
 	return false, nil
 }
 
-func isDescendant(dirPath string, targetPath string) (bool, error) {
-	childPath, err := filepath.Rel(dirPath, targetPath)
-	if err != nil {
-		return false, err
-	}
-	if childPath == "." || childPath == ".." || strings.HasPrefix(childPath, ".."+string(filepath.Separator)) {
-		return false, nil
-	}
-	return true, nil
+// blameDiffBudgetBytes bounds the file content that diffs running at the same
+// time hold in memory.
+const blameDiffBudgetBytes = 64 << 20
+
+// diffBudget admits diffs while their inputs fit in blameDiffBudgetBytes. A
+// diff larger than the budget runs alone.
+type diffBudget struct {
+	mu     sync.Mutex
+	freed  *sync.Cond
+	inUse  int64
+	active int
 }
 
-func insertBlameRecord(blamed *[]BlameCkptRecord, prevState, newState *state, changeType ChangeType) error {
-	if blamed == nil {
-		return nil
-	}
-	diff, err := constructFileDiff(prevState, newState, changeType)
-	if err != nil {
-		return fmt.Errorf("construct diff for checkpoints %s, %s: %w", prevState.ckptID, newState.ckptID, err)
-	}
-	lines := []string{}
-	if diff != "" {
-		lines = strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
-	}
-
-	*blamed = append(*blamed, BlameCkptRecord{
-		CheckpointID: newState.ckptID,
-		ChangeType:   changeType,
-		LineByLine:   lines,
-	})
-	return nil
+func newDiffBudget() *diffBudget {
+	b := &diffBudget{}
+	b.freed = sync.NewCond(&b.mu)
+	return b
 }
 
-func checkDir(rootViewDir, containerViewDir, targetPath string, prevState *state, blamed *[]BlameCkptRecord, ckptID string) (bool, error) {
-	dentries, err := os.ReadDir(rootViewDir)
-	if err != nil {
-		return false, fmt.Errorf("read directory %s: %w", rootViewDir, err)
+// acquire waits until a diff reading size bytes may run and returns the
+// function that ends it.
+func (b *diffBudget) acquire(size int64) (release func()) {
+	b.mu.Lock()
+	for b.active > 0 && b.inUse+size > blameDiffBudgetBytes {
+		b.freed.Wait()
 	}
-	for _, dentry := range dentries {
-		rootViewPath := filepath.Join(rootViewDir, dentry.Name())
-		containerViewPath := filepath.Join(containerViewDir, dentry.Name())
-		if !dentry.IsDir() { //TODO won't follow symlinks, change?
-			whiteout, err := isWhiteout(rootViewPath)
-			if err != nil {
-				return false, fmt.Errorf("check whiteout %s: %w", rootViewPath, err)
-			}
-			targetDesc, err := isDescendant(containerViewPath, targetPath)
-			if err != nil {
-				return false, err
-			}
-			samePath := (containerViewPath == targetPath)
+	b.inUse += size
+	b.active++
+	b.mu.Unlock()
+	return func() {
+		b.mu.Lock()
+		b.inUse -= size
+		b.active--
+		b.mu.Unlock()
+		b.freed.Broadcast()
+	}
+}
 
-			if (targetDesc || (whiteout && samePath)) && prevState.visible {
-				newState := &state{
-					visible:      false,
-					rootViewPath: "",
-					ckptID:       ckptID,
-				}
-				if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeDeleted); err != nil {
-					return false, err
-				}
-				*prevState = *newState
-				return true, nil
-			}
-			if !whiteout && samePath {
-				newState := &state{
-					visible:      true,
-					rootViewPath: rootViewPath,
-					ckptID:       ckptID,
-				}
-				if !prevState.visible {
-					if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeAdded); err != nil {
-						return false, err
-					}
-				} else {
-					if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeModified); err != nil {
-						return false, err
-					}
-				}
-				*prevState = *newState
-				return true, nil
-			}
-		} else {
-			if containerViewPath == targetPath { // directory at the target path hides the file
-				if !prevState.visible {
-					continue
-				}
-				newState := &state{
-					visible:      false,
-					rootViewPath: "",
-					ckptID:       ckptID,
-				}
-				if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeDeleted); err != nil {
-					return false, err
-				}
-				*prevState = *newState
-				return true, nil
-			}
-			targetDescDir, err := isDescendant(containerViewPath, targetPath)
-			if err != nil {
-				return false, err
-			}
-			if !targetDescDir {
-				continue
-			}
-			foundAndUpdated, err := checkDir(rootViewPath, containerViewPath, targetPath, prevState, blamed, ckptID)
-			if err != nil {
-				return false, err
-			}
-			if foundAndUpdated {
-				return true, nil
-			}
-			opaque, err := isOpaque(rootViewPath)
-			if err != nil {
-				return false, fmt.Errorf("check opacity %s: %w", rootViewPath, err)
-			}
-			if opaque && prevState.visible {
-				newState := &state{
-					visible:      false,
-					rootViewPath: "",
-					ckptID:       ckptID,
-				}
-				if err := insertBlameRecord(blamed, prevState, newState, ChangeTypeDeleted); err != nil {
-					return false, err
-				}
-				*prevState = *newState
-				return true, nil
-			}
+// What counts as binary follows git: a NUL byte in the first 8000 bytes, or a
+// size over core.bigFileThreshold's default.
+const blameBinarySniffBytes = 8000
+
+var blameBigFileBytes int64 = 512 << 20
+
+// isBinaryFile reports whether the regular file at path, of the given size,
+// counts as binary. buf holds the bytes it looks at.
+func isBinaryFile(path string, size int64, buf []byte) (bool, error) {
+	if size > blameBigFileBytes {
+		return true, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("read file %s: %w", path, err)
+	}
+	defer file.Close()
+	n, err := io.ReadFull(file, buf[:blameBinarySniffBytes])
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return false, fmt.Errorf("read file %s: %w", path, err)
+	}
+	return bytes.IndexByte(buf[:n], 0) >= 0, nil
+}
+
+// regularSize returns the size of path and whether it is a regular file.
+func regularSize(path string) (int64, bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return 0, false, fmt.Errorf("lstat file %s: %w", path, err)
+	}
+	return info.Size(), info.Mode().IsRegular(), nil
+}
+
+// pathsDiffer reports whether two regular files differ in content.
+func pathsDiffer(prevPath, nextPath string, bufs *compareBufs) (bool, error) {
+	prevFile, err := os.Open(prevPath)
+	if err != nil {
+		return false, fmt.Errorf("open file %s: %w", prevPath, err)
+	}
+	defer prevFile.Close()
+	nextFile, err := os.Open(nextPath)
+	if err != nil {
+		return false, fmt.Errorf("open file %s: %w", nextPath, err)
+	}
+	defer nextFile.Close()
+	return openFilesDiffer(prevFile, nextFile, nextPath, bufs)
+}
+
+// readFileString reads a file into a string without a second copy.
+func readFileString(path string, size int64) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("read file %s: %w", path, err)
+	}
+	defer file.Close()
+	var content strings.Builder
+	content.Grow(int(size))
+	if _, err := io.Copy(&content, file); err != nil {
+		return "", fmt.Errorf("read file %s: %w", path, err)
+	}
+	return content.String(), nil
+}
+
+// buildBlameRecord turns an event into its record, with the change as
+// unified-diff lines. A layer that holds a regular file with unchanged
+// content changed only its metadata. A change to or from a binary version is
+// reported without lines, as git log -p does.
+func buildBlameRecord(event *blameEvent, bufs *compareBufs, budget *diffBudget) (BlameCkptRecord, error) {
+	record := BlameCkptRecord{CheckpointID: event.next.ckptID, ChangeType: event.change, LineByLine: []string{}}
+	fail := func(err error) (BlameCkptRecord, error) {
+		return BlameCkptRecord{}, fmt.Errorf("construct diff for checkpoints %s, %s: %w", event.prev.ckptID, event.next.ckptID, err)
+	}
+
+	var prevSize, nextSize int64
+	var prevRegular, nextRegular bool
+	var err error
+	if event.change != ChangeTypeAdded {
+		if prevSize, prevRegular, err = regularSize(event.prev.rootViewPath); err != nil {
+			return fail(err)
 		}
 	}
-	return false, nil
+	if event.change != ChangeTypeDeleted {
+		if nextSize, nextRegular, err = regularSize(event.next.rootViewPath); err != nil {
+			return fail(err)
+		}
+	}
+	switch event.change {
+	case ChangeTypeAdded:
+		if !nextRegular {
+			return record, nil
+		}
+	case ChangeTypeDeleted:
+		if !prevRegular {
+			return record, nil
+		}
+	default:
+		if !prevRegular || !nextRegular {
+			return record, nil
+		}
+		differ, err := pathsDiffer(event.prev.rootViewPath, event.next.rootViewPath, bufs)
+		if err != nil {
+			return fail(err)
+		}
+		if !differ {
+			record.ChangeType = ChangeTypeMetadata
+			return record, nil
+		}
+	}
+
+	for _, version := range []struct {
+		path    string
+		size    int64
+		regular bool
+	}{
+		{event.prev.rootViewPath, prevSize, prevRegular},
+		{event.next.rootViewPath, nextSize, nextRegular},
+	} {
+		if !version.regular {
+			continue
+		}
+		binary, err := isBinaryFile(version.path, version.size, bufs.left)
+		if err != nil {
+			return fail(err)
+		}
+		if binary {
+			record.Binary = true
+			return record, nil
+		}
+	}
+
+	defer budget.acquire(prevSize + nextSize)()
+	var prevText, nextText string
+	if prevRegular {
+		if prevText, err = readFileString(event.prev.rootViewPath, prevSize); err != nil {
+			return fail(err)
+		}
+	}
+	if nextRegular {
+		if nextText, err = readFileString(event.next.rootViewPath, nextSize); err != nil {
+			return fail(err)
+		}
+	}
+	if diff := udiff.Unified(event.prev.ckptID, event.next.ckptID, prevText, nextText); diff != "" {
+		record.LineByLine = strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
+	}
+	return record, nil
+}
+
+// buildBlameRecords builds the records of events, in order, on up to
+// compareWorkers goroutines.
+func buildBlameRecords(events []*blameEvent) ([]BlameCkptRecord, error) {
+	records := make([]BlameCkptRecord, len(events))
+	errs := make([]error, len(events))
+	budget := newDiffBudget()
+	var next atomic.Int64
+	var failed atomic.Bool
+	var wg sync.WaitGroup
+	for range min(compareWorkers, len(events)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			bufs := newCompareBufs()
+			for !failed.Load() {
+				i := int(next.Add(1)) - 1
+				if i >= len(events) {
+					return
+				}
+				if records[i], errs[i] = buildBlameRecord(events[i], bufs, budget); errs[i] != nil {
+					failed.Store(true)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return records, nil
+}
+
+// layerEntry is what one layer holds at the target path.
+type layerEntry int
+
+const (
+	layerUntouched layerEntry = iota // nothing at the target path
+	layerHidden                      // a whiteout, an opaque directory or a non-directory on the path, or a directory at it
+	layerPresent                     // a file, symlink or other non-directory at the target path
+)
+
+// lookupLayer reports what the layer rooted at layerRoot holds at targetPath,
+// and the entry's host path for layerPresent. It walks the path one component
+// at a time and stops at the first that is not a directory, so it follows no
+// symlink.
+func lookupLayer(layerRoot, targetPath string) (layerEntry, string, error) {
+	components := strings.Split(strings.TrimPrefix(targetPath, "/"), "/")
+	path := layerRoot
+	var ancestors []string // the layer's directories above the target, outermost first
+	for i, name := range components {
+		path = filepath.Join(path, name)
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			// An opaque directory above the missing entry hides the lower layers.
+			for j := len(ancestors) - 1; j >= 0; j-- {
+				opaque, err := isOpaque(ancestors[j])
+				if err != nil {
+					return layerUntouched, "", fmt.Errorf("check opacity %s: %w", ancestors[j], err)
+				}
+				if opaque {
+					return layerHidden, "", nil
+				}
+			}
+			return layerUntouched, "", nil
+		}
+		if err != nil {
+			return layerUntouched, "", fmt.Errorf("lstat %s: %w", path, err)
+		}
+
+		last := i == len(components)-1
+		if info.IsDir() {
+			if last {
+				return layerHidden, "", nil
+			}
+			ancestors = append(ancestors, path)
+			continue
+		}
+		if !last {
+			return layerHidden, "", nil
+		}
+		whiteout, err := isWhiteoutInfo(path, info)
+		if err != nil {
+			return layerUntouched, "", fmt.Errorf("check whiteout %s: %w", path, err)
+		}
+		if whiteout {
+			return layerHidden, "", nil
+		}
+		return layerPresent, path, nil
+	}
+	return layerUntouched, "", nil
+}
+
+// blameEvent is a change that one layer makes to the target path.
+type blameEvent struct {
+	prev, next state
+	change     ChangeType
+}
+
+// advance applies the layer rooted at layerRoot to st, the target's state
+// below that layer, and returns the change the layer makes, or nil.
+func advance(st *state, layerRoot, ckptID, targetPath string) (*blameEvent, error) {
+	entry, hostPath, err := lookupLayer(layerRoot, targetPath)
+	if err != nil {
+		return nil, err
+	}
+	var next state
+	var change ChangeType
+	switch {
+	case entry == layerPresent && st.visible:
+		next, change = state{visible: true, rootViewPath: hostPath, ckptID: ckptID}, ChangeTypeModified
+	case entry == layerPresent:
+		next, change = state{visible: true, rootViewPath: hostPath, ckptID: ckptID}, ChangeTypeAdded
+	case entry == layerHidden && st.visible:
+		next, change = state{ckptID: ckptID}, ChangeTypeDeleted
+	default:
+		return nil, nil
+	}
+	event := &blameEvent{prev: *st, next: next, change: change}
+	*st = next
+	return event, nil
 }
 
 // very similar to diff.go normalizeTargetDir, refactor?
@@ -286,8 +419,6 @@ func (m *Manager) PrintBlame(ckptID, path string) error {
 		return err
 	}
 
-	blamedCkpts := make([]BlameCkptRecord, 0)
-
 	ckptIDs := append([]string(nil), metadata.LayerIDs...)
 	originalDir := metadata.OriginalDir
 	// first check through original dir to set up visibility of target path
@@ -296,17 +427,23 @@ func (m *Manager) PrintBlame(ckptID, path string) error {
 		rootViewPath: "",
 		ckptID:       "original",
 	}
-	_, err = checkDir(originalDir, "/", normalizedTargetPath, state, nil, "original")
-	if err != nil {
+	if _, err := advance(state, originalDir, "original", normalizedTargetPath); err != nil {
 		return err
 	}
-	// then advance through checkpoint layers, blaming
+	// then advance through checkpoint layers, collecting what each did to the target
+	var events []*blameEvent
 	for _, ckptID := range ckptIDs {
-		upperDirPath := m.checkpointUpperDir(ckptID)
-		_, err := checkDir(upperDirPath, "/", normalizedTargetPath, state, &blamedCkpts, ckptID)
+		event, err := advance(state, m.checkpointUpperDir(ckptID), ckptID, normalizedTargetPath)
 		if err != nil {
 			return err
 		}
+		if event != nil {
+			events = append(events, event)
+		}
+	}
+	blamedCkpts, err := buildBlameRecords(events)
+	if err != nil {
+		return err
 	}
 
 	result := BlameResult{

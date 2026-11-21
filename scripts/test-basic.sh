@@ -14,7 +14,7 @@
 #   - Go toolchain
 #   - buildah, optionally: without it the image ENV/WORKDIR section is skipped
 #
-# Usage:  sudo ./scripts/demo.sh
+# Usage:  sudo ./scripts/test-basic.sh
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -95,7 +95,7 @@ for cand in /usr/local/go/bin/go "$HOME/go/bin/go" "/home/$SUDO_USER/go/bin/go";
   [ -n "$GO" ] && break
   [ -x "$cand" ] && GO="$cand"
 done
-[ -n "$GO" ] || { echo "go toolchain not found on PATH; set it or run: PATH=/usr/local/go/bin:\$PATH sudo -E ./scripts/demo.sh"; exit 1; }
+[ -n "$GO" ] || { echo "go toolchain not found on PATH; set it or run: PATH=/usr/local/go/bin:\$PATH sudo -E ./scripts/test-basic.sh"; exit 1; }
 mkdir -p "$BIN"
 ( cd "$REPO"
   env GOCACHE="$GOCACHE" "$GO" build -o "$BIN/waypoint" ./cmd/waypoint
