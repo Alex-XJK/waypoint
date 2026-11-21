@@ -271,48 +271,14 @@ func normalizePath(targetDir string) (string, error) {
 
 // Entry point for blame
 func (m *Manager) PrintBlame(ckptID, path string) error {
-	if err := validateCheckpointID(ckptID); err != nil {
-		return fmt.Errorf("invalid checkpoint ID %s: %w", ckptID, err)
-	}
-	metadata, err := m.loadMetadata(ckptID)
-	if err != nil {
-		return fmt.Errorf("failed to read metadata for checkpoint %s: %w", ckptID, err)
-	}
-	if metadata.Status != CheckpointStatusReady {
-		return fmt.Errorf("checkpoint %s is not ready (status: %s)", ckptID, metadata.Status)
-	}
-	normalizedTargetPath, err := normalizePath(path)
+	chain, err := m.loadBlameChain(ckptID)
 	if err != nil {
 		return err
 	}
-
-	blamedCkpts := make([]BlameCkptRecord, 0)
-
-	ckptIDs := append([]string(nil), metadata.LayerIDs...)
-	originalDir := metadata.OriginalDir
-	// first check through original dir to set up visibility of target path
-	state := &state{
-		visible:      false,
-		rootViewPath: "",
-		ckptID:       "original",
-	}
-	_, err = checkDir(originalDir, "/", normalizedTargetPath, state, nil, "original")
+	// the walk sets up the path's visibility in the original rootfs, then blames each layer
+	result, err := chain.blame(m, path)
 	if err != nil {
 		return err
-	}
-	// then advance through checkpoint layers, blaming
-	for _, ckptID := range ckptIDs {
-		upperDirPath := m.checkpointUpperDir(ckptID)
-		_, err := checkDir(upperDirPath, "/", normalizedTargetPath, state, &blamedCkpts, ckptID)
-		if err != nil {
-			return err
-		}
-	}
-
-	result := BlameResult{
-		TargetPath:   normalizedTargetPath,
-		TargetCkptID: ckptID,
-		Records:      blamedCkpts,
 	}
 
 	enc := json.NewEncoder(os.Stdout)
